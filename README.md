@@ -26,8 +26,8 @@ dialog. `FLOW_CONTROLLER_UI_CONFIG` overrides the file location.
 ### Per-meter full scale and ramp rate
 
 Each controller card on *Operation & Monitoring* draws a bar tracking flow
-against setpoint. Under that bar are the two figures that describe the meter
-itself: **FULL SCALE** and **RAMP**.
+against setpoint. Under that bar, on one row, are the settings that describe the
+meter itself: **FULL SCALE**, then **RAMP** and its **OFF** latch.
 
 Both are properties of the device and the plumbing behind it rather than of a
 session — unit `C` is the same 50 SLPM meter tomorrow morning as it was last
@@ -68,6 +68,19 @@ controller travel at its own pace. The pilot and the two air lines are the
 exception: they are never stepped, so with no rate declared a setpoint sent to
 them is still spread over ten seconds — the same twenty half-second steps as
 earlier builds. They can be told to move *slower* than that but never faster.
+
+**OFF**, the latch beside the rate, is how that exception is lifted. It turns
+ramping off for that controller altogether: no rate, and no minimum move time
+either, so every setpoint written to that unit goes out in a single write —
+typed, batched, sequenced or replayed — whatever line it is driving and whatever
+figure is left in the rate box. On the pilot or on either air line **this
+removes a protection**, and the ten-second floor is there because a step edge on
+those lines is a flame risk rather than a matter of taste. It latches red while
+it is on, greys the rate box out beside it so the figure in there cannot be
+mistaken for something in force, writes a line to the system log saying so, and
+is remembered per unit between runs like the other declarations. Turning it back
+off restores whatever rate was typed. It is a deliberate, visible state rather
+than a rate of zero, which only ever meant *no rate declared*.
 
 ### Sequences: record, edit, replay, repeat
 

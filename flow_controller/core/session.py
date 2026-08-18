@@ -486,6 +486,39 @@ class FlowSession(QObject):
         self.unit_ramp_changed.emit(unit, cleaned)
         return cleaned
 
+    def ramp_disabled_for(self, unit):
+        """True when the operator has turned ramping off on this controller."""
+        return bool(self.pref_for(unit, 'ramp_off'))
+
+    def set_ramp_disabled(self, unit, off):
+        """Turn this controller's ramping off outright, or back on.
+
+        This is a bigger thing than clearing the rate.  No rate means "no pace
+        of your own", and the pilot and the two air lines are still walked over
+        :data:`MANUAL_RAMP_S` because a step edge on those lines is a flame
+        risk rather than a matter of taste.  Off means off: every setpoint
+        written to this unit goes out in one write, on any line, including
+        those.  It is stored per unit and remembered between runs like the
+        other declarations, so it is logged loudly enough to be found later.
+        """
+        cleaned = self._set_pref(
+            unit, 'ramp_off', off,
+            lambda flag: (f"Unit {unit}: RAMPING OFF -- setpoints are written "
+                          f"straight out, with no rate and no minimum move "
+                          f"time, on whatever line this unit is driving."
+                          if flag else
+                          f"Unit {unit}: ramping back on."))
+        # The rate in force is what the rest of the application cares about,
+        # and while ramping is off that is nothing, whatever figure is stored.
+        self.unit_ramp_changed.emit(unit, self.effective_ramp_rate(unit))
+        return bool(cleaned)
+
+    def effective_ramp_rate(self, unit):
+        """The rate actually pacing this unit: ``None`` while ramping is off."""
+        if self.ramp_disabled_for(unit):
+            return None
+        return self.ramp_rate_for(unit)
+
     def ramp_seconds_for(self, unit, key, journey):
         """How long a move of ``journey`` SLPM on this line should take.
 
@@ -498,8 +531,14 @@ class FlowSession(QObject):
         a pilot inherits the protection with the job.
 
         Zero means "write it straight out", which is what an undeclared rate on
-        an ordinary line has always done.
+        an ordinary line has always done -- and what ramping turned off means
+        on any line at all, protected or not.
         """
+        # Checked before the floor below rather than after it: turning ramping
+        # off is the one way to defeat the protection, which is why it is a
+        # deliberate per-unit declaration and not a rate of zero.
+        if self.ramp_disabled_for(unit):
+            return 0.0
         seconds = 0.0
         rate = self.ramp_rate_for(unit)
         if rate:
@@ -1944,11 +1983,18 @@ class FlowSession(QObject):
         self.sequence = sequence
         self._player = SequencePlayer(
             sequence, bound, self.queue_setpoint, log=self._log,
-            rate_limited=roles.RAMP_KEYS, repeats=repeats,
+            # Same rule as a typed setpoint: a line whose unit has ramping
+            # turned off drops out of the protected set for this replay too,
+            # or the sequence would pace a line the card says not to.
+            rate_limited=frozenset(
+                key for key in roles.RAMP_KEYS
+                if not self.ramp_disabled_for(bound.get(key))),
+            repeats=repeats,
             # A replay is paced by the same figure on the controller's card
             # that paces a typed setpoint, so a line that the operator has
             # slowed down stays slow however the setpoint arrives.
-            rate_lookup=lambda track: self.ramp_rate_for(bound.get(track.key)))
+            rate_lookup=lambda track: self.effective_ramp_rate(
+                bound.get(track.key)))
         self._player.prime()
         self._replay_started_at = time.monotonic()
         self._replay_last_tick = self._replay_started_at

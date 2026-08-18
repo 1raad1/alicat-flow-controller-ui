@@ -1,11 +1,17 @@
 """Per-controller settings the operator declares, remembered between runs.
 
-Two numbers, both properties of the device or the line rather than of a session:
+Three declarations, all properties of the device or the line rather than of a
+session:
 
 * ``full_scale`` -- the meter's full scale in SLPM, which sets the span of the
   tracking bar.  The instruments do not report it over the wire.
 * ``ramp`` -- how fast that line is allowed to move, in SLPM per second, applied
   to every setpoint the application writes to it.
+* ``ramp_off`` -- ramping turned off outright.  Not the same thing as an absent
+  ``ramp``: no rate only means none was typed, and the application still holds
+  the pilot and air lines to a minimum move time of its own.  This flag is the
+  operator saying that this controller takes its setpoints exactly as written,
+  and it is deliberately a separate field so that saying it has to be an act.
 
 Unit ``C`` is the same 50 SLPM meter tomorrow morning as it was last night, and
 the line it feeds takes the same time to settle, so both are declared once and
@@ -36,8 +42,18 @@ MAX_FULL_SCALE = 10000.0
 #: arrives inside one polling interval, which is what "no limit" already means.
 MAX_RAMP_RATE = 1000.0
 
-#: The fields a unit's record may hold, and the ceiling each is held to.
+#: The figures a unit's record may hold, and the ceiling each is held to.
 CEILINGS = {'full_scale': MAX_FULL_SCALE, 'ramp': MAX_RAMP_RATE}
+
+#: The fields that are a declaration rather than a figure.  Only ``True`` is
+#: ever stored -- "not turned off" is the absence of the field -- so a record
+#: that has never been touched stays absent from the file entirely.
+FLAGS = ('ramp_off',)
+
+#: What counts as a yes when the file has been edited by hand.  Anything else
+#: -- ``false``, ``0``, a typo -- reads as not declared, which is the state that
+#: keeps the application's own pacing in force.
+TRUTHS = frozenset({'1', 'true', 'yes', 'on'})
 
 
 def path():
@@ -65,8 +81,23 @@ def clean(value, ceiling=MAX_FULL_SCALE):
     return min(number, float(ceiling))
 
 
+def clean_flag(value):
+    """One declaration: ``True``, or ``None`` for "not declared".
+
+    ``False`` and ``None`` come back the same way on purpose.  A flag that is
+    not set is a flag that is not in the file, so turning one back off through
+    :meth:`~flow_controller.core.session.FlowSession._set_pref` removes it
+    rather than writing a ``false`` that would have to be read again later.
+    """
+    if isinstance(value, str):
+        return True if value.strip().lower() in TRUTHS else None
+    return True if value else None
+
+
 def clean_field(field, value):
-    """Clean ``value`` against the ceiling that belongs to ``field``."""
+    """Clean ``value`` against whatever rule belongs to ``field``."""
+    if field in FLAGS:
+        return clean_flag(value)
     if field not in CEILINGS:
         return None
     return clean(value, CEILINGS[field])
@@ -87,6 +118,9 @@ def clean_record(raw):
         number = clean_field(field, raw.get(field))
         if number is not None:
             record[field] = number
+    for field in FLAGS:
+        if clean_flag(raw.get(field)):
+            record[field] = True
     return record
 
 
@@ -115,8 +149,9 @@ def save(prefs, store_path=None):
     for unit, record in prefs.items():
         cleaned = clean_record(record)
         if cleaned:
-            payload[str(unit)] = {field: round(value, 4)
-                                  for field, value in cleaned.items()}
+            payload[str(unit)] = {
+                field: (value if field in FLAGS else round(value, 4))
+                for field, value in cleaned.items()}
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open('w', encoding='utf-8') as handle:
