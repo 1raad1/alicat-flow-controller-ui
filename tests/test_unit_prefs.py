@@ -4,9 +4,12 @@ The file that backs this module is meant to survive a missing directory, a
 half-written file, or a stray edit by hand.  These tests lean on that: they
 throw garbage at ``load`` and expect ``{}`` back, not an exception.
 
-Two fields share the file -- a meter's full scale and its ramp rate -- so most
-of what is worth checking is that they are held to their own ceilings and that
-one of them going missing does not take the other with it.
+Three declarations share the file -- a meter's full scale, its ramp rate, and
+whether its ramping is off outright -- so most of what is worth checking is that
+the figures are held to their own ceilings, that one of them going missing does
+not take the others with it, and that the flag is never confused with a rate of
+zero: no rate means "none typed", and the application still paces the lines it
+must not step, whereas the flag means it does not.
 """
 
 import json
@@ -229,6 +232,87 @@ class SaveTests(unittest.TestCase):
             self.fail(f'save() raised instead of reporting an error: {exc!r}')
         self.assertIsInstance(result, str)
         self.assertTrue(result)
+
+
+class RampOffFlagTests(unittest.TestCase):
+    """The declaration that turns a controller's ramping off outright.
+
+    It is a separate field rather than a rate of zero because zero already
+    means "no rate declared", which is the state in which the application
+    still walks the pilot and air lines over a minimum move time.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.store = Path(self.tmpdir.name) / 'unit_prefs.json'
+
+    def test_a_yes_in_any_of_its_forms_is_a_yes(self):
+        for value in (True, 1, 'true', 'TRUE', ' yes ', 'on', '1'):
+            self.assertIs(unit_prefs.clean_flag(value), True, repr(value))
+
+    def test_anything_that_is_not_a_yes_is_not_declared(self):
+        # ``False`` and "never set" are deliberately the same state: the flag
+        # is only ever written when it is on.
+        for value in (False, None, 0, '', 'false', 'no', 'off', 'maybe'):
+            self.assertIsNone(unit_prefs.clean_flag(value), repr(value))
+
+    def test_the_flag_is_cleaned_by_field_name_rather_than_by_ceiling(self):
+        self.assertIs(unit_prefs.clean_field('ramp_off', True), True)
+        self.assertIsNone(unit_prefs.clean_field('ramp_off', False))
+        self.assertIn('ramp_off', unit_prefs.FLAGS)
+        self.assertNotIn('ramp_off', unit_prefs.CEILINGS)
+
+    def test_a_record_keeps_the_flag_alongside_the_figures(self):
+        self.assertEqual(
+            unit_prefs.clean_record({'full_scale': 50, 'ramp': 2.5,
+                                     'ramp_off': True}),
+            {'full_scale': 50.0, 'ramp': 2.5, 'ramp_off': True})
+
+    def test_the_flag_survives_on_its_own_without_a_rate(self):
+        # Ramping off with no rate typed is the ordinary case: the operator
+        # never declared a rate and now wants the floor gone too.
+        self.assertEqual(unit_prefs.clean_record({'ramp_off': True}),
+                         {'ramp_off': True})
+
+    def test_a_rate_of_zero_does_not_turn_ramping_off(self):
+        self.assertEqual(unit_prefs.clean_record({'ramp': 0}), {})
+
+    def test_a_flag_that_is_off_leaves_no_trace_in_the_record(self):
+        self.assertEqual(
+            unit_prefs.clean_record({'ramp': 2.5, 'ramp_off': False}),
+            {'ramp': 2.5})
+
+    def test_the_flag_round_trips_through_the_file_as_a_boolean(self):
+        prefs = {'A': {'ramp': 2.5, 'ramp_off': True}}
+        self.assertIsNone(unit_prefs.save(prefs, store_path=self.store))
+        raw = json.loads(self.store.read_text(encoding='utf-8'))
+        # Not 1.0: rounding a flag like a figure would put a number in the
+        # file that reads back as truthy but no longer says what it means.
+        self.assertIs(raw['A']['ramp_off'], True)
+        self.assertEqual(unit_prefs.load(store_path=self.store), prefs)
+
+    def test_a_unit_that_is_only_turned_off_still_reaches_the_file(self):
+        unit_prefs.save({'A': {'ramp_off': True}}, store_path=self.store)
+        self.assertEqual(unit_prefs.load(store_path=self.store),
+                         {'A': {'ramp_off': True}})
+
+    def test_a_false_flag_is_not_written_out(self):
+        unit_prefs.save({'A': {'full_scale': 50.0, 'ramp_off': False}},
+                        store_path=self.store)
+        raw = json.loads(self.store.read_text(encoding='utf-8'))
+        self.assertEqual(raw, {'A': {'full_scale': 50.0}})
+
+    def test_a_hand_edited_file_reads_the_obvious_yeses(self):
+        self.store.write_text(json.dumps({'A': {'ramp_off': 'true'},
+                                          'B': {'ramp_off': 'false'},
+                                          'C': {'ramp_off': 1}}),
+                              encoding='utf-8')
+        self.assertEqual(unit_prefs.load(store_path=self.store),
+                         {'A': {'ramp_off': True}, 'C': {'ramp_off': True}})
+
+    def test_the_flag_does_not_disturb_the_legacy_bare_number_form(self):
+        self.assertEqual(unit_prefs.clean_record(50), {'full_scale': 50.0})
 
 
 class PathTests(unittest.TestCase):

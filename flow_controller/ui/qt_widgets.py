@@ -555,9 +555,12 @@ class UnitCard(QFrame):
     full_scale_requested = Signal(object, float)
     #: Unit and the ramp rate the operator typed in SLPM/s, ``0.0`` for none.
     ramp_rate_requested = Signal(object, float)
+    #: Unit and whether the operator has turned this line's ramping off.
+    ramp_off_requested = Signal(object, bool)
 
     def __init__(self, unit, gas_name, color, full_scale, caption=None,
-                 declared_scale=None, declared_ramp=None, parent=None):
+                 declared_scale=None, declared_ramp=None,
+                 declared_ramp_off=False, parent=None):
         super().__init__(parent)
         self._unit = unit
         self._full_scale = full_scale
@@ -613,15 +616,16 @@ class UnitCard(QFrame):
         self._bar = FlowBar(color)
         flow_block.addWidget(self._bar)
 
-        # The two figures the instrument cannot tell us, declared per meter and
-        # remembered between runs: how far its bar reaches, and how fast its
-        # line is allowed to move.  They sit under the bar rather than out among
-        # the readings because the reading columns cannot scroll sideways -- a
-        # control parked there widens every card, and past the column width
-        # there is no way to reach it.  A grid, so the two boxes line up as one
-        # small block of settings rather than two loose rows; spin boxes rather
-        # than a dialog, because the full scale is on the sticker on the front
-        # of the meter and reading it off should be one gesture.
+        # The things the instrument cannot tell us, declared per meter and
+        # remembered between runs: how far its bar reaches, and how fast -- or
+        # whether -- its line is paced.  They sit under the bar rather than out
+        # among the readings because the reading columns cannot scroll sideways
+        # -- a control parked there widens every card, and past the column
+        # width there is no way to reach it.  One row, scale then ramp, so the
+        # block reads as a single line of settings under the bar rather than a
+        # stack that pushes the card taller; spin boxes rather than a dialog,
+        # because the full scale is on the sticker on the front of the meter
+        # and reading it off should be one gesture.
         prefs_grid = QGridLayout()
         prefs_grid.setHorizontalSpacing(5)
         prefs_grid.setVerticalSpacing(2)
@@ -649,7 +653,12 @@ class UnitCard(QFrame):
         prefs_grid.addWidget(self.scale_spin, 0, 1)
         prefs_grid.addWidget(label('SLPM', color=theme.TEXT_DIM, size=7), 0, 2)
 
-        prefs_grid.addWidget(label('RAMP', color=theme.TEXT_DIM, size=7), 1, 0)
+        ramp_caption = label('RAMP', color=theme.TEXT_DIM, size=7)
+        # The gap that separates the two settings.  A spacer column would have
+        # to be given a minimum width, and a fixed column in this grid is what
+        # widened every card the last time this block was laid out.
+        ramp_caption.setContentsMargins(theme.PAD_MD, 0, 0, 0)
+        prefs_grid.addWidget(ramp_caption, 0, 3)
         self.ramp_spin = QDoubleSpinBox()
         self.ramp_spin.setRange(0.0, unit_prefs.MAX_RAMP_RATE)
         self.ramp_spin.setDecimals(2)
@@ -666,11 +675,38 @@ class UnitCard(QFrame):
             "recording. 'step' writes the setpoint in one go and lets the "
             "controller travel at its own pace.")
         self.ramp_spin.valueChanged.connect(self._emit_ramp_rate)
-        prefs_grid.addWidget(self.ramp_spin, 1, 1)
+        prefs_grid.addWidget(self.ramp_spin, 0, 4)
         prefs_grid.addWidget(label('SLPM/s', color=theme.TEXT_DIM, size=7),
-                             1, 2)
+                             0, 5)
 
-        prefs_grid.setColumnStretch(3, 1)
+        # Ramping off outright, which is not the same as no rate: with no rate
+        # this application still walks the pilot and the two air lines over a
+        # minimum move time, because a step edge on those is a flame risk.  Off
+        # defeats that as well, so it is a latch that goes red rather than
+        # another number, and the rate box greys out beside it to say plainly
+        # that whatever figure is in it is not in force.
+        self.ramp_off_btn = QPushButton('OFF')
+        self.ramp_off_btn.setCheckable(True)
+        self.ramp_off_btn.setProperty('density', 'compact')
+        self.ramp_off_btn.setFixedWidth(theme.scale(38))
+        self.ramp_off_btn.setToolTip(
+            "Turn ramping off for this controller altogether. Setpoints are "
+            "then written in one go whatever rate is typed beside this -- "
+            "including on the pilot and the two air lines, which are never "
+            "otherwise stepped. Remembered between runs.")
+        self.ramp_off_btn.toggled.connect(self._on_ramp_off_toggled)
+        prefs_grid.addWidget(self.ramp_off_btn, 0, 6)
+        self.set_ramp_disabled(declared_ramp_off)
+
+        # Left to their own hints the two boxes are wide enough to push the
+        # card past the width of the column it lives in, and neither operation
+        # column scrolls sideways.  A minimum they may shrink to, a maximum
+        # they may not grow past, and the stretch beyond the last column, so
+        # spare width goes to the empty space rather than into the controls.
+        for spin in (self.scale_spin, self.ramp_spin):
+            spin.setMinimumWidth(theme.scale(66))
+            spin.setMaximumWidth(theme.scale(84))
+        prefs_grid.setColumnStretch(7, 1)
         flow_block.addLayout(prefs_grid)
 
         flow_holder = QWidget()
@@ -777,6 +813,24 @@ class UnitCard(QFrame):
             return
         self.ramp_rate_requested.emit(self._unit, float(value))
 
+    def _on_ramp_off_toggled(self, checked):
+        self._apply_ramp_off(bool(checked))
+        if self._ramp_guard:
+            return
+        self.ramp_off_requested.emit(self._unit, bool(checked))
+
+    def _apply_ramp_off(self, off):
+        """Dress the ramp controls for the state they are actually in."""
+        self.ramp_spin.setEnabled(not off)
+        # Red while ramping is off: this is the one control on the card that
+        # takes a protection away rather than changing a number, and it should
+        # not look like the rest of the settings while it is doing that.
+        self.ramp_off_btn.setProperty('variant', 'danger' if off else 'quiet')
+        # A property a stylesheet selects on is read at polish time, so the
+        # widget has to be told to look again.
+        self.ramp_off_btn.style().unpolish(self.ramp_off_btn)
+        self.ramp_off_btn.style().polish(self.ramp_off_btn)
+
     def set_caption(self, text):
         """Replace the line under the gas name."""
         self._caption.setText(text)
@@ -797,6 +851,17 @@ class UnitCard(QFrame):
             self.ramp_spin.setValue(float(rate or 0.0))
         finally:
             self._ramp_guard = False
+
+    def set_ramp_disabled(self, off):
+        """Show a ramp-off state set elsewhere, without re-announcing it."""
+        self._ramp_guard = True
+        try:
+            self.ramp_off_btn.setChecked(bool(off))
+        finally:
+            self._ramp_guard = False
+        # ``setChecked`` only fires when the state actually changes, and this
+        # is also the call that dresses a card built already off.
+        self._apply_ramp_off(bool(off))
 
     def set_scale(self, scale):
         """Re-scale the tracking bar from what the run is asking for.

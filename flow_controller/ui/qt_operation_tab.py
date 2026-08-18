@@ -828,11 +828,14 @@ class OperationTab(QWidget):
         card = UnitCard(meta.unit, meta.gas or '?', color, scale,
                         caption=caption,
                         declared_scale=self.session.full_scale_for(meta.unit),
-                        declared_ramp=self.session.ramp_rate_for(meta.unit))
+                        declared_ramp=self.session.ramp_rate_for(meta.unit),
+                        declared_ramp_off=self.session.ramp_disabled_for(
+                            meta.unit))
         card.setToolTip(f'{meta.label} — unit {meta.unit}')
         card.setpoint_requested.connect(self._on_setpoint)
         card.full_scale_requested.connect(self._on_full_scale)
         card.ramp_rate_requested.connect(self._on_ramp_rate)
+        card.ramp_off_requested.connect(self._on_ramp_off)
         self._cards_layout.addWidget(card)
         self._cards[meta.unit] = card
         self._card_keys[meta.unit] = meta.key
@@ -884,6 +887,17 @@ class OperationTab(QWidget):
         card = self._cards.get(unit)
         if card is not None:
             card.set_declared_ramp(self.session.ramp_rate_for(unit))
+
+    def _on_ramp_off(self, unit, off):
+        """The operator turned this controller's ramping off, or back on.
+
+        The stored rate is left alone: turning ramping back on should bring
+        back the figure that was typed, not leave the operator to remember it.
+        """
+        self.session.set_ramp_disabled(unit, off)
+        card = self._cards.get(unit)
+        if card is not None:
+            card.set_ramp_disabled(self.session.ramp_disabled_for(unit))
 
     # ------------------------------------------------------------------ #
     #  Live updates                                                       #
