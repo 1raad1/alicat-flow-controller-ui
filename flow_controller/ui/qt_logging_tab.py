@@ -215,12 +215,11 @@ class LoggingTab(QWidget):
 
     # -- displayed series ------------------------------------------------ #
     def _card_series(self):
-        card = Card('Displayed Series', index=1)
-        card.add(_wrapped('Choose controllers and measurements to plot. '
-                          'Collection and CSV logging are unaffected — '
-                          'nothing here changes what is recorded.',
-                          color=theme.TEXT_DIM, size=8))
-        card.add_spacing(theme.PAD_SM)
+        card = Card(
+            'Displayed Series', index=1,
+            help_text=('Choose which controllers and measurements appear on '
+                       'the live plots. History collection and CSV logging are '
+                       'unaffected; nothing here changes what is recorded.'))
 
         self._grid_holder = QWidget()
         self._grid = QGridLayout(self._grid_holder)
@@ -331,7 +330,11 @@ class LoggingTab(QWidget):
 
     # -- axis limits ----------------------------------------------------- #
     def _card_axes(self):
-        card = Card('Axis Limits', index=2)
+        card = Card(
+            'Axis Limits', index=2,
+            help_text=('Leave an axis on Auto to follow its data, or untick '
+                       'Auto and enter fixed minimum and maximum values. Reset '
+                       'Auto restores automatic scaling for every axis.'))
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(theme.PAD_SM)
@@ -414,7 +417,12 @@ class LoggingTab(QWidget):
 
     # -- history and export ---------------------------------------------- #
     def _card_history(self):
-        card = Card('History & Export', index=3)
+        card = Card(
+            'History & Export', index=3,
+            help_text=('Set how many monitoring samples remain in memory, '
+                       'export every stored sample for every assigned '
+                       'controller, or clear the retained history. Export is '
+                       'not limited to the currently displayed series.'))
         self._limit_entry = QLineEdit(str(self.session.history.limit))
         self._limit_entry.setFixedWidth(theme.scale(66))
         limit_btn = QPushButton('Apply')
@@ -433,10 +441,6 @@ class LoggingTab(QWidget):
         clear.setProperty('density', 'compact')
         clear.clicked.connect(lambda: self._clear())
         card.add(row(export, clear, None))
-        card.add_spacing(theme.PAD_XS)
-        card.add(_wrapped('Export writes every stored sample for every '
-                          'assigned controller, not only the ticked series.',
-                          color=theme.TEXT_DIM, size=8))
         return card
 
     def _apply_limit(self):

@@ -508,15 +508,6 @@ class GasTableDialog(QDialog):
         self._list.setFont(mono(9))
         self._list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        self._list.setStyleSheet(
-            f"QListWidget {{ background-color: rgba(0, 0, 0, 92);"
-            f" border: 1px solid rgba(255, 255, 255, 22);"
-            f" border-radius: {theme.RADIUS_CONTROL}px; padding: 4px;"
-            f" color: {theme.TEXT}; outline: none; }}"
-            f"QListWidget::item {{ padding: 4px 6px;"
-            f" border-radius: {theme.RADIUS_INPUT}px; }}"
-            f"QListWidget::item:selected {{ background-color: {theme.ACCENT};"
-            f" color: {theme.ON_ACCENT}; }}")
         self._list.itemDoubleClicked.connect(lambda _item: self._accept())
         outer.addWidget(self._list, 1)
 
@@ -716,7 +707,11 @@ class ConnectionTab(QWidget):
 
     # -- step 1 ---------------------------------------------------------
     def _build_step1(self):
-        card = Card('COM Port', index=1)
+        card = Card(
+            'COM Port', index=1,
+            help_text=('Choose the serial port and baud rate shared by every '
+                       'controller on the line. Refresh updates the available '
+                       'port list.'))
 
         row = QHBoxLayout()
         row.setSpacing(theme.PAD_SM)
@@ -742,13 +737,14 @@ class ConnectionTab(QWidget):
         baud_row.addWidget(self.baud_combo, 1)
         card.add_layout(baud_row)
 
-        card.add(label('Must match every device on the line.',
-                       object_name='Hint'))
         return card
 
     # -- step 2 ---------------------------------------------------------
     def _build_step2(self):
-        card = Card('Scan Units A–Z', index=2)
+        card = Card(
+            'Scan Units A–Z', index=2,
+            help_text=('Probe addresses A through Z on the selected COM port '
+                       'and read each detected controller and its gas table.'))
 
         row = QHBoxLayout()
         row.setSpacing(theme.PAD_SM)
@@ -785,7 +781,11 @@ class ConnectionTab(QWidget):
 
     # -- step 3 ---------------------------------------------------------
     def _build_step3(self):
-        card = Card('Assign Controllers', index=3)
+        card = Card(
+            'Assign Controllers', index=3,
+            help_text=('Choose which detected controllers participate, assign '
+                       'their gas and rig role, and review whether the current '
+                       'assignment supports automatic flow calculation.'))
         card.add(label('Untick a controller to leave it out of monitoring, '
                        'logging and every safety action.',
                        color=theme.AMBER, size=8))
@@ -830,7 +830,11 @@ class ConnectionTab(QWidget):
 
     # -- step 4 ---------------------------------------------------------
     def _build_step4(self):
-        card = Card('Connect Selected & Monitor', index=4)
+        card = Card(
+            'Connect Selected & Monitor', index=4,
+            help_text=('Open the selected controllers, reconnect an existing '
+                       'assignment, and start or stop the live polling loop. '
+                       'Connection details and failures appear below.'))
 
         row = QHBoxLayout()
         row.setSpacing(theme.PAD_SM)
@@ -878,7 +882,11 @@ class ConnectionTab(QWidget):
                                   theme.PAD_LG, theme.PAD_LG)
         layout.setSpacing(theme.CARD_GAP)
 
-        card = Card('Live Monitor', collapsible=False)
+        card = Card(
+            'Live Monitor', collapsible=False,
+            help_text=('Show current flow, setpoint, pressure, temperature, '
+                       'error, and valve readings for every connected '
+                       'controller.'))
         rate_row = QHBoxLayout()
         rate_row.setContentsMargins(0, 0, 0, 0)
         rate_row.addStretch(1)

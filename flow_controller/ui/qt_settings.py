@@ -259,15 +259,25 @@ class SettingsDialog(QDialog):
         form.setHorizontalSpacing(theme.PAD_LG)
         form.setVerticalSpacing(theme.PAD_SM)
 
+        # Seeded with signals blocked.  A configured family that is not
+        # installed on *this* machine -- which is the normal case for the
+        # code faces the app asks for first -- makes the combo settle on
+        # whatever Qt substitutes, and that would come straight back as an
+        # edit, quietly rewriting the config to the substitute merely because
+        # the dialog was opened.
         ui_picker = QFontComboBox()
+        ui_picker.blockSignals(True)
         ui_picker.setCurrentFont(QFont(font['ui_family']))
+        ui_picker.blockSignals(False)
         ui_picker.currentFontChanged.connect(
             lambda value: font.__setitem__('ui_family', value.family()))
         form.addRow(self._field('Interface font'), ui_picker)
 
         mono_picker = QFontComboBox()
         mono_picker.setFontFilters(QFontComboBox.FontFilter.MonospacedFonts)
+        mono_picker.blockSignals(True)
         mono_picker.setCurrentFont(QFont(font['mono_family']))
+        mono_picker.blockSignals(False)
         mono_picker.currentFontChanged.connect(
             lambda value: font.__setitem__('mono_family', value.family()))
         form.addRow(self._field('Reading font'), mono_picker)
@@ -283,7 +293,9 @@ class SettingsDialog(QDialog):
         self._hint(layout,
                    'Base size scales the whole interface — every other point '
                    'size is derived from it. The fallback font chains stay in '
-                   'the config file.')
+                   'the config file — the interface asks for Avenir and the '
+                   'readings for a monospace face, each walking down '
+                   'its own chain to whatever this machine has.')
 
         self._section(layout, 'Corner radius')
         layout.addLayout(self._spin_form(self._working['radius'],

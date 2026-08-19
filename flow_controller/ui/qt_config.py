@@ -30,10 +30,20 @@ DEFAULTS = {
         # Split family from fallback so the settings dialog can drive the
         # family with a real font picker while the fallback chain — which is
         # CSS syntax, not a font name — stays hand-edited.
-        'ui_family': 'Segoe UI Variable Text',
-        'ui_fallback': "'Segoe UI', 'Yu Gothic UI', sans-serif",
-        'mono_family': 'Cascadia Mono',
-        'mono_fallback': "'Consolas', monospace",
+        # Two faces, chosen for two jobs.  The interface asks for Avenir: a
+        # humanist face reads faster than a code face at label sizes, which is
+        # most of what the chrome is.  The readings keep a monospace face,
+        # because a column of setpoints that does not line up digit-under-digit
+        # is a column you have to read rather than scan.  The families after
+        # the first are tried in order, so an install without the first choice
+        # lands on something of the same shape rather than on whatever Qt
+        # decides is closest.
+        'ui_family': 'Avenir',
+        'ui_fallback': ("'Avenir Next', 'Nunito Sans', 'Century Gothic', "
+                        "'Segoe UI Variable Text', 'Segoe UI', sans-serif"),
+        'mono_family': 'JetBrains Mono',
+        'mono_fallback': ("'Cascadia Mono', 'Cascadia Code', 'Consolas', "
+                          "'DejaVu Sans Mono', monospace"),
         # Base UI point size.  Everything else scales from it, so this one
         # number moves the whole interface.
         'size': 10,

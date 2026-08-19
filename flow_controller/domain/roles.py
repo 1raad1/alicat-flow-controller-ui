@@ -55,10 +55,15 @@ ROLE_MAP = {
 }
 
 #: Lower heating values, MJ/kg, and densities at standard conditions, kg/m^3.
+#: Methane joins them for the pilot: it is a third of the rig's heat release
+#: whenever the pilot is lit, so leaving it out of the live power estimate
+#: would understate the burner by however much the pilot is carrying.
 LHV_NH3 = 18.6
 LHV_H2 = 120.0
+LHV_CH4 = 50.0
 RHO_NH3 = 0.7069
 RHO_H2 = 0.0827
+RHO_CH4 = 0.6558
 
 #: Gas colours are part of the vocabulary rather than the theme: an operator
 #: learns that hydrogen is blue, and it must not move when the theme does.
