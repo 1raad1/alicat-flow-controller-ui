@@ -196,6 +196,45 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
                      border-color: rgba(255, 255, 255, 50);
                      color: {TEXT_BRIGHT}; }}
 
+/* Minimise, maximise, close -- the window controls, now that the window draws
+   its own frame.  Borderless and unfilled until the mouse is on them, because
+   they sit permanently in the corner of every screen and three lit chips there
+   would compete with the run controls that actually want to be noticed.  Close
+   is the one that turns red, on the same reasoning as the safety buttons: the
+   irreversible action should not look like its two harmless neighbours. */
+#WinButton, #WinClose {{
+    background-color: transparent;
+    border: none;
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 5px 0;
+    color: {TEXT_MUTED};
+    font-size: {pt(11)}pt;
+}}
+#WinButton:hover   {{ background-color: rgba(255, 255, 255, 28);
+                      color: {TEXT_BRIGHT}; }}
+#WinButton:pressed {{ background-color: rgba(255, 255, 255, 14); }}
+#WinClose:hover    {{ background-color: {DANGER}; color: #ffffff; }}
+#WinClose:pressed  {{ background-color: {DANGER_HOVER}; color: #ffffff; }}
+
+/* The one-click start beside a saved sequence.  Quiet until it is pointed at:
+   it sits in a list that is mostly read, and a row of accent-coloured buttons
+   would read as the list's subject rather than as one action on each row. */
+#RowPlay {{
+    background-color: rgba(255, 255, 255, 14);
+    border: 1px solid rgba(255, 255, 255, 26);
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 1px 0;
+    color: {TEXT_MUTED};
+    font-size: {pt(8)}pt;
+}}
+#RowPlay:hover  {{ background-color: {ACCENT}; border-color: {ACCENT};
+                   color: {ON_ACCENT}; }}
+#RowPlay:pressed {{ background-color: {ACCENT_HOVER};
+                    border-color: {ACCENT_HOVER}; }}
+#RowPlay:disabled {{ color: {TEXT_DIM};
+                     background-color: rgba(255, 255, 255, 8);
+                     border-color: rgba(255, 255, 255, 14); }}
+
 /* ---- Tabs ---------------------------------------------------------- */
 QTabWidget::pane {{ border: none; background: transparent; }}
 QTabBar::tab {{

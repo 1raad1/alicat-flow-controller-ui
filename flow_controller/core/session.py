@@ -98,6 +98,11 @@ MODE_STAGED = "staged"
 #: name.  A recording that is only in memory is one power cut from gone.
 DEFAULT_SEQUENCE_DIR = Path.home() / "Documents" / "Flow Controller" / "sequences"
 
+#: Where an acquisition log lands when the operator has not said otherwise.
+#: Named here rather than in the view because a LabVIEW datagram can open one
+#: with nobody at the keyboard, and the listener lives on this side.
+DEFAULT_LOG_DIR = Path.home() / "Documents" / "Flow Controller"
+
 SEQ_IDLE = "idle"
 SEQ_RECORDING = "recording"
 SEQ_REPLAYING = "replaying"
@@ -243,6 +248,15 @@ class FlowSession(QObject):
         self.pre_air_scale = 1.0
         self.operating_mode = MODE_STAGED
         self._mode_chosen = False
+
+        # -- logging destination --
+        #: What a log started without a dialog should be called.  The operator
+        #: types it on the operation tab, which keeps these in step; they are
+        #: held here because a LabVIEW ``log`` datagram has to resolve a path
+        #: on its own, and the field that holds the answer belongs to a view
+        #: that a re-theme throws away.
+        self.log_destination = ''
+        self.log_dir = DEFAULT_LOG_DIR
 
         # -- recorded sequences --
         self.sequence_dir = DEFAULT_SEQUENCE_DIR
@@ -2230,9 +2244,61 @@ class FlowSession(QObject):
         self._log(f"LabVIEW listener error on {host}:{port}: {error}")
         self.udp_changed.emit(False, f"Listener error: {error}")
 
+    def _announce_udp(self, note):
+        """Report what a datagram did without losing where we are listening.
+
+        The status line is one field, and it is the only place the operator
+        can see that the socket is still open.  Replacing it with "Command:
+        log" says what just happened and then leaves the screen unable to say
+        whether anything is still listening, so both are said at once.
+        """
+        self.udp_changed.emit(
+            self._udp.listening,
+            f"Listening on {self._udp.host}:{self._udp.port} · {note}")
+
     def _on_udp_command(self, command):
+        """Act on a datagram.  Announcing one is not the same as obeying it.
+
+        ``log`` and ``stop`` exist so that one operator action starts both
+        systems' records at the same instant; a listener that only wrote a
+        line in the syslog would leave the LabVIEW record with no counterpart
+        to line up against, which is the whole point of accepting the trigger.
+        """
         self._log(f"LabVIEW command received: {command}")
-        self.udp_changed.emit(True, f"Command: {command}")
+        if command == 'log':
+            self._udp_start_logging()
+        elif command == 'stop':
+            self._udp_stop_logging()
+
+    def _udp_start_logging(self):
+        if self._csv.active:
+            # Not an error, and not a reason to cut the open file short: a
+            # repeated trigger is far likelier than an operator wanting the
+            # run split in two at an arbitrary instant.
+            self._log("LabVIEW: 'log' ignored — a log is already open at "
+                      f"{self._csv.path}.")
+            self._announce_udp('log ignored, already recording')
+            return
+        _shown, actual = self.resolve_log_path(
+            self.log_destination, self.log_dir, source="LabVIEW")
+        if not self.start_logging(actual, source="LabVIEW"):
+            self._announce_udp('log failed — see the system log')
+            return
+        self._announce_udp(f'recording {Path(actual).name}')
+        if not self.is_monitoring:
+            # The file is open and the header is written, but rows are only
+            # produced by a polling pass.  Said plainly here, because from
+            # LabVIEW's side the trigger looks like it worked.
+            self._log("LabVIEW: the log is open but the monitor is not "
+                      "running — no rows will be written until it starts.")
+
+    def _udp_stop_logging(self):
+        if not self._csv.active:
+            self._log("LabVIEW: 'stop' ignored — nothing is being logged.")
+            self._announce_udp('stop ignored, not recording')
+            return
+        path = self.stop_logging()
+        self._announce_udp(f'stopped {Path(path).name}' if path else 'stopped')
 
     # ==================================================================== #
     #  Shutdown                                                            #
