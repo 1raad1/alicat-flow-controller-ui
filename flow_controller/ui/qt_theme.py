@@ -220,6 +220,7 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
                 font-family: {FONT_MONO}; }}
 #TitleStatusSep {{ color: {rgba(hex_rgb(TEXT_DIM) + (110,))};
                    font-size: {pt(8)}pt; }}
+#TitleDivider {{ background-color: rgba(255, 255, 255, 20); }}
 /* The settings control, and below it the window controls.  Neither sets a
    font here: they are drawn from an icon font whose size means something
    different from a text size, so the window picks the face and the size
@@ -275,6 +276,20 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
 #RowPlay:disabled {{ color: {TEXT_DIM};
                      background-color: rgba(255, 255, 255, 8);
                      border-color: rgba(255, 255, 255, 14); }}
+
+#RowRename {{
+    background-color: transparent;
+    border: 1px solid rgba(255, 255, 255, 18);
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 1px 0;
+    color: {TEXT_MUTED};
+    font-size: {pt(8)}pt;
+}}
+#RowRename:hover {{ background-color: rgba(255, 255, 255, 26);
+                    border-color: {INFO}; color: {TEXT_BRIGHT}; }}
+#RowRename:pressed {{ background-color: rgba(0, 0, 0, 60); }}
+#RowRename:disabled {{ color: {TEXT_DIM};
+                       border-color: rgba(255, 255, 255, 10); }}
 
 /* Delete, beside it.  Quieter still until it is pointed at, and then red
    rather than accent: it is the one control on the row that cannot be undone,
@@ -346,6 +361,33 @@ QTabBar::tab:selected {{
 #FieldLabel {{ color: {TEXT_MUTED}; font-size: {pt(9)}pt; }}
 #SectionLabel {{ color: {TEXT_BRIGHT}; font-size: {pt(9)}pt; font-weight: 700;
                  letter-spacing: 0.8px; }}
+#CombustionStageCard {{
+    background-color: rgba(0, 0, 0, 42);
+    border: 1px solid rgba(255, 255, 255, 24);
+    border-radius: {RADIUS_TILE}px;
+}}
+#CombustionGroupTitle {{ letter-spacing: 0.8px; }}
+#CombustionGroupSubtitle {{ letter-spacing: 0.4px; }}
+#CardMenuButton {{
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 22);
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 0;
+    color: {TEXT_BRIGHT};
+    font-size: {pt(10)}pt;
+}}
+#CardMenuButton:hover {{
+    background-color: rgba(255, 255, 255, 24);
+    border-color: rgba(255, 255, 255, 44);
+}}
+#CardMenuButton::menu-indicator {{ width: 0; image: none; }}
+QMenu#CombustionSettingsMenu {{
+    background-color: {BG_CARD_ALT};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: {PAD_XS}px;
+}}
+#CombustionMenuPanel {{ background-color: transparent; }}
 
 /* ---- Inputs -------------------------------------------------------- */
 QLineEdit, QSpinBox, QDoubleSpinBox {{

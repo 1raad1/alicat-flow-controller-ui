@@ -256,8 +256,10 @@ class FlowSession(QObject):
         self.ignition_state = "IDLE"
         self.pre_fuel_scale = 1.0
         self.pre_air_scale = 1.0
-        self.operating_mode = MODE_STAGED
-        self._mode_chosen = False
+        # Plain multi-channel control is the safe, least-assumptive startup
+        # surface.  RQL controls are exposed only after the operator explicitly
+        # selects Staged mode; a complete role assignment must not opt them in.
+        self.operating_mode = MODE_STANDARD
 
         # -- logging destination --
         #: What a log started without a dialog should be called.  The operator
@@ -666,18 +668,9 @@ class FlowSession(QObject):
     def is_staged(self):
         return self.operating_mode == MODE_STAGED
 
-    def set_operating_mode(self, mode, *, automatic=False):
-        """Switch between the staged burner and plain flow control.
-
-        ``automatic=True`` is how a connect-time default is applied: it backs
-        off the moment the operator has chosen for themselves, so guessing
-        from the assignment never overrides an explicit choice.
-        """
+    def set_operating_mode(self, mode):
+        """Switch between the staged burner and plain flow control."""
         mode = MODE_STAGED if mode == MODE_STAGED else MODE_STANDARD
-        if automatic and self._mode_chosen:
-            return False
-        if not automatic:
-            self._mode_chosen = True
         if mode == self.operating_mode:
             return False
         if self.ignition_state != "IDLE":
@@ -822,12 +815,6 @@ class FlowSession(QObject):
         self.controllers_connected = True
         self._set_estop_armed(True)
         self.connection_changed.emit(True)
-        # A rig that auto-calculates is an RQL rig; anything else is plain
-        # flow control until told otherwise.  This is only a first guess and
-        # never overrides a mode the operator has already picked.
-        self.set_operating_mode(
-            MODE_STAGED if self.autocalc_available else MODE_STANDARD,
-            automatic=True)
         self._log_conn(f"All {len(confirmed)} selected controllers confirmed.")
         for key, unit in self.assignments.items():
             if unit:
@@ -1415,12 +1402,33 @@ class FlowSession(QObject):
         """
         fuels, air, inert = self.combustion_flows(scope, samples)
         return combustion.estimate(fuels, air,
-                                   self.combustion_diameter(scope), inert)
+                                   self.combustion_effective_diameter(scope),
+                                   inert)
 
     def combustion_diameter(self, scope=SCOPE_ALL):
         """The declared inlet bore in mm for one scope, or ``None``."""
         field = combustion_prefs.DIAMETER_FIELDS.get(scope)
         return self.combustion_prefs.get(field) if field else None
+
+    def combustion_inlets(self, scope=SCOPE_ALL):
+        """Parallel inlet count for a scope; only Stage 2 may exceed one."""
+        if scope != SCOPE_STAGE2:
+            return 1
+        return combustion_prefs.clean_inlet_count(
+            self.combustion_prefs.get('stage2_inlets'))
+
+    def combustion_effective_diameter(self, scope=SCOPE_ALL):
+        """Diameter of one circle with the scope's total flow area.
+
+        Stage 2 may have several identical inlets.  Areas add, so the
+        equivalent diameter is the entered per-inlet diameter times √count.
+        Passing that to the existing velocity calculation is exactly the same
+        as dividing total flow by ``count × area_per_inlet``.
+        """
+        diameter = self.combustion_diameter(scope)
+        if diameter is None:
+            return None
+        return diameter * math.sqrt(self.combustion_inlets(scope))
 
     def set_combustion_diameter(self, scope, millimetres):
         """Declare -- or with ``None``/0 withdraw -- one inlet bore, in mm.
@@ -1442,6 +1450,18 @@ class FlowSession(QObject):
         else:
             self._log(f"Combustion: {scope} inlet diameter → "
                       f"{cleaned:.2f} mm")
+        self._save_combustion_prefs()
+        return cleaned
+
+    def set_combustion_inlets(self, scope, count):
+        """Set the number of identical Stage 2 inlets used for velocity."""
+        if scope != SCOPE_STAGE2:
+            return 1
+        cleaned = combustion_prefs.clean_inlet_count(count)
+        if self.combustion_inlets(scope) == cleaned:
+            return cleaned
+        self.combustion_prefs['stage2_inlets'] = cleaned
+        self._log(f'Combustion: Stage 2 inlet count → {cleaned}')
         self._save_combustion_prefs()
         return cleaned
 

@@ -272,9 +272,10 @@ class GlassBar(QWidget):
         sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
         painter.fillRect(rect, QBrush(sheen))
 
-        painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
-        y = rect.bottom() if self._edge == 'bottom' else rect.top()
-        painter.drawLine(rect.left(), y, rect.right(), y)
+        if self._edge is not None:
+            painter.setPen(QPen(QColor(255, 255, 255, 20), 1))
+            y = rect.bottom() if self._edge == 'bottom' else rect.top()
+            painter.drawLine(rect.left(), y, rect.right(), y)
         painter.end()
 
 
@@ -363,6 +364,10 @@ class Card(QFrame):
                 widget.setToolTip(help_text)
                 widget.setAccessibleDescription(help_text)
         header_layout.addStretch(1)
+        self._header_actions = QHBoxLayout()
+        self._header_actions.setContentsMargins(0, 0, 0, 0)
+        self._header_actions.setSpacing(theme.PAD_XS)
+        header_layout.addLayout(self._header_actions)
 
         self._chevron = QLabel('▾' if not collapsed else '▸')
         self._chevron.setObjectName('CardChevron')
@@ -401,6 +406,11 @@ class Card(QFrame):
 
     def add_spacing(self, pixels):
         self.body_layout.addSpacing(pixels)
+
+    def add_header_widget(self, widget):
+        """Mount a compact action at the top-right of the card header."""
+        self._header_actions.addWidget(widget)
+        return widget
 
     def is_collapsed(self):
         return self._collapsed

@@ -7,6 +7,8 @@ the software rather than of a session:
   stage for the RQL burner.  Bulk velocity cannot be computed without a bore,
   the controllers obviously do not report it, and the same burner is the same
   bore tomorrow, so it is typed once and kept.
+* the **number of Stage 2 inlets**.  Its entered diameter describes one inlet;
+  velocity uses the combined area of every identical Stage 2 inlet.
 * whether the estimate runs **live** and **how often**.  The arithmetic itself
   is a few dozen floating-point operations per pass and costs nothing; what
   costs is repainting a dozen tiles ten times a second on a laptop that is also
@@ -51,6 +53,10 @@ DIAMETER_FIELDS = {
 #: kind of wrong number that gets believed.
 MAX_DIAMETER_MM = 2000.0
 
+#: Enough to catch a pasted diameter or flow figure without constraining any
+#: plausible multi-port injector arrangement.
+MAX_INLET_COUNT = 100
+
 #: Most acquisition passes the estimate may skip between refreshes.  At the
 #: rig's ~10 Hz this is about a minute, which is already well past the point
 #: where the card has stopped being a live reading.
@@ -66,6 +72,7 @@ DEFAULTS = {
     'inlet_mm': None,
     'stage1_mm': None,
     'stage2_mm': None,
+    'stage2_inlets': 1,
     'live': True,
     'interval': 1,
 }
@@ -104,6 +111,15 @@ def clean_interval(value):
     return max(1, min(number, MAX_INTERVAL))
 
 
+def clean_inlet_count(value):
+    """Number of identical Stage 2 inlets: a whole number, at least one."""
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULTS['stage2_inlets']
+    return max(1, min(number, MAX_INLET_COUNT))
+
+
 def clean_live(value):
     """Whether the estimate runs at all.  Absent or unreadable means yes."""
     if value is None:
@@ -119,6 +135,8 @@ def clean_field(field, value):
         return clean_diameter(value)
     if field == 'interval':
         return clean_interval(value)
+    if field == 'stage2_inlets':
+        return clean_inlet_count(value)
     if field == 'live':
         return clean_live(value)
     return None

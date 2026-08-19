@@ -766,7 +766,7 @@ class ConnectionTab(QWidget):
             " border: 1px solid rgba(255, 255, 255, 20);"
             " border-radius: 3px; }"
             f"QProgressBar::chunk {{ background-color: {theme.ACCENT};"
-            " border-radius: 2px; }}")
+            " border-radius: 2px; }")
         # A full bar left on screen after the scan reads as an alarm stripe;
         # the bar only exists while there is progress to report.
         self.scan_bar.setVisible(False)

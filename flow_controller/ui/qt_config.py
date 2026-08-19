@@ -28,9 +28,9 @@ from pathlib import Path
 DEFAULTS = {
     'font': {
         # Split family from fallback so the settings dialog can drive the
-        # family with a real font picker while the fallback chain — which is
-        # CSS syntax, not a font name — stays hand-edited.
-        # Two faces, chosen for two jobs.  The interface asks for Avenir: a
+        # family with an installed-font dropdown while the fallback chain —
+        # which is CSS syntax, not a font name — stays hand-edited.
+        # Two faces, chosen for two jobs.  The interface asks for DM Sans: a
         # humanist face reads faster than a code face at label sizes, which is
         # most of what the chrome is.  The readings keep a monospace face,
         # because a column of setpoints that does not line up digit-under-digit
@@ -38,9 +38,10 @@ DEFAULTS = {
         # the first are tried in order, so an install without the first choice
         # lands on something of the same shape rather than on whatever Qt
         # decides is closest.
-        'ui_family': 'Avenir',
-        'ui_fallback': ("'Avenir Next', 'Nunito Sans', 'Century Gothic', "
-                        "'Segoe UI Variable Text', 'Segoe UI', sans-serif"),
+        'ui_family': 'DM Sans',
+        'ui_fallback': ("'Avenir', 'Avenir Next', 'Nunito Sans', "
+                        "'Century Gothic', 'Segoe UI Variable Text', "
+                        "'Segoe UI', sans-serif"),
         'mono_family': 'JetBrains Mono',
         'mono_fallback': ("'Cascadia Mono', 'Cascadia Code', 'Consolas', "
                           "'DejaVu Sans Mono', monospace"),
