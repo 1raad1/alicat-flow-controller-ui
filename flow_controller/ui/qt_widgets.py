@@ -42,8 +42,23 @@ from . import qt_theme as theme
 #  Small helpers                                                          #
 # ---------------------------------------------------------------------- #
 def mono(size=9, bold=False):
-    font = QFont(theme.FONT_MONO_FAMILY)
+    font = QFont()
+    # The whole chain, not just the first name.  A QFont asked for a family
+    # that is not installed does not fall through to the stylesheet's fallback
+    # list -- it substitutes whatever Qt thinks is closest, which is how a
+    # reading set in code ends up in a different face from the label beside it
+    # that the stylesheet dressed.
+    font.setFamilies(theme.FONT_MONO_FAMILIES)
     font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setPointSize(theme.font_pt(size))
+    font.setBold(bold)
+    return font
+
+
+def ui_font(size=9, bold=False):
+    """The interface face, resolved through the same chain as :func:`mono`."""
+    font = QFont()
+    font.setFamilies(theme.FONT_UI_FAMILIES)
     font.setPointSize(theme.font_pt(size))
     font.setBold(bold)
     return font
@@ -54,11 +69,7 @@ def label(text, *, color=None, size=9, bold=False, monospace=False,
     widget = QLabel(text)
     if object_name:
         widget.setObjectName(object_name)
-    font = mono(size, bold) if monospace else QFont(theme.FONT_UI_FAMILY)
-    if not monospace:
-        font.setPointSize(theme.font_pt(size))
-        font.setBold(bold)
-    widget.setFont(font)
+    widget.setFont(mono(size, bold) if monospace else ui_font(size, bold))
     widget.setStyleSheet(
         f"color: {color or theme.TEXT}; background: transparent;")
     return widget

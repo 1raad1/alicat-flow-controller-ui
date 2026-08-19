@@ -37,13 +37,14 @@ import serial.tools.list_ports
 from alicat import FlowController
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
 
-from ..domain import roles
+from ..domain import combustion, roles
 from ..domain.assignments import assess_autocalc
 from ..domain.combustion import CombustionCalculator
 from ..domain.safety import ZeroRequest, select_zero_units
 from ..infrastructure.alicat_protocol import AlicatProtocol
 from ..infrastructure.serial_worker import SerialIOWorker
 from ..services.discovery import DiscoveryService
+from .combustion_prefs import SCOPE_ALL, SCOPE_STAGE1, SCOPE_STAGE2
 from .csv_logger import CsvLogger, resolve_path
 from .graph_history import GraphHistory
 from .ramps import RampLeg, RampRunner
@@ -51,7 +52,7 @@ from .sequence import (DEADBAND_FLOOR, DEADBAND_FRACTION, SETTLE_TOLERANCE,
                        TICK_S, Sequence, SequencePlayer, SequenceRecorder,
                        SettleGate, TrackMeta)
 from .telemetry import TelemetryReader, blank_sample
-from . import unit_prefs
+from . import combustion_prefs, unit_prefs
 from .udp_listener import UdpCommandListener
 
 #: Addresses probed by a scan.  Alicat units are single letters.
@@ -149,6 +150,9 @@ class FlowSession(QObject):
     ignition_changed = Signal(str)
     targets_changed = Signal(dict)
     mode_changed = Signal(str)              # MODE_STANDARD | MODE_STAGED
+    #: The live combustion estimate's settings changed -- an inlet bore,
+    #: or whether and how often it is computed at all.
+    combustion_changed = Signal(dict)
 
     # -- recorded sequences ----------------------------------------------- #
     sequence_state_changed = Signal(str)    # SEQ_IDLE | SEQ_RECORDING | SEQ_REPLAYING
@@ -210,6 +214,12 @@ class FlowSession(QObject):
         #: scale is scaled from the run instead; one missing a ramp rate has
         #: its setpoints written straight out.
         self.unit_prefs = unit_prefs.load()
+        #: Inlet bores and the pacing of the live combustion estimate.
+        #: Loaded from disk for the same reason as the per-unit figures:
+        #: a burner's inlet is the same diameter tomorrow morning, and
+        #: an operator who turned the estimate down on a slow laptop
+        #: should not have to turn it down again.
+        self.combustion_prefs = combustion_prefs.load()
         self.assignments = {key: None for key, _label in roles.ROLES}
         self.custom_assignments = {}
         self.autocalc_available = True
@@ -1334,6 +1344,154 @@ class FlowSession(QObject):
             self.calc.phi(nh3_l, h2_l, air_l),
             self.calc.phi(nh3_r + nh3_l, h2_r + h2_l, air_r + air_l, ch4),
         )
+
+    # ------------------------------------------------------------------ #
+    #  Live combustion estimate                                          #
+    # ------------------------------------------------------------------ #
+
+    #: Which roles feed each staged scope.  The pilot's methane is counted into
+    #: stage 1, exactly as :meth:`phi_values` counts it: it burns in the rich
+    #: zone, and a phi on this card that disagreed with the phi two tiles above
+    #: it would be worse than no phi at all.
+    STAGE_ROLES = {
+        SCOPE_STAGE1: ({'NH3': 'nh3_rich', 'H2': 'h2_rich',
+                        'CH4': 'ch4_pilot'}, ('rich_air',)),
+        SCOPE_STAGE2: ({'NH3': 'nh3_lean', 'H2': 'h2_lean'}, ('lean_air',)),
+    }
+
+    def gas_flows(self, samples=None):
+        """``{gas: SLPM}`` summed over every assigned controller.
+
+        By gas rather than by role, because standard mode has no roles: a rig
+        that is not staged is precisely the case where the role map is empty,
+        and two NH3 lines feeding one burner are still two NH3 lines.  A
+        controller with no gas or no zone is left out -- an operator who has
+        not said what a line carries has not said it carries fuel.
+        """
+        source = self._live_samples if samples is None else samples
+        totals = {}
+        for unit, (gas, zone) in self.selection.items():
+            if gas in (roles.UNSELECTED_GAS, '', None):
+                continue
+            if zone == roles.UNASSIGNED_ZONE:
+                continue
+            value = source.get(unit, {}).get('flow')
+            try:
+                flow = float(value) if value is not None else 0.0
+            except (TypeError, ValueError):
+                flow = 0.0
+            totals[gas] = totals.get(gas, 0.0) + flow
+        return totals
+
+    def combustion_flows(self, scope=SCOPE_ALL, samples=None):
+        """``({fuel: SLPM}, air SLPM, other SLPM)`` for one inlet of the rig.
+
+        The third figure is everything assigned that is neither fuel nor air --
+        a nitrogen purge or a diluent line.  It takes no part in phi or in the
+        power, and it is carried anyway because it still occupies the duct and
+        the bulk velocity has to account for it.
+        """
+        mapping = self.STAGE_ROLES.get(scope)
+        if mapping is None:
+            totals = self.gas_flows(samples)
+            fuels = {fuel: totals.get(fuel, 0.0) for fuel in combustion.FUELS}
+            inert = sum(flow for gas, flow in totals.items()
+                        if gas != 'Air' and gas not in combustion.FUELS)
+            return fuels, totals.get('Air', 0.0), inert
+        fuel_roles, air_roles = mapping
+        fuels = {fuel: self.flow_for_role(key, samples)
+                 for fuel, key in fuel_roles.items()}
+        air = sum(self.flow_for_role(key, samples) for key in air_roles)
+        # The RQL roles are fuel and air and nothing else, so a staged scope
+        # has no third flow to carry.
+        return fuels, air, 0.0
+
+    def combustion_estimate(self, scope=SCOPE_ALL, samples=None):
+        """Every derived combustion figure for one inlet, from live flows.
+
+        One call per card refresh: the tiles are read together, so they are
+        computed together and describe one moment of the rig rather than three
+        consecutive ones.
+        """
+        fuels, air, inert = self.combustion_flows(scope, samples)
+        return combustion.estimate(fuels, air,
+                                   self.combustion_diameter(scope), inert)
+
+    def combustion_diameter(self, scope=SCOPE_ALL):
+        """The declared inlet bore in mm for one scope, or ``None``."""
+        field = combustion_prefs.DIAMETER_FIELDS.get(scope)
+        return self.combustion_prefs.get(field) if field else None
+
+    def set_combustion_diameter(self, scope, millimetres):
+        """Declare -- or with ``None``/0 withdraw -- one inlet bore, in mm.
+
+        Nothing is written to hardware and no flow changes: the bore is an
+        input to an on-screen estimate only, so it is safe to correct mid-run.
+        Withdrawing it blanks the velocity rather than falling back to a guess.
+        """
+        field = combustion_prefs.DIAMETER_FIELDS.get(scope)
+        if field is None:
+            return None
+        cleaned = combustion_prefs.clean_diameter(millimetres)
+        if self.combustion_prefs.get(field) == cleaned:
+            return cleaned
+        self.combustion_prefs[field] = cleaned
+        if cleaned is None:
+            self._log(f"Combustion: {scope} inlet diameter cleared "
+                      f"(bulk velocity not shown)")
+        else:
+            self._log(f"Combustion: {scope} inlet diameter → "
+                      f"{cleaned:.2f} mm")
+        self._save_combustion_prefs()
+        return cleaned
+
+    @property
+    def combustion_live(self):
+        """Whether the estimate refreshes as the flows come in."""
+        return bool(self.combustion_prefs.get('live', True))
+
+    def set_combustion_live(self, running):
+        """Turn the live estimate on or off.
+
+        Off is a display decision and nothing more -- acquisition, logging and
+        the ramps carry on untouched.  It exists for the machine that is
+        already working hard driving the graph, where redrawing a dozen tiles
+        ten times a second is the part worth giving up.
+        """
+        running = bool(running)
+        if self.combustion_live == running:
+            return running
+        self.combustion_prefs['live'] = running
+        self._log("Combustion estimate: live"
+                  if running else "Combustion estimate: paused")
+        self._save_combustion_prefs()
+        return running
+
+    @property
+    def combustion_interval(self):
+        """Acquisition passes between refreshes of the estimate; 1 is every."""
+        return combustion_prefs.clean_interval(
+            self.combustion_prefs.get('interval'))
+
+    def set_combustion_interval(self, passes):
+        """Refresh the estimate every ``passes`` acquisition passes."""
+        cleaned = combustion_prefs.clean_interval(passes)
+        if self.combustion_interval == cleaned:
+            return cleaned
+        self.combustion_prefs['interval'] = cleaned
+        self._log("Combustion estimate: refreshing every pass" if cleaned == 1
+                  else f"Combustion estimate: refreshing every {cleaned} passes")
+        self._save_combustion_prefs()
+        return cleaned
+
+    def _save_combustion_prefs(self):
+        """Persist the settings and tell the views.  A failed write is said."""
+        error = combustion_prefs.save(self.combustion_prefs)
+        if error:
+            # Worth saying, not worth stopping for: the setting is in force for
+            # this session whether or not it survives to the next one.
+            self._log(f"Could not save the combustion settings: {error}")
+        self.combustion_changed.emit(dict(self.combustion_prefs))
 
     def latest_samples(self):
         return self._latest_samples

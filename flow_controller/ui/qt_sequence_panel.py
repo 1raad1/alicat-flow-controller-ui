@@ -203,7 +203,7 @@ class TimelineStrip(QWidget):
             color = theme.TEXT_DIM
         painter.setPen(QColor(color))
         font = painter.font()
-        font.setFamily(theme.FONT_MONO_FAMILY)
+        font.setFamilies(theme.FONT_MONO_FAMILIES)
         font.setPointSizeF(theme.font_pt(9))
         painter.setFont(font)
         painter.drawText(rect.adjusted(theme.PAD_MD, 0, -theme.PAD_MD, 0),
@@ -637,20 +637,8 @@ class SequencePanel(QWidget):
         column.addWidget(label('TRACKS', color=theme.TEXT_DIM, size=7, bold=True))
         self.track_list = QListWidget()
         self.track_list.setFixedWidth(theme.scale(190))
-        self.track_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: rgba(0, 0, 0, 90);
-                border: 1px solid {theme.BORDER_SOFT};
-                border-radius: {theme.RADIUS_INPUT}px;
-                padding: {theme.PAD_XS}px;
-                color: {theme.TEXT};
-            }}
-            QListWidget::item {{ padding: 4px 6px; border-radius: 4px; }}
-            QListWidget::item:selected {{
-                background-color: {theme.rgba(theme.tint(theme.ACCENT, 56))};
-                color: {theme.TEXT_BRIGHT};
-            }}
-        """)
+        # No sheet of its own: every list in the app is dressed once, in
+        # qt_theme, so they cannot drift apart.
         self.track_list.currentRowChanged.connect(self._on_track_row)
         self.track_list.itemChanged.connect(self._on_track_visibility)
         column.addWidget(self.track_list, 1)

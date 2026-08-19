@@ -52,6 +52,29 @@ def tint(color, alpha):
     return hex_rgb(color) + (int(alpha),)
 
 
+#: Family names that are CSS keywords rather than fonts.  They belong in a
+#: stylesheet chain and mean nothing to QFont, which wants real families.
+_GENERIC_FAMILIES = {'monospace', 'sans-serif', 'serif', 'cursive', 'fantasy'}
+
+
+def families(family, fallback):
+    """``('JetBrains Mono', "'Consolas', monospace")`` -> a QFont family list.
+
+    The stylesheet gets a fallback chain for free -- it is CSS, and CSS walks
+    the list.  ``QFont`` does not: asked for one absent family it substitutes
+    something of its own choosing, which is how a widget that sets its font in
+    code ends up in a different face from the widget beside it that was styled.
+    ``QFont.setFamilies`` takes the same list, so both paths can be fed from
+    the one config value.
+    """
+    names = [family]
+    for part in str(fallback).split(','):
+        name = part.strip().strip('\'"')
+        if name and name.lower() not in _GENERIC_FAMILIES and name not in names:
+            names.append(name)
+    return names
+
+
 def font_pt(size):
     """Scale a design-time point size by the user's base font size.
 
@@ -126,6 +149,9 @@ def apply(config=None):
         FONT_MONO_FAMILY=font['mono_family'],
         FONT_UI=f"'{font['ui_family']}', {font['ui_fallback']}",
         FONT_MONO=f"'{font['mono_family']}', {font['mono_fallback']}",
+        FONT_UI_FAMILIES=families(font['ui_family'], font['ui_fallback']),
+        FONT_MONO_FAMILIES=families(font['mono_family'],
+                                    font['mono_fallback']),
         FONT_SIZE=font['size'],
         FONT_SCALE=font['size'] / 10.0,
     )
@@ -184,13 +210,29 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
 /* ---- Title bar ---------------------------------------------------- */
 #TitleName {{ color: {TEXT_BRIGHT}; font-size: {pt(13)}pt; }}
 #TitleSub  {{ color: {TEXT_DIM};    font-size: {pt(9)}pt; }}
+
+/* The run states that outlive a single screen -- poll rate, log file, LabVIEW
+   listener, sequence, graphs.  They read beside the app's name rather than
+   along the bottom of the window: the eye is already at the top of the screen
+   for the tab strip and the connection state, and a second strip at the far
+   edge meant looking away from the run to find out about it. */
+#TitleStatus {{ color: {TEXT_MUTED}; font-size: {pt(8)}pt;
+                font-family: {FONT_MONO}; }}
+#TitleStatusSep {{ color: {rgba(hex_rgb(TEXT_DIM) + (110,))};
+                   font-size: {pt(8)}pt; }}
+/* The settings control, and below it the window controls.  Neither sets a
+   font here: they are drawn from an icon font whose size means something
+   different from a text size, so the window picks the face and the size
+   together and a stylesheet rule would only overrule half of that.  Both do
+   clear the padding every other button gets, because these are square marks
+   at a size the window fixes: the inherited 9px 18px would leave a fixed
+   34x26 chip no room to draw the glyph in at all. */
 #IconButton {{
     background-color: rgba(255, 255, 255, 12);
     border: 1px solid rgba(255, 255, 255, 24);
     border-radius: {RADIUS_CONTROL}px;
-    padding: 5px 10px;
+    padding: 0;
     color: {TEXT_MUTED};
-    font-size: {pt(11)}pt;
 }}
 #IconButton:hover {{ background-color: rgba(255, 255, 255, 28);
                      border-color: rgba(255, 255, 255, 50);
@@ -206,9 +248,8 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
     background-color: transparent;
     border: none;
     border-radius: {RADIUS_CONTROL}px;
-    padding: 5px 0;
+    padding: 0;
     color: {TEXT_MUTED};
-    font-size: {pt(11)}pt;
 }}
 #WinButton:hover   {{ background-color: rgba(255, 255, 255, 28);
                       color: {TEXT_BRIGHT}; }}
@@ -234,6 +275,25 @@ QMainWindow, QDialog {{ background-color: {BG}; }}
 #RowPlay:disabled {{ color: {TEXT_DIM};
                      background-color: rgba(255, 255, 255, 8);
                      border-color: rgba(255, 255, 255, 14); }}
+
+/* Delete, beside it.  Quieter still until it is pointed at, and then red
+   rather than accent: it is the one control on the row that cannot be undone,
+   and it must not be mistakable for the one beside it that only starts a run. */
+#RowDelete {{
+    background-color: transparent;
+    border: 1px solid rgba(255, 255, 255, 18);
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 1px 0;
+    color: {TEXT_DIM};
+    font-size: {pt(8)}pt;
+}}
+#RowDelete:hover  {{ background-color: {DANGER}; border-color: {DANGER_HOVER};
+                     color: #ffffff; }}
+#RowDelete:pressed {{ background-color: {DANGER_HOVER};
+                      border-color: {DANGER_HOVER}; }}
+#RowDelete:disabled {{ color: {rgba(hex_rgb(TEXT_DIM) + (110,))};
+                       background-color: transparent;
+                       border-color: rgba(255, 255, 255, 10); }}
 
 /* ---- Tabs ---------------------------------------------------------- */
 QTabWidget::pane {{ border: none; background: transparent; }}
@@ -314,6 +374,34 @@ QComboBox QAbstractItemView, QFontComboBox QAbstractItemView {{
     selection-color: {ON_ACCENT};
     padding: 4px;
     outline: none;
+}}
+
+/* Every list in the app, styled once.  They were each carrying their own
+   inline sheet, which is how one of them came to be missing it entirely and
+   sat in the middle of the glass as a square, opaque, system-grey box.  The
+   treatment is the input treatment -- a well sunk into the sheet -- because
+   that is what a list is: somewhere content is held, not a panel floating on
+   top of one. */
+QListWidget {{
+    background-color: rgba(0, 0, 0, 92);
+    border: 1px solid rgba(255, 255, 255, 26);
+    border-radius: {RADIUS_INPUT}px;
+    padding: {PAD_XS}px;
+    color: {TEXT};
+    outline: none;
+}}
+QListWidget:focus {{ border-color: {ACCENT}; }}
+QListWidget:disabled {{ color: {TEXT_DIM};
+                        border-color: rgba(255, 255, 255, 14); }}
+QListWidget::item {{
+    padding: 4px 6px;
+    border-radius: {max(3, RADIUS_INPUT - 2)}px;
+    color: {TEXT};
+}}
+QListWidget::item:hover {{ background-color: rgba(255, 255, 255, 14); }}
+QListWidget::item:selected {{
+    background-color: {rgba(tint(ACCENT, 62))};
+    color: {TEXT_BRIGHT};
 }}
 
 QCheckBox {{ color: {TEXT}; spacing: 9px; padding: 2px 0; }}
@@ -453,7 +541,10 @@ QPlainTextEdit {{
 }}
 
 /* ---- Status bar ---------------------------------------------------- */
-#StatusBar QLabel {{ color: {TEXT_MUTED}; font-size: {pt(8)}pt;
+/* All that is left down here is the one-off message; the standing fields
+   moved up beside the title.  The bar hides itself when there is nothing to
+   say, so an empty strip is never taking a line off the run. */
+#StatusBar QLabel {{ color: {TEXT}; font-size: {pt(8)}pt;
                      font-family: {FONT_MONO}; }}
 
 QToolTip {{

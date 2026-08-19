@@ -508,15 +508,6 @@ class GasTableDialog(QDialog):
         self._list.setFont(mono(9))
         self._list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        self._list.setStyleSheet(
-            f"QListWidget {{ background-color: rgba(0, 0, 0, 92);"
-            f" border: 1px solid rgba(255, 255, 255, 22);"
-            f" border-radius: {theme.RADIUS_CONTROL}px; padding: 4px;"
-            f" color: {theme.TEXT}; outline: none; }}"
-            f"QListWidget::item {{ padding: 4px 6px;"
-            f" border-radius: {theme.RADIUS_INPUT}px; }}"
-            f"QListWidget::item:selected {{ background-color: {theme.ACCENT};"
-            f" color: {theme.ON_ACCENT}; }}")
         self._list.itemDoubleClicked.connect(lambda _item: self._accept())
         outer.addWidget(self._list, 1)
 
