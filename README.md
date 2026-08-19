@@ -6,7 +6,7 @@ watch them, log them, and put them all to zero in one gesture when something
 looks wrong.
 
 It was written for an ammonia/hydrogen **rich-quench-lean (RQL)** burner rig,
-so it knows about stages, equivalence ratios and an ignition sequence. That
+so it knows about stages, equivalence ratios and saved flow sequences. That
 half switches off. In **standard** mode the same window is plain multi-channel
 flow control — setpoints, readings, logging and graphs — with the staged
 arithmetic gone and the combustion estimate reduced to the single inlet such a
@@ -28,7 +28,7 @@ them and the zone they feed:
 | Pilot | CH₄ |
 
 A controller gets its role from that pair — `NH3` on `Zone 1` is stage-1
-ammonia — and roles are what the auto-calculation, the ignition ramp and the
+ammonia — and roles are what the auto-calculation, saved sequences and the
 live φ readouts address. Anything assigned to **General**, or to a gas/zone
 pair with no combustion meaning, is still connected, still monitored, still
 graphed and still logged. It simply takes no part in the arithmetic.
@@ -40,8 +40,8 @@ screen saying which assignments are missing.
 
 ## The three tabs
 
-`ZERO FUEL` and `ZERO ALL` sit in the corner of the tab strip, so they are
-reachable whichever tab is open.
+`SET ALL FLOWS`, `ZERO FUEL`, and `ZERO ALL` sit in the corner of the tab strip,
+so they are reachable whichever tab is open.
 
 ### 1 · Connection & Assignment
 
@@ -67,6 +67,10 @@ assignment can be checked against real readings before leaving the screen.
 The screen a run is driven from. Setup on the left, live values on the right,
 with the sequence panel folding out underneath.
 
+The mode switch starts on **Standard** on every launch. Choose **Staged (RQL)**
+explicitly to expose the stage-aware controls; connecting a complete RQL
+assignment does not change the selected mode on the operator's behalf.
+
 **Live controller cards.** One card per assigned unit, grouped by stage in
 staged mode, each with a bar tracking flow against setpoint, a setpoint box, and
 the per-meter declarations described below. The card is where a single setpoint
@@ -76,40 +80,36 @@ is typed and sent.
 hydrogen fraction of the fuel blend by volume, the fraction of fuel through
 stage 1, and the two equivalence ratios you want (φ stage 1 and φ global). It
 returns the SLPM every line has to deliver. Nothing is sent: the targets are
-stored and shown on tiles, and a separate button stages them into the setpoint
-boxes so every number can be read in the place it would have been typed before
-any of it leaves the machine. A request that cannot be met — stage 1 leaner than
-the global mixture, which leaves negative air for stage 2 — is refused with the
-figure that has to move rather than with a negative number.
+stored and shown on tiles. A request that cannot be met — stage 1 leaner than
+the global mixture, which leaves negative air for stage 2 — is refused with
+the figure that has to move rather than with a negative number.
 
-**Ignition Sequence** (staged mode). Two steps. *Pre-ignition* ramps every
-assigned line to a percentage of its target — 80 % of fuel and 80 % of air by
-default — over a given number of steps at a given interval. *Ignite* ramps from
-there to the full targets. `ABORT` is `ZERO ALL`.
+**Sequences.** Ignition and other repeatable flow profiles are saved sequences,
+not a separate fixed card. Load or run one from the saved list, or open the
+record/replay panel to inspect and edit its curves first.
 
-**Batch Control.** Send every card's setpoint together, or zero every flow while
-monitoring continues.
+**Batch control.** `SET ALL FLOWS` sends every card's setpoint together from the
+top strip. `ZERO ALL` zeros every flow while monitoring continues.
 
 **Combustion estimate.** Derived figures recomputed from the telemetry cache as
 the samples land, in a card that follows the mode.
 
-In **staged** mode it reads by role: each fuel and air line, the fuel total,
-then φ for stage 1, stage 2 and the rig as a whole, the firing rate in kW split
-by stage, the stoichiometric air each stage is asking for, and the bulk velocity
-at each stage inlet. The pilot's CH₄ counts into stage 1 and into the global
-balance, exactly as it does in the CSV.
+In **staged** mode it reads by role, with compact Pilot, Stage 1, and Stage 2
+groups arranged horizontally. Pilot reports its percentage of the Stage 1 fuel
+flow by volume. Each combustion stage shows only φ, firing rate, and inlet bulk
+velocity. The pilot's CH₄ counts into Stage 1 exactly as it does in the CSV.
 
-In **standard** mode there are no roles and one inlet, so the same card
-aggregates by assigned *gas*: CH₄, H₂, NH₃ and air totals, one φ, the firing
-rate, the stoichiometric air, air/fuel ratios as supplied and at φ = 1 by
-volume and by mass, the fuel blend by volume, and the bulk velocity. A gas that
-does not burn — nitrogen on a purge line, say — is counted into the velocity and
-into nothing else.
+In **standard** mode there are no roles and one inlet, so the card shows the
+same three run-level figures: φ, firing rate, and inlet bulk velocity. It
+aggregates every assigned controller by gas for those calculations.
 
-**Inlet Ø** is where the bore is declared, in millimetres: one box for the
-standard rig, one per stage for the burner. Nothing is assumed if they are left
-blank — the velocity tile stays `--` rather than showing a figure computed
-against a guessed diameter. **Compute live** and the interval beside it decide
+The **☰ menu** in the combustion card header holds the inlet geometry and
+estimate controls. Enter the inlet diameter in millimetres — once for Standard,
+or once per stage for RQL — and the cross-sectional area is calculated and
+shown beside it. Stage 2 also takes its number of identical inlets; its bulk
+velocity uses the area of one entered diameter multiplied by that count.
+Nothing is assumed if a diameter is blank, so the velocity tile stays `--`.
+**Compute live** and the interval in the same menu decide
 how often the card is redrawn, from every acquisition pass down to every
 fiftieth, or not at all; pausing blanks the derived tiles rather than leaving a
 stale number on a live card. That setting is *display only*. Acquisition,
@@ -201,7 +201,7 @@ The span steps between readable figures (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 ×
 
 **RAMP** does touch control. It is how fast the line may move, in SLPM per
 second, and it paces *every* setpoint the application writes to that unit —
-typed on the card, sent by batch control, driven by the ignition sequence, or
+typed on the card, sent by `SET ALL FLOWS`, driven by the ignition sequence, or
 replayed from a recording. A setpoint 10 SLPM away on a line declared at
 2.5 SLPM/s is walked out over four seconds. The steps go through the ordinary
 setpoint queue, so a paced move is subject to every interlock a single write is.
@@ -355,16 +355,21 @@ A sequence is what the rig was *asked* to do, not what it did. Open the panel
 with **Record / Replay Sequence** in the *Sequence* card. The same card lists
 everything already saved under `Documents/Flow Controller/sequences`, newest
 first: **clicking a name loads it** into the panel and nothing moves, and the
-**▶** beside it loads and runs it once.
+**▶** beside it loads and runs it once. **✎** renames a saved sequence and
+**✕** deletes it after confirmation.
 
-- **Record** captures every setpoint the session commands — typed, batched,
-  ramped, ignition — as one track of keyframes per assigned controller. The
+- **Record** captures every setpoint the session commands — typed, batched, or
+  ramped — as one track of keyframes per assigned controller. The
   monitor has to be running first: nothing is being written to the controllers
   otherwise, so there would be nothing to record. There is no *add key point*
   button, because every setpoint change already lands a keyframe.
 - **Stopping** closes the recording and writes it as `*.fcseq.json`.
-- **Editing**: drag a point to move it, double-click to add one, right-click to
-  delete. A recorded keyframe *holds* until the next one, because a setpoint
+- **Renaming** changes both the filename and the name stored inside the
+  sequence, without overwriting another saved sequence.
+- **Editing**: drag a point to move it and double-click empty space to add one.
+  Right-click a point for its exact time and setpoint, transition type, and a
+  deliberate delete action; double-clicking a point opens the same numerical
+  editor. A recorded keyframe *holds* until the next one, because a setpoint
   written to a controller does not decay; switch a point to **Ramp (linear)** to
   make the transition out of it smooth. Only the selected track is editable, and
   the axis frames that track, so a 0.4 SLPM pilot is not a flat line on an axis

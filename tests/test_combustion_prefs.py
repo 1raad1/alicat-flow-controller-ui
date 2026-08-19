@@ -63,6 +63,18 @@ class CleanIntervalTests(unittest.TestCase):
                          combustion_prefs.MAX_INTERVAL)
 
 
+class CleanInletCountTests(unittest.TestCase):
+    def test_count_is_a_whole_number_with_a_floor_of_one(self):
+        for value in (None, '', 'many', 0, -4):
+            self.assertEqual(combustion_prefs.clean_inlet_count(value), 1)
+        self.assertEqual(combustion_prefs.clean_inlet_count('4'), 4)
+        self.assertEqual(combustion_prefs.clean_inlet_count(3.9), 3)
+
+    def test_count_has_a_typo_ceiling(self):
+        self.assertEqual(combustion_prefs.clean_inlet_count(10 ** 6),
+                         combustion_prefs.MAX_INLET_COUNT)
+
+
 class CleanLiveTests(unittest.TestCase):
     def test_an_absent_setting_means_the_estimate_runs(self):
         self.assertTrue(combustion_prefs.clean_live(None))
@@ -83,9 +95,11 @@ class CleanTests(unittest.TestCase):
 
     def test_one_bad_field_does_not_take_the_others_with_it(self):
         prefs = combustion_prefs.clean(
-            {'inlet_mm': 'wide', 'stage1_mm': 25, 'interval': 5})
+            {'inlet_mm': 'wide', 'stage1_mm': 25, 'stage2_inlets': 4,
+             'interval': 5})
         self.assertIsNone(prefs['inlet_mm'])
         self.assertEqual(prefs['stage1_mm'], 25.0)
+        self.assertEqual(prefs['stage2_inlets'], 4)
         self.assertEqual(prefs['interval'], 5)
 
     def test_unknown_keys_are_dropped(self):
@@ -111,7 +125,8 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_settings_survive_a_round_trip(self):
         prefs = dict(combustion_prefs.DEFAULTS,
-                     inlet_mm=30.0, stage1_mm=25.0, live=False, interval=10)
+                     inlet_mm=30.0, stage1_mm=25.0, stage2_inlets=6,
+                     live=False, interval=10)
         self.assertIsNone(combustion_prefs.save(prefs, self.path))
         self.assertEqual(combustion_prefs.load(self.path), prefs)
 

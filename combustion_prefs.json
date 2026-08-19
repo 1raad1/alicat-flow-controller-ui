@@ -1,4 +1,8 @@
 {
+  "inlet_mm": 29.3,
   "interval": 1,
-  "live": true
+  "live": true,
+  "stage1_mm": 29.3,
+  "stage2_inlets": 4,
+  "stage2_mm": 6.0
 }

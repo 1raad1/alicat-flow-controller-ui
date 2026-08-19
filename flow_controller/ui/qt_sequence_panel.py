@@ -34,10 +34,11 @@ from pathlib import Path
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QLabel, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QSizePolicy, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+                               QFormLayout, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMenu, QMessageBox, QPushButton,
+                               QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from ..core.sequence import HOLD, LINEAR
 from ..core.session import SEQ_IDLE, SEQ_RECORDING, SEQ_REPLAYING
@@ -66,6 +67,93 @@ def _track_color(track, index):
     if color:
         return color
     return FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
+
+
+class KeyPointDialog(QDialog):
+    """Numerical editor for one automation-style key point.
+
+    The graph remains the quick way to shape a run; this is the precise path
+    for values that should land at an exact time or controller setpoint.
+    """
+
+    def __init__(self, track, *, index=None, when=0.0, value=0.0,
+                 interp=HOLD, parent=None):
+        super().__init__(parent)
+        editing = index is not None
+        self.setWindowTitle('Edit key point' if editing else 'Add key point')
+        self.setModal(True)
+        self.setMinimumWidth(theme.scale(340))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.PAD_LG, theme.PAD_LG,
+                                 theme.PAD_LG, theme.PAD_LG)
+        outer.setSpacing(theme.PAD_MD)
+        heading = label(track.label, color=theme.TEXT_BRIGHT, size=11,
+                        bold=True)
+        outer.addWidget(heading)
+
+        form = QFormLayout()
+        form.setSpacing(theme.PAD_SM)
+        self.time_spin = QDoubleSpinBox()
+        self.time_spin.setObjectName('KeyPointTime')
+        self.time_spin.setDecimals(3)
+        self.time_spin.setSingleStep(0.1)
+        self.time_spin.setSuffix(' s')
+        self.time_spin.setKeyboardTracking(False)
+
+        frames = track.sorted_frames()
+        if editing and 0 <= index < len(frames):
+            minimum = frames[index - 1].t + 0.001 if index > 0 else 0.0
+            maximum = (frames[index + 1].t - 0.001
+                       if index + 1 < len(frames) else 1_000_000_000.0)
+            if index == 0:
+                self.time_spin.setEnabled(False)
+                self.time_spin.setToolTip(
+                    'The opening point stays at 0 s because replay starts '
+                    'from its value.')
+        else:
+            # A point at zero would replace the structural opening point.
+            minimum, maximum = 0.001, 1_000_000_000.0
+        self.time_spin.setRange(minimum, max(minimum, maximum))
+        self.time_spin.setValue(float(when))
+        form.addRow('Time', self.time_spin)
+
+        self.value_spin = QDoubleSpinBox()
+        self.value_spin.setObjectName('KeyPointValue')
+        self.value_spin.setDecimals(6)
+        self.value_spin.setSingleStep(0.1)
+        self.value_spin.setRange(0.0, 1_000_000_000.0)
+        self.value_spin.setSuffix(' SLPM')
+        self.value_spin.setKeyboardTracking(False)
+        self.value_spin.setValue(float(value))
+        form.addRow('Setpoint', self.value_spin)
+
+        self.interp_combo = QComboBox()
+        self.interp_combo.setObjectName('KeyPointTransition')
+        self.interp_combo.addItem('Hold (step)', HOLD)
+        self.interp_combo.addItem('Ramp (linear)', LINEAR)
+        self.interp_combo.setCurrentIndex(1 if interp == LINEAR else 0)
+        self.interp_combo.setToolTip(
+            'How this point leads into the following point.')
+        form.addRow('Transition after', self.interp_combo)
+        outer.addLayout(form)
+
+        note = QLabel('Time is kept between the neighbouring key points. '
+                      'Setpoints cannot be negative.')
+        note.setObjectName('Hint')
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    @property
+    def values(self):
+        return (self.time_spin.value(), self.value_spin.value(),
+                self.interp_combo.currentData())
 
 
 # ---------------------------------------------------------------------- #
@@ -255,6 +343,7 @@ class CurveEditor(pg.PlotWidget):
         self._curves = {}
         self._colors = {}
         self._drag_index = None
+        self._selected_index = None
         self._read_only = False
 
         self.setMenuEnabled(False)
@@ -288,6 +377,7 @@ class CurveEditor(pg.PlotWidget):
         # because the first question about a sequence just opened is what the
         # rig as a whole does, not what one line does.
         self._active_key = None
+        self._selected_index = None
         self._hidden.clear()
         self._colors = {}
         if sequence is not None:
@@ -300,6 +390,7 @@ class CurveEditor(pg.PlotWidget):
         """Select a track to edit, or ``None`` for the overview."""
         self._active_key = key
         self._drag_index = None
+        self._selected_index = None
         self._redraw()
         self.fit_active()
 
@@ -415,13 +506,18 @@ class CurveEditor(pg.PlotWidget):
             return
         frames = track.sorted_frames()
         color = QColor(self.color_for(track.key))
+        selected = self._selected_index
         self._points.setData(
             [frame.t for frame in frames],
             [frame.value for frame in frames],
             brush=[pg.mkBrush(color if frame.interp == LINEAR
                               else QColor(theme.TEXT_BRIGHT))
                    for frame in frames],
-            pen=pg.mkPen(theme.BG, width=1), size=9)
+            pen=[pg.mkPen(theme.WARN if index == selected else theme.BG,
+                          width=2 if index == selected else 1)
+                 for index, _frame in enumerate(frames)],
+            size=[12 if index == selected else 9
+                  for index, _frame in enumerate(frames)])
 
     def refresh(self):
         """Redraw after the sequence was edited from outside."""
@@ -456,14 +552,16 @@ class CurveEditor(pg.PlotWidget):
             return
         index = self._hit(event.position())
         if event.button() == Qt.MouseButton.RightButton:
-            if index is not None and self.active_track.remove(index):
-                self._redraw()
-                self.edited.emit()
+            point = self._data_at(event.position())
+            self._show_context_menu(index, point,
+                                    event.globalPosition().toPoint())
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self._drag_index = index
         if index is not None:
+            self._selected_index = index
+            self._redraw()
             self.selection_changed.emit(index)
 
     def mouseMoveEvent(self, event):
@@ -490,12 +588,123 @@ class CurveEditor(pg.PlotWidget):
         track = self.active_track
         if track is None:
             return
+        index = self._hit(event.position())
+        if index is not None:
+            self._select(index)
+            self._edit_point(index)
+            return
         point = self._data_at(event.position())
         if point.x() <= 0:
             return
         index = track.add(point.x(), max(0.0, point.y()))
+        self._select(index)
+        self.edited.emit()
+
+    def keyPressEvent(self, event):
+        """Mirror timeline editors: Delete removes the selected point."""
+        if (not self._read_only
+                and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                and self._selected_index is not None):
+            self._delete_point(self._selected_index)
+            return
+        if (not self._read_only
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and self._selected_index is not None):
+            self._edit_point(self._selected_index)
+            return
+        super().keyPressEvent(event)
+
+    def _select(self, index):
+        self._selected_index = index
         self._redraw()
         self.selection_changed.emit(index)
+
+    def _show_context_menu(self, index, point, global_position):
+        """Show deliberate point actions instead of deleting on right-click."""
+        track = self.active_track
+        if track is None:
+            return
+        menu = QMenu(self)
+        if index is None:
+            add_action = menu.addAction('Add key point here…')
+            chosen = menu.exec(global_position)
+            if chosen == add_action:
+                self._edit_point(None, when=max(0.001, point.x()),
+                                 value=max(0.0, point.y()))
+            return
+
+        frames = track.sorted_frames()
+        if not 0 <= index < len(frames):
+            return
+        frame = frames[index]
+        self._select(index)
+        summary = menu.addAction(
+            f'{frame.t:.3f} s   ·   {frame.value:.6g} SLPM')
+        summary.setEnabled(False)
+        edit_action = menu.addAction('Edit time and value…')
+
+        transition = menu.addMenu('Transition after point')
+        hold_action = transition.addAction('Hold (step)')
+        linear_action = transition.addAction('Ramp (linear)')
+        for action, kind in ((hold_action, HOLD), (linear_action, LINEAR)):
+            action.setCheckable(True)
+            action.setChecked(frame.interp == kind)
+
+        menu.addSeparator()
+        delete_action = menu.addAction('Delete key point')
+        delete_action.setEnabled(index > 0)
+        if index == 0:
+            delete_action.setText('Delete key point  (opening point is pinned)')
+
+        chosen = menu.exec(global_position)
+        if chosen == edit_action:
+            self._edit_point(index)
+        elif chosen == hold_action:
+            self._set_point_interp(index, HOLD)
+        elif chosen == linear_action:
+            self._set_point_interp(index, LINEAR)
+        elif chosen == delete_action:
+            self._delete_point(index)
+
+    def _edit_point(self, index, *, when=None, value=None):
+        """Open the numerical editor for an existing or new point."""
+        track = self.active_track
+        if track is None:
+            return
+        frames = track.sorted_frames()
+        if index is not None:
+            if not 0 <= index < len(frames):
+                return
+            frame = frames[index]
+            when, value, interp = frame.t, frame.value, frame.interp
+        else:
+            interp = track._interp_at(float(when))
+        dialog = KeyPointDialog(track, index=index, when=when, value=value,
+                                interp=interp, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        when, value, interp = dialog.values
+        if index is None:
+            index = track.add(when, value, interp)
+        else:
+            track.move(index, when, value)
+            track.set_interp(index, interp)
+        self._select(index)
+        self.edited.emit()
+
+    def _set_point_interp(self, index, interp):
+        track = self.active_track
+        if track is not None and track.set_interp(index, interp):
+            self._select(index)
+            self.edited.emit()
+
+    def _delete_point(self, index):
+        track = self.active_track
+        if track is None or not track.remove(index):
+            return
+        self._selected_index = None
+        self._redraw()
+        self.selection_changed.emit(-1)
         self.edited.emit()
 
 
@@ -649,7 +858,8 @@ class SequencePanel(QWidget):
         # paces every setpoint that line is given -- typed, ignition, or
         # replayed from here.
         hint = QLabel('Pick a track to edit it · drag a point to move it · '
-                      'double-click to add · right-click to delete')
+                      'double-click to add or edit · right-click for exact '
+                      'values and actions')
         hint.setObjectName('Hint')
         hint.setWordWrap(True)
         column.addWidget(hint)
@@ -898,7 +1108,7 @@ class SequencePanel(QWidget):
         self.editor.set_hidden(hidden)
 
     def _on_frame_selected(self, index):
-        self._selected_index = index
+        self._selected_index = index if index >= 0 else None
         self._describe_frame()
 
     def _on_interp(self, choice):

@@ -1,21 +1,16 @@
 """The Operation & Monitoring tab: the screen a run is actually driven from.
 
 Two columns over a collapsible sequence panel.  The left column holds the
-things the operator sets up -- the mode switch, logging, targets, the ignition
-sequence -- and the right column holds what the rig is doing about it.  They are separated
+things the operator sets up -- the mode switch, logging, targets, and saved
+sequences -- and the right column holds what the rig is doing about it.  They are separated
 because they change on completely different timescales: the left column is
 touched a handful of times per run, the right column changes ten times a
 second, and interleaving them would put a live number next to every button.
 
 **Progressive disclosure by operating mode.**  Staged (RQL) mode shows the
-auto-calculate card, the ignition sequence, the stage grouping and the
-equivalence-ratio strip.  Standard mode shows none of them, because none of
-them mean anything without two zones and a pilot: a φ computed from a rig
-that is not staged is a number with no referent, and an ignition ramp keyed
-by role would address controllers that have no role.  Hiding them is not
-tidying -- :meth:`FlowSession.ready_ignition` refuses in standard mode too,
-so the screen and the session agree rather than the screen merely being
-polite about it.
+auto-calculation and stage grouping.  Standard mode uses the same saved-
+sequence workflow but hides staged arithmetic that has no meaning without
+two zones and a pilot.
 
 Nothing here writes to hardware directly.  Every setpoint goes out through
 :meth:`FlowSession.set_role_setpoint`, which ramps the lines that must be
@@ -24,24 +19,27 @@ ramped and honours the zero lock.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea,
-                               QSizePolicy, QSplitter, QVBoxLayout, QWidget)
+                               QFrame, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QInputDialog, QMenu, QMessageBox, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+                               QSplitter, QVBoxLayout, QWidget, QWidgetAction)
 
-from ..core.combustion_prefs import SCOPE_ALL, SCOPE_STAGE1, SCOPE_STAGE2
-from ..core.sequence import opening_mismatches
+from ..core.combustion_prefs import (MAX_INLET_COUNT, SCOPE_ALL, SCOPE_STAGE1,
+                                     SCOPE_STAGE2)
+from ..core.sequence import Sequence, opening_mismatches
 from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
                            SEQ_IDLE)
 from ..domain import combustion, roles, rql
 from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
 from .qt_sequence_panel import SequencePanel
-from .qt_widgets import (Card, MetricTile, StageHeader, StateBanner, UnitCard,
+from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
 
 #: Roles the auto-calculation produces a target for, in tile order.
@@ -62,10 +60,6 @@ COMBUSTION_RATES = (('every pass', 1), ('every 2nd pass', 2),
                     ('every 5th pass', 5), ('every 10th pass', 10),
                     ('every 25th pass', 25), ('every 50th pass', 50))
 
-#: Fuel captions on the standard card, with the subscripts an operator reads.
-FUEL_LABELS = {'CH4': 'CH₄', 'H2': 'H₂', 'NH3': 'NH₃'}
-
-
 def _fmt(value, decimals=2, dash='--'):
     """A derived number for a tile, or a dash where there is no answer.
 
@@ -78,22 +72,48 @@ def _fmt(value, decimals=2, dash='--'):
     return f'{value:.{decimals}f}'
 
 
-#: Ignition banner kinds emitted by the session, mapped to the banner's own
-#: vocabulary.  The session speaks about the *sequence*; the banner speaks
-#: about colour.
-BANNER_KINDS = {'pre': 'ready', 'ignited': 'running', 'ok': 'running',
-                'warn': 'ready', 'error': 'fault'}
+def _area_from_diameter(diameter_mm):
+    """Cross-sectional area in mm² for a stored inlet diameter."""
+    if diameter_mm is None:
+        return None
+    return math.pi * float(diameter_mm) ** 2 / 4.0
+
+
+SEQUENCE_SUFFIX = '.fcseq.json'
+_WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *(f'COM{number}' for number in range(1, 10)),
+    *(f'LPT{number}' for number in range(1, 10)),
+}
+
+
+def _sequence_stem(value):
+    """A safe display name and filename stem for a saved sequence."""
+    name = str(value).strip()
+    if name.casefold().endswith(SEQUENCE_SUFFIX):
+        name = name[:-len(SEQUENCE_SUFFIX)].rstrip()
+    if not name:
+        raise ValueError('Enter a name for the sequence.')
+    if len(name) > 96:
+        raise ValueError('Sequence names must be 96 characters or fewer.')
+    if any(character in name for character in '<>:"/\\|?*'):
+        raise ValueError('Sequence names cannot contain < > : " / \\ | ? or *.')
+    if name.endswith(('.', ' ')):
+        raise ValueError('Sequence names cannot end with a dot or space.')
+    if name.split('.', 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"'{name}' is reserved by Windows.")
+    return name
 
 class SavedSequenceRow(QWidget):
-    """One entry in the quick list: a name that loads, and two small actions.
+    """One entry in the quick list: a name that loads, and three actions.
 
     The list used to load and run from the same click, which put an
     irreversible action -- writing the opening setpoints and starting the clock
     -- behind the only gesture there was.  An operator who wanted to *look* at
     what they recorded yesterday had to run it to see it.  So the row is split:
     the name loads the sequence into the panel and stops there, ▶ is the
-    one-click start, and ✕ removes the file.  Both are deliberately small and
-    deliberately separate from the name.
+    one-click start, ✎ renames it, and ✕ removes the file.  The actions are
+    deliberately small and deliberately separate from the name.
 
     Deleting is here rather than behind a right-click menu because a folder
     that only ever grows is a folder nobody prunes: after a week of trials the
@@ -104,6 +124,7 @@ class SavedSequenceRow(QWidget):
     """
 
     play = Signal()
+    rename = Signal()
     remove = Signal()
 
     def __init__(self, name, parent=None):
@@ -126,6 +147,8 @@ class SavedSequenceRow(QWidget):
         for text, object_name, tip, signal in (
                 ('▶', 'RowPlay',
                  'Load and run this sequence once, from the top.', self.play),
+                ('✎', 'RowRename',
+                 'Rename this saved sequence.', self.rename),
                 ('✕', 'RowDelete',
                  'Delete this sequence file.  You will be asked first.',
                  self.remove)):
@@ -181,7 +204,7 @@ def _number(entry, fallback=0.0):
 #  Safety bar                                                             #
 # ---------------------------------------------------------------------- #
 class SafetyBar(QWidget):
-    """The two zero commands, built to sit in the tab strip's corner.
+    """Batch send and zero commands, built into the tab strip's corner.
 
     It lives in this module because it is part of the operation surface, but
     it is mounted by the main window rather than by the tab: an emergency
@@ -189,7 +212,7 @@ class SafetyBar(QWidget):
     emergency control.
     """
 
-    def __init__(self, session, parent=None):
+    def __init__(self, session, send_all, parent=None):
         super().__init__(parent)
         self.session = session
         layout = QHBoxLayout(self)
@@ -198,13 +221,22 @@ class SafetyBar(QWidget):
         layout.setSpacing(theme.PAD_SM)
 
         self.buttons = {}
-        for text, handler in (('ZERO FUEL', session.zero_fuel),
-                              ('ZERO ALL', session.zero_all)):
+        for text, handler, variant, tip in (
+                ('SET ALL FLOWS', send_all, 'accent',
+                 "Send every controller card's SP together."),
+                ('ZERO FUEL', session.zero_fuel, None,
+                 'Zero every assigned non-air controller.'),
+                ('ZERO ALL', session.zero_all, None,
+                 'Zero every assigned controller.')):
             button = QPushButton(text)
-            button.setObjectName('SafetyButton')
+            if variant:
+                button.setProperty('variant', variant)
+            else:
+                button.setObjectName('SafetyButton')
             # Wrapped rather than connected straight through: ``clicked``
             # carries a checked flag and these commands take no argument.
             button.clicked.connect(lambda _checked=False, call=handler: call())
+            button.setToolTip(tip)
             layout.addWidget(button)
             self.buttons[text] = button
 
@@ -215,7 +247,7 @@ class SafetyBar(QWidget):
         for button in self.buttons.values():
             button.setEnabled(bool(armed))
         self.setToolTip('' if armed else
-                        'Connect the flow meters to arm the zero commands.')
+                        'Connect the flow meters to arm these controls.')
 
 
 # ---------------------------------------------------------------------- #
@@ -247,8 +279,13 @@ class OperationTab(QWidget):
         #: because both cards are built, only one is shown, and the figure
         #: they display is the same figure.
         self._combustion_diam = {}
+        #: Scope -> labels displaying the area calculated from the editable
+        #: inlet diameter.  Diameter remains the single stored input.
+        self._combustion_area_labels = {}
+        self._combustion_inlet_spins = {}
         self._combustion_live_boxes = []
         self._combustion_rate_combos = []
+        self._combustion_menus = []
         #: Acquisition passes seen, and whether the cards are currently
         #: showing the paused state -- so pausing repaints once rather than
         #: on every pass it then declines to draw.
@@ -276,8 +313,6 @@ class OperationTab(QWidget):
         session.autocalc_changed.connect(self._on_autocalc)
         session.targets_changed.connect(self._on_targets)
         session.samples_updated.connect(self._on_samples)
-        session.banner.connect(self._on_banner)
-        session.ignition_changed.connect(self._on_ignition)
         session.logging_changed.connect(self._on_logging)
         session.udp_changed.connect(self._on_udp)
         session.logged.connect(self._on_logged)
@@ -305,7 +340,6 @@ class OperationTab(QWidget):
         # the session is holding, or it opens claiming the run is idle while
         # the rig is running.
         self._on_targets(dict(session.target_flows))
-        self._on_ignition(session.ignition_state)
         self._on_logging(session.logging_active, session.log_path)
 
     # ------------------------------------------------------------------ #
@@ -318,9 +352,9 @@ class OperationTab(QWidget):
         the window's height on two controls -- and spent it on the right-hand
         side too, where the plots are and where every pixel of height is
         another few seconds of trace.  Mode belongs beside the cards it
-        governs: switching to Standard is what makes the auto-calculate and
-        ignition cards below it disappear, so the switch and its effect are
-        now visible in the same glance.
+        governs: switching to Standard is what hides the staged target
+        calculator below it, so the switch and its effect are visible in the
+        same glance.
 
         The strip is pinned above the left column's scroll area rather than
         placed inside it, so scrolling down to the sequence list does not
@@ -415,10 +449,6 @@ class OperationTab(QWidget):
         column.addWidget(self._card_logging())
         self._autocalc_card = self._card_autocalc()
         column.addWidget(self._autocalc_card)
-        self._ignition_card = self._card_ignition()
-        column.addWidget(self._ignition_card)
-        self._batch_card = self._card_batch()
-        column.addWidget(self._batch_card)
         self._sequence_card = self._card_sequence()
         column.addWidget(self._sequence_card)
         column.addWidget(self._card_syslog())
@@ -605,113 +635,28 @@ class OperationTab(QWidget):
             # no message, because the operator stops reading the line.
             self.calc_status.setText('No targets stored yet.')
 
-    # -- ignition --------------------------------------------------------- #
-    def _card_ignition(self):
-        card = Card(
-            'Ignition Sequence', index=2,
-            help_text=('Prepare scaled pre-ignition flows, then ramp to the '
-                       'stored targets. Targets can also be copied into the '
-                       'manual setpoint fields for review without sending.'))
-        self.banner = StateBanner()
-        card.add(self.banner)
-
-        grid, entries = field_grid([
-            ('Fuel pre-ignition (%)', 80), ('Air pre-ignition (%)', 80),
-            ('Ramp steps', 10), ('Step interval (s)', 0.5),
-        ], width=64)
-        self._ignition_fields = entries
-        card.add_layout(grid)
-
-        self.step1 = QPushButton('STEP 1 — Pre-Ignition   (set scaled flows)')
-        self.step1.setProperty('variant', 'ready')
-        self.step1.clicked.connect(self._pre_ignition)
-        card.add(self.step1)
-
-        self.step2 = QPushButton('STEP 2 — Ignite   (ramp to target flows)')
-        self.step2.setProperty('variant', 'accent')
-        self.step2.setEnabled(False)
-        self.step2.clicked.connect(self._ignite)
-        card.add(self.step2)
-
-        card.add(divider())
-        stage = QPushButton('Stage Targets to SP Fields   (no flows sent)')
-        stage.setProperty('variant', 'quiet')
-        stage.clicked.connect(self._stage_targets)
-        card.add(stage)
-        return card
-
-    def _pre_ignition(self):
-        fields = self._ignition_fields
-        self.session.ready_ignition(
-            _number(fields['Fuel pre-ignition (%)']) / 100.0,
-            _number(fields['Air pre-ignition (%)']) / 100.0,
-            int(_number(fields['Ramp steps'], 10)),
-            _number(fields['Step interval (s)'], 0.5))
-
-    def _ignite(self):
-        fields = self._ignition_fields
-        self.session.ignite(int(_number(fields['Ramp steps'], 10)),
-                            _number(fields['Step interval (s)'], 0.5))
-
-    def _stage_targets(self):
-        """Put the stored targets in the SP boxes without sending anything.
-
-        Two steps rather than one on purpose: the operator gets to read every
-        number that is about to be commanded, in the same place they would
-        have typed it, before any of it leaves the machine.
-        """
-        staged = 0
-        for key, target in self.session.target_flows.items():
-            unit = self.session.unit_for_role(key)
-            card = self._cards.get(unit)
-            if card is not None:
-                card.entry.setText(f'{target:.2f}')
-                staged += 1
-        self.status.emit(f'{staged} target(s) staged into the SP fields. '
-                         'No flows sent.')
-
-    def _on_ignition(self, state):
-        self.step2.setEnabled(state == 'PRE_IGNITION')
-        if state == 'IDLE':
-            self.banner.set_state('idle', 'IDLE — calculate targets first')
-
-    def _on_banner(self, text, kind):
-        self.banner.set_state(BANNER_KINDS.get(kind, 'idle'), text)
-
     def _on_ramp(self, key, percent):
         self.status.emit(
             f'{roles.ROLE_LABELS.get(key, key)}: ramping {percent}%')
 
-    # -- batch ------------------------------------------------------------ #
-    def _card_batch(self):
-        card = Card(
-            'Batch Control', index=3,
-            help_text=('Send every visible controller setpoint together or '
-                       'zero every assigned flow. Air and pilot lines are '
-                       'always approached as ramps to avoid a pressure '
-                       'transient into the burner.'))
-        send_all = QPushButton("Set All Flows Together   (send every card's SP)")
-        send_all.clicked.connect(self._send_all)
-        card.add(send_all)
-
-        zero = QPushButton('Zero All Flows   (monitoring continues)')
-        zero.setProperty('variant', 'danger')
-        zero.clicked.connect(lambda: self.session.zero_all())
-        card.add(zero)
-
-        return card
-
-    def _send_all(self):
+    def send_all(self):
         for card in self._cards.values():
             card._emit_setpoint()
+        self.status.emit(
+            f'{len(self._cards)} controller setpoint(s) queued together.')
 
     # -- sequence --------------------------------------------------------- #
     def _card_sequence(self):
         card = Card(
-            'Sequence', index=4,
+            'Sequence', index=2,
             help_text=('Record every commanded setpoint while monitoring, '
                        'edit the resulting curve, then replay or repeat it. '
-                       'Saved sequences can be loaded, run, or deleted below.'))
+                       'Clicking a saved name loads it into the panel and '
+                       'nothing moves. ▶ loads and runs it once, with no '
+                       'repeats, and only if the rig is already standing at '
+                       'the flows it opens with; otherwise the lines that '
+                       'disagree are shown. ✎ renames the saved file. '
+                       '✕ deletes it after confirmation.'))
         self.sequence_btn = QPushButton('▸  Record / Replay Sequence')
         self.sequence_btn.setCheckable(True)
         self.sequence_btn.setProperty('variant', 'quiet')
@@ -719,7 +664,7 @@ class OperationTab(QWidget):
         card.add(self.sequence_btn)
 
         card.add(divider())
-        card.add(label('SAVED SEQUENCES  —  CLICK TO LOAD,  ▶ RUN,  ✕ DELETE',
+        card.add(label('SAVED SEQUENCES  —  CLICK LOAD,  ▶ RUN,  ✎ RENAME,  ✕ DELETE',
                        color=theme.TEXT_DIM, size=7, bold=True))
         self.saved_list = QListWidget()
         self.saved_list.setFixedHeight(theme.scale(104))
@@ -740,15 +685,6 @@ class OperationTab(QWidget):
         self.saved_list.itemClicked.connect(self._on_saved_clicked)
         card.add(self.saved_list)
 
-        saved_hint = QLabel('Clicking a name loads it into the panel above and '
-                            'nothing moves. ▶ loads it and runs it once, no '
-                            'repeats — and only if the rig is already standing '
-                            'at the flows it opens with; otherwise you are told '
-                            'which lines disagree. ✕ deletes the file, after '
-                            'asking.')
-        saved_hint.setObjectName('Hint')
-        saved_hint.setWordWrap(True)
-        card.add(saved_hint)
         self._refresh_saved()
         return card
 
@@ -773,10 +709,13 @@ class OperationTab(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(f'{path}\n\nClick the name to load it. ▶ loads '
-                            'and runs it once, from the top. ✕ deletes it.')
+                            'and runs it once, from the top. ✎ renames it. '
+                            '✕ deletes it.')
             widget = SavedSequenceRow(name)
             widget.play.connect(
                 lambda chosen=str(path): self._play_saved(chosen))
+            widget.rename.connect(
+                lambda chosen=str(path): self._rename_saved(chosen))
             widget.remove.connect(
                 lambda chosen=str(path): self._delete_saved(chosen))
             item.setSizeHint(widget.sizeHint())
@@ -836,6 +775,78 @@ class OperationTab(QWidget):
         # deserves the timeline, the curves and the Stop button.
         self.sequence_btn.setChecked(True)
         self.sequence_panel.request_replay(repeats=1)
+
+    def _rename_saved(self, path):
+        """Ask for a new saved-sequence name, then rename file and metadata."""
+        target = Path(path)
+        current = target.name[:-len(SEQUENCE_SUFFIX)]
+        name, accepted = QInputDialog.getText(
+            self, 'Rename saved sequence', 'New name:', text=current)
+        if not accepted:
+            return
+        if not self._rename_saved_to(target, name):
+            return
+
+    def _rename_saved_to(self, path, name):
+        """Rename one sequence without overwriting another saved run."""
+        target = Path(path)
+        try:
+            clean_name = _sequence_stem(name)
+        except ValueError as exc:
+            self.status.emit(f'Could not rename sequence: {exc}')
+            return False
+
+        destination = target.with_name(clean_name + SEQUENCE_SUFFIX)
+        if destination == target:
+            return True
+        if destination.exists():
+            self.status.emit(
+                f"Could not rename sequence: '{clean_name}' already exists.")
+            return False
+
+        try:
+            renamed = Sequence.load(target)
+            renamed.name = clean_name
+            renamed.path = None
+            renamed.save(destination)
+        except Exception as exc:
+            self.status.emit(f'Could not rename {target.name}: {exc}')
+            return False
+
+        try:
+            target.unlink()
+        except OSError as exc:
+            # The old file is still the authoritative copy.  Remove the newly
+            # written sibling so a failed rename never leaves two entries.
+            try:
+                destination.unlink()
+            except OSError:
+                self.status.emit(
+                    f'Could not remove {target.name} after writing '
+                    f'{destination.name}: {exc}. Both files remain.')
+            else:
+                self.status.emit(f'Could not rename {target.name}: {exc}')
+            self._refresh_saved()
+            return False
+
+        current = self.session.sequence
+        if current is not None and current.path is not None:
+            try:
+                same_sequence = current.path.resolve() == target.resolve()
+            except OSError:
+                same_sequence = current.path == target
+            if same_sequence:
+                # Preserve edits currently open on the panel; renaming a saved
+                # file must not reload its older on-disk curve over that work.
+                current.name = clean_name
+                current.path = destination
+                self.session.set_sequence(current)
+
+        self.status.emit(
+            f"Renamed '{target.name[:-len(SEQUENCE_SUFFIX)]}' to "
+            f"'{clean_name}'.")
+        self._refresh_saved()
+        return True
 
     def _delete_saved(self, path):
         """Remove one saved sequence from disk, once the operator confirms.
@@ -1003,140 +1014,189 @@ class OperationTab(QWidget):
 
     def _build_combustion_staged(self):
         card = Card(
-            'Combustion — RQL', collapsible=False,
-            help_text=('Live RQL estimate from the assigned NH₃, H₂, CH₄, '
-                       'air, and pilot flows. Pilot fuel is included in φ. '
-                       'All values are read-only calculations; bulk velocity '
-                       'appears only when the relevant inlet diameter is set.'))
-        flows = [(key, SHORT_LABELS[key],
-                  theme.INFO if key in roles.AIR_KEYS else theme.TEXT)
-                 for key, _role_label in roles.ROLES]
-        flows.append(('total', 'TOTAL FUEL', theme.WARN))
-        flows.append((None, None, None))
-        flows.extend((('phi1', 'φ STAGE 1', theme.PHI_STAGE),
-                      ('phi2', 'φ STAGE 2', theme.PHI_STAGE),
-                      ('phig', 'φ GLOBAL', theme.PHI_GLOBAL)))
-        strip = self._tile_strip(flows, self._combustion)
-        for key, _role_label in roles.ROLES:
-            self._combustion[key].set_value('0.000')
-        self._combustion['total'].set_value('0.000')
-        # φ is the number the operator is actually flying the rig on, so it is
-        # the one drawn large.
-        for key in ('phi1', 'phi2', 'phig'):
+            'Combustion — Staged (RQL)', collapsible=False,
+            help_text=('The pilot share of Stage 1 fuel by volume, plus each '
+                       "stage's live φ, power, and inlet bulk velocity. Enter "
+                       'the two inlet cross-sectional areas to calculate '
+                       'velocity. Nothing here is sent to the controllers.'))
+
+        # Three compact columns preserve the original card height while still
+        # giving each part of the burner a clear visual boundary.  The pilot
+        # is deliberately separate from Stage 1 even though its methane is
+        # included in the Stage 1 and global combustion balances.
+        groups = QHBoxLayout()
+        groups.setSpacing(theme.PAD_MD)
+        groups.addWidget(self._combustion_group(
+            'PILOT', 'SHARE OF STAGE 1 FUEL', (
+                ('pilot_split', 'PILOT SPLIT  %', theme.TEXT_BRIGHT),
+            )), 2)
+        groups.addWidget(self._combustion_group(
+            'STAGE 1', 'RICH · PILOT INCLUDED', (
+                ('phi1', 'φ', theme.TEXT_BRIGHT),
+                ('vel1', 'INLET VEL  m/s', theme.TEXT_BRIGHT),
+                ('power1', 'POWER  kW', theme.TEXT_BRIGHT),
+            )), 3)
+        groups.addWidget(self._combustion_group(
+            'STAGE 2', 'LEAN / QUENCH', (
+                ('phi2', 'φ', theme.TEXT_BRIGHT),
+                ('vel2', 'INLET VEL  m/s', theme.TEXT_BRIGHT),
+                ('power2', 'POWER  kW', theme.TEXT_BRIGHT),
+            )), 3)
+        card.add_layout(groups)
+
+        for key in ('phi1', 'phi2'):
             self._combustion[key].value.setFont(mono(16, True))
-        card.add_layout(strip)
-
-        card.add_layout(self._tile_strip((
-            ('power', 'POWER  kW', theme.OK),
-            ('power1', 'POWER S1  kW', theme.TEXT_MUTED),
-            ('power2', 'POWER S2  kW', theme.TEXT_MUTED),
-            ('stoich1', 'STOICH AIR S1', theme.INFO),
-            ('stoich2', 'STOICH AIR S2', theme.INFO),
-            ('vel1', 'BULK VEL S1  m/s', theme.TEAL),
-            ('vel2', 'BULK VEL S2  m/s', theme.TEAL),
-        ), self._combustion))
-
-        self._combustion['summary1'] = label(
-            '', color=theme.TEXT_DIM, size=8, monospace=True)
-        self._combustion['summary2'] = label(
-            '', color=theme.TEXT_DIM, size=8, monospace=True)
-        card.add(self._combustion['summary1'])
-        card.add(self._combustion['summary2'])
-        card.add(divider())
-        card.add(self._build_combustion_settings(
-            ((SCOPE_STAGE1, 'Stage 1 inlet Ø'),
-             (SCOPE_STAGE2, 'Stage 2 inlet Ø'))))
+        self._attach_combustion_menu(card, (
+            (SCOPE_STAGE1, 'Stage 1 inlet'),
+            (SCOPE_STAGE2, 'Stage 2 inlet'),
+        ))
         return card
+
+    def _combustion_group(self, title, subtitle, specs):
+        """A compact horizontal group of the few values used during a run."""
+        group = QFrame()
+        group.setObjectName('CombustionStageCard')
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(theme.PAD_MD, theme.PAD_SM + 2,
+                                  theme.PAD_MD, theme.PAD_MD)
+        layout.setSpacing(theme.PAD_SM)
+
+        heading = QHBoxLayout()
+        heading.setSpacing(theme.PAD_SM)
+        heading.addWidget(label(title, color=theme.TEXT_BRIGHT, size=9, bold=True,
+                                object_name='CombustionGroupTitle'))
+        heading.addWidget(label(subtitle, color=theme.TEXT_MUTED, size=7,
+                                object_name='CombustionGroupSubtitle'))
+        heading.addStretch(1)
+        layout.addLayout(heading)
+
+        layout.addLayout(self._tile_strip(specs, self._combustion, size=12))
+        return group
 
     def _build_combustion_standard(self):
         card = Card(
             'Combustion', collapsible=False,
-            help_text=('Live estimate from the gases and flows assigned to '
-                       'the controllers. It reports blend, φ, power, '
-                       'stoichiometric air, air/fuel ratios, and bulk velocity '
-                       'without writing anything to hardware.'))
-        flows = [(fuel, FUEL_LABELS[fuel], theme.GAS_COLORS.get(fuel, theme.TEXT))
-                 for fuel in combustion.FUELS]
-        flows.append(('total', 'TOTAL FUEL', theme.WARN))
-        flows.append(('air', 'AIR', theme.INFO))
-        flows.append((None, None, None))
-        flows.append(('phi', 'φ', theme.PHI_GLOBAL))
-        strip = self._tile_strip(flows, self._combustion_std)
-        for key in list(combustion.FUELS) + ['total', 'air']:
-            self._combustion_std[key].set_value('0.000')
+            help_text=('Live φ, power, and inlet bulk velocity for the gases '
+                       'assigned to the standard single-inlet rig. Use the '
+                       'menu to set inlet diameter and estimate refresh.'))
+        strip = self._tile_strip((
+            ('phi', 'φ', theme.TEXT_BRIGHT),
+            ('vel', 'INLET VEL  m/s', theme.TEXT_BRIGHT),
+            ('power', 'POWER  kW', theme.TEXT_BRIGHT),
+        ), self._combustion_std, size=12)
         self._combustion_std['phi'].value.setFont(mono(16, True))
         card.add_layout(strip)
-
-        card.add_layout(self._tile_strip((
-            ('power', 'POWER  kW', theme.OK),
-            ('stoich', 'STOICH AIR  SLPM', theme.INFO),
-            ('afr', 'A/F  vol', theme.TEXT_MUTED),
-            ('afr_stoich', 'A/F STOICH  vol', theme.TEXT_MUTED),
-            ('afr_mass', 'A/F STOICH  mass', theme.TEXT_MUTED),
-            ('vel', 'BULK VEL  m/s', theme.TEAL),
-        ), self._combustion_std))
-
-        self._combustion_std['summary'] = label(
-            '', color=theme.TEXT_DIM, size=8, monospace=True)
-        card.add(self._combustion_std['summary'])
-        card.add(divider())
-        card.add(self._build_combustion_settings(
-            ((SCOPE_ALL, 'Inlet Ø'),)))
+        self._attach_combustion_menu(card, ((SCOPE_ALL, 'Inlet'),))
         return card
 
-    def _build_combustion_settings(self, scopes):
-        """The estimate's own controls: the inlet bores, and whether it runs.
+    def _attach_combustion_menu(self, card, scopes):
+        """Put inlet geometry and refresh controls behind a header menu."""
+        button = QPushButton('☰')
+        button.setObjectName('CardMenuButton')
+        button.setAccessibleName('Combustion estimate settings')
+        button.setToolTip('Inlet diameter and live-estimate settings')
+        button.setFixedSize(theme.scale(30), theme.scale(26))
 
-        Repeated on both cards rather than shared between them, because only
-        one card is ever on screen and an operator should not have to change
-        the rig's mode to reach the switch that turns the numbers above it
-        back on.  Both sets of widgets show the same stored settings.
-        """
-        widgets = [label('ESTIMATE', color=theme.TEXT_DIM, size=7, bold=True)]
+        menu = QMenu(button)
+        menu.setObjectName('CombustionSettingsMenu')
+        panel = QWidget()
+        panel.setObjectName('CombustionMenuPanel')
+        panel.setMinimumWidth(theme.scale(360))
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(theme.PAD_MD, theme.PAD_MD,
+                                  theme.PAD_MD, theme.PAD_MD)
+        layout.setSpacing(theme.PAD_SM)
+        layout.addWidget(label('ESTIMATE SETTINGS', color=theme.TEXT_BRIGHT,
+                               size=8, bold=True))
+
         for scope, caption in scopes:
+            geometry = QWidget()
+            geometry.setObjectName('Row')
+            line = QHBoxLayout(geometry)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(theme.PAD_SM)
+            line.addWidget(label(f'{caption} diameter',
+                                 color=theme.TEXT_MUTED, size=8))
+            line.addStretch(1)
             entry = QLineEdit()
-            entry.setFixedWidth(theme.scale(60))
+            entry.setObjectName('CombustionDiameterInput')
+            entry.setProperty('scope', scope)
+            entry.setFixedWidth(theme.scale(72))
             entry.setAlignment(Qt.AlignmentFlag.AlignRight)
-            # Blank is a real state, not an unset one: with no bore declared
-            # the velocity tile reads "--" rather than a number worked out
-            # against a guess.
             entry.setPlaceholderText('—')
             entry.setToolTip(
-                'Internal diameter of this inlet, in millimetres.\n'
-                'Used for the bulk velocity only — nothing is sent to the '
-                'controllers.\nLeave blank to hide the velocity.')
+                'Internal inlet diameter in millimetres. The cross-sectional '
+                'area is calculated from this value and used for bulk velocity.')
             entry.editingFinished.connect(
                 lambda scope=scope, entry=entry:
                 self._on_combustion_diameter(scope, entry.text()))
             self._combustion_diam.setdefault(scope, []).append(entry)
-            widgets.append(label(caption, color=theme.TEXT_MUTED, size=8))
-            widgets.append(entry)
-            widgets.append(label('mm', color=theme.TEXT_DIM, size=8))
+            line.addWidget(entry)
+            line.addWidget(label('mm', color=theme.TEXT_MUTED, size=8))
+            layout.addWidget(geometry)
+            if scope == SCOPE_STAGE2:
+                count_row = QWidget()
+                count_row.setObjectName('Row')
+                count_line = QHBoxLayout(count_row)
+                count_line.setContentsMargins(0, 0, 0, 0)
+                count_line.setSpacing(theme.PAD_SM)
+                count_line.addWidget(label('Number of Stage 2 inlets',
+                                           color=theme.TEXT_MUTED, size=8))
+                count_line.addStretch(1)
+                count = QSpinBox()
+                count.setObjectName('CombustionInletCountInput')
+                count.setRange(1, MAX_INLET_COUNT)
+                count.setFixedWidth(theme.scale(72))
+                count.setAlignment(Qt.AlignmentFlag.AlignRight)
+                count.setToolTip(
+                    'Number of identical Stage 2 inlets. Bulk velocity uses '
+                    'the entered per-inlet diameter multiplied across this '
+                    'many circular areas.')
+                count.valueChanged.connect(
+                    lambda value, scope=scope:
+                    self.session.set_combustion_inlets(scope, value))
+                self._combustion_inlet_spins.setdefault(scope, []).append(count)
+                count_line.addWidget(count)
+                layout.addWidget(count_row)
+            area = label('AREA  — mm²', color=theme.TEXT_MUTED, size=7,
+                         monospace=True)
+            area.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._combustion_area_labels.setdefault(scope, []).append(area)
+            layout.addWidget(area)
 
+        layout.addWidget(divider())
+        estimate = QWidget()
+        estimate.setObjectName('Row')
+        estimate_line = QHBoxLayout(estimate)
+        estimate_line.setContentsMargins(0, 0, 0, 0)
+        estimate_line.setSpacing(theme.PAD_SM)
         live = QCheckBox('Compute live')
         live.setToolTip(
             'Uncheck to stop recomputing and redrawing this card.\n'
             'Acquisition, logging, ramps and the sequence are unaffected.')
         live.toggled.connect(self._on_combustion_live)
         self._combustion_live_boxes.append(live)
-        widgets.append(live)
+        estimate_line.addWidget(live)
+        estimate_line.addStretch(1)
 
         combo = QComboBox()
         for caption, passes in COMBUSTION_RATES:
             combo.addItem(caption, passes)
         combo.setFixedWidth(theme.scale(118))
-        combo.setToolTip(
-            'How often the card refreshes, in acquisition passes.\n'
-            'Slowing it down is the cheap half of the saving: the arithmetic '
-            'costs nothing,\nthe redraw of a dozen tiles at ten hertz is what '
-            'is worth giving up.')
+        combo.setToolTip('How often the card refreshes, in acquisition passes.')
         combo.currentIndexChanged.connect(
             lambda _index, combo=combo:
             self.session.set_combustion_interval(combo.currentData()))
         self._combustion_rate_combos.append(combo)
-        widgets.append(combo)
-        widgets.append(None)
-        return row(*widgets, spacing=theme.PAD_SM)
+        estimate_line.addWidget(combo)
+        layout.addWidget(estimate)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        button.setMenu(menu)
+        card.add_header_widget(button)
+        self._combustion_menus.append(menu)
 
     # -- combustion: operator input ---------------------------------------- #
     def _on_combustion_diameter(self, scope, text):
@@ -1159,6 +1219,25 @@ class OperationTab(QWidget):
             for entry in entries:
                 if entry.text() != text:
                     entry.setText(text)
+        for scope, spins in self._combustion_inlet_spins.items():
+            count = self.session.combustion_inlets(scope)
+            for spin in spins:
+                spin.blockSignals(True)
+                spin.setValue(count)
+                spin.blockSignals(False)
+        for scope, labels in self._combustion_area_labels.items():
+            diameter = self.session.combustion_diameter(scope)
+            area = _area_from_diameter(diameter)
+            if area is None:
+                text = 'AREA  — mm²'
+            elif scope == SCOPE_STAGE2:
+                count = self.session.combustion_inlets(scope)
+                text = (f'AREA  {area:.4g} mm² × {count} = '
+                        f'{area * count:.4g} mm² TOTAL')
+            else:
+                text = f'AREA  {area:.4g} mm²'
+            for area_label in labels:
+                area_label.setText(text)
         live = self.session.combustion_live
         for box in self._combustion_live_boxes:
             # Blocked, because these are being set *from* the stored state:
@@ -1229,77 +1308,28 @@ class OperationTab(QWidget):
         if flows is None:
             flows = {key: self.session.flow_for_role(key, samples)
                      for key, _role_label in roles.ROLES}
-        for key, _role_label in roles.ROLES:
-            self._combustion[key].set_value(f'{flows.get(key, 0.0):.3f}')
-        self._combustion['total'].set_value(
-            f"{sum(flows.get(key, 0.0) for key in roles.FUEL_KEYS):.3f}")
+        pilot = max(0.0, flows.get('ch4_pilot', 0.0))
+        stage1_fuel = pilot + sum(
+            max(0.0, flows.get(key, 0.0))
+            for key in ('nh3_rich', 'h2_rich'))
+        pilot_split = None if stage1_fuel <= 0.0 else pilot / stage1_fuel * 100.0
+        self._combustion['pilot_split'].set_value(
+            '--' if pilot_split is None else f'{pilot_split:.1f}')
 
         stage1 = self.session.combustion_estimate(SCOPE_STAGE1, samples)
         stage2 = self.session.combustion_estimate(SCOPE_STAGE2, samples)
-        # The whole-rig figures are the two stages added, not a fresh sum over
-        # every assigned controller: that keeps φ GLOBAL identical to the one
-        # the CSV records, and keeps a controller assigned outside the RQL
-        # roles out of a ratio it has no part in.
-        whole = combustion.estimate(
-            {fuel: stage1.fuels.get(fuel, 0.0) + stage2.fuels.get(fuel, 0.0)
-             for fuel in combustion.FUELS}, stage1.air + stage2.air)
-
-        for key, value in (('phi1', stage1.phi), ('phi2', stage2.phi),
-                           ('phig', whole.phi)):
+        for key, value in (('phi1', stage1.phi), ('phi2', stage2.phi)):
             self._combustion[key].set_value(_fmt(value))
-        self._combustion['power'].set_value(_fmt(whole.power_kw))
         self._combustion['power1'].set_value(_fmt(stage1.power_kw))
         self._combustion['power2'].set_value(_fmt(stage2.power_kw))
-        self._combustion['stoich1'].set_value(_fmt(stage1.stoich_air))
-        self._combustion['stoich2'].set_value(_fmt(stage2.stoich_air))
         self._combustion['vel1'].set_value(_fmt(stage1.velocity))
         self._combustion['vel2'].set_value(_fmt(stage2.velocity))
-        self._combustion['summary1'].setText(
-            self._combustion_summary('S1', stage1))
-        self._combustion['summary2'].setText(
-            self._combustion_summary('S2', stage2))
 
     def _refresh_combustion_standard(self, samples):
         estimate = self.session.combustion_estimate(SCOPE_ALL, samples)
-        for fuel in combustion.FUELS:
-            self._combustion_std[fuel].set_value(
-                f'{estimate.fuels.get(fuel, 0.0):.3f}')
-        self._combustion_std['total'].set_value(f'{estimate.fuel_total:.3f}')
-        self._combustion_std['air'].set_value(f'{estimate.air:.3f}')
         self._combustion_std['phi'].set_value(_fmt(estimate.phi))
         self._combustion_std['power'].set_value(_fmt(estimate.power_kw))
-        self._combustion_std['stoich'].set_value(_fmt(estimate.stoich_air))
-        self._combustion_std['afr'].set_value(_fmt(estimate.afr_volume))
-        self._combustion_std['afr_stoich'].set_value(
-            _fmt(estimate.afr_stoich_volume))
-        self._combustion_std['afr_mass'].set_value(
-            _fmt(estimate.afr_stoich_mass))
         self._combustion_std['vel'].set_value(_fmt(estimate.velocity))
-        self._combustion_std['summary'].setText(
-            self._combustion_summary('mixture', estimate))
-
-    def _combustion_summary(self, prefix, estimate):
-        """One line of what the tiles cannot hold: the blend, and the diluent.
-
-        The blend is by volume, because that is what the meters read and what
-        a blend is set in on this rig -- "70/30 NH₃/H₂" has never meant by
-        mass here.
-        """
-        if not estimate.blend:
-            return f'{prefix}   no fuel flowing'
-        parts = '  '.join(
-            f'{FUEL_LABELS[fuel]} {share * 100:.0f}%'
-            for fuel, share in estimate.blend.items() if share > 0.0)
-        text = f'{prefix}   blend by volume  {parts}'
-        if estimate.afr_stoich_volume:
-            text += (f'   ·   stoich A/F  '
-                     f'{estimate.afr_stoich_volume:.2f} vol')
-        if estimate.afr_stoich_mass:
-            text += f'  {estimate.afr_stoich_mass:.2f} mass'
-        if estimate.inert > 0.0:
-            text += (f'   ·   {estimate.inert:.2f} SLPM non-reacting, '
-                     'counted in the velocity only')
-        return text
 
     # -- live cards ------------------------------------------------------- #
     def _rebuild_cards(self):
@@ -1518,7 +1548,6 @@ class OperationTab(QWidget):
             button.style().unpolish(button)
             button.style().polish(button)
         self._autocalc_card.setVisible(staged)
-        self._ignition_card.setVisible(staged)
         self._combustion_card.setVisible(staged)
         self._combustion_std_card.setVisible(not staged)
         # The card being uncovered has whatever the other mode last left on
@@ -1528,8 +1557,7 @@ class OperationTab(QWidget):
         # no use here: at construction nothing has been shown yet, so the
         # mode itself is what decides.
         for step, card in enumerate([card for card, shown in (
-                (self._autocalc_card, staged), (self._ignition_card, staged),
-                (self._batch_card, True), (self._sequence_card, True))
+                (self._autocalc_card, staged), (self._sequence_card, True))
                 if shown], start=1):
             card.set_index(step)
         self._rebuild_cards()

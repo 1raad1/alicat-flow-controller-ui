@@ -1,12 +1,12 @@
 """The window the three tabs live in, and the Qt entry point.
 
 The window owns almost no behaviour of its own.  It holds the session, mounts
-the three tabs on it, and keeps the two pieces of chrome that must not belong
+the three tabs on it, and keeps the three pieces of chrome that must not belong
 to any one tab:
 
-* the **safety bar**, in the tab strip's corner.  ``ZERO FUEL`` and ``ZERO ALL``
-  are reachable from every tab because an emergency control that depends on
-  which tab happens to be open is not an emergency control.
+* the **control bar**, in the tab strip's corner.  ``SET ALL FLOWS``,
+  ``ZERO FUEL`` and ``ZERO ALL`` are reachable from every tab; the zero actions
+  must never depend on which tab happens to be open.
 * the **status fields**, which are where the run states that outlive a single
   screen — poll rate, log file, LabVIEW listener, sequence, graphs — are
   readable without leaving the tab you are working in.  They sit beside the
@@ -234,7 +234,10 @@ class TitleBar(GlassBar):
     """
 
     def __init__(self, window, parent=None):
-        super().__init__('bottom', parent)
+        # A separate full-width divider sits below this widget.  A hairline
+        # painted inside the bar can be overdrawn by translucent child
+        # controls, which caused the break near the link and settings cluster.
+        super().__init__(None, parent)
         self._window = window
         self._pressed_at = None
 
@@ -363,6 +366,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._build_title_bar())
+        title_divider = QWidget()
+        title_divider.setObjectName('TitleDivider')
+        title_divider.setFixedHeight(1)
+        layout.addWidget(title_divider)
         layout.addWidget(self._build_tabs(), 1)
         layout.addWidget(self._build_status_bar())
         # Replaces and destroys whatever was there before.
@@ -519,7 +526,7 @@ class MainWindow(QMainWindow):
             lambda text: self._set_field('graphs', f'graphs  {text}'))
         self._set_field('graphs', f'graphs  {self.logging_tab.graphs_text()}')
 
-        tabs.setCornerWidget(SafetyBar(self.session),
+        tabs.setCornerWidget(SafetyBar(self.session, self.operation_tab.send_all),
                              Qt.Corner.TopRightCorner)
         self._tabs = tabs
         return tabs
@@ -612,7 +619,7 @@ class MainWindow(QMainWindow):
 
     def _on_connection(self, connected):
         if connected:
-            count = len(self.session.controller_instances)
+            count = len(self.session.assigned_units())
             port = self.session.port or '—'
             self._set_link('ok', f"{count} controller{'' if count == 1 else 's'}"
                                  f" · {port} · {self.session.baudrate} baud")
