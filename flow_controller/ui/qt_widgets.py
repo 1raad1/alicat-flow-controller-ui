@@ -322,7 +322,7 @@ class Card(QFrame):
 
     toggled = Signal(bool)
 
-    def __init__(self, title, *, index=None, collapsible=True,
+    def __init__(self, title, *, index=None, help_text=None, collapsible=True,
                  collapsed=False, parent=None):
         super().__init__(parent)
         self.setObjectName('Card')
@@ -343,9 +343,25 @@ class Card(QFrame):
         self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._badge.setVisible(index is not None)
         header_layout.addWidget(self._badge)
-        title_label = QLabel(title)
-        title_label.setObjectName('CardTitle')
-        header_layout.addWidget(title_label)
+        self._title_label = QLabel(title)
+        self._title_label.setObjectName('CardTitle')
+        header_layout.addWidget(self._title_label)
+
+        self._info = QLabel('ⓘ')
+        self._info.setObjectName('CardInfo')
+        self._info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._info.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self._info.setVisible(bool(help_text))
+        self._info.setAccessibleName(f'About {title}')
+        header_layout.addWidget(self._info)
+
+        if help_text:
+            # The full header gets the tooltip as well as the explicit badge:
+            # experienced operators can hover the title directly, while the
+            # badge makes the affordance discoverable to somebody new.
+            for widget in (header, self._title_label, self._info):
+                widget.setToolTip(help_text)
+                widget.setAccessibleDescription(help_text)
         header_layout.addStretch(1)
 
         self._chevron = QLabel('▾' if not collapsed else '▸')

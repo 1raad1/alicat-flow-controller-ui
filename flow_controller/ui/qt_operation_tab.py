@@ -431,7 +431,14 @@ class OperationTab(QWidget):
 
     # -- logging --------------------------------------------------------- #
     def _card_logging(self):
-        card = Card('Logging & Acquisition')
+        card = Card(
+            'Logging & Acquisition',
+            help_text=('Write one CSV row per completed monitoring pass. The '
+                       'columns are fixed from the assignment present when '
+                       'logging starts, so zones cannot move while a log is '
+                       'open. The LabVIEW UDP listener accepts "log" to open '
+                       'a timestamped copy and "stop" to close it; rows are '
+                       'written only while monitoring is running.'))
 
         self.log_path = QLineEdit(str(DEFAULT_LOG_DIR / 'run.csv'))
         # textEdited, not textChanged: the field is also written to from
@@ -471,19 +478,6 @@ class OperationTab(QWidget):
                                monospace=True)
         card.add(row(self.udp_btn, self.udp_state, None))
 
-        udp_hint = QLabel('A "log" datagram opens a timestamped copy of the '
-                          'file above and starts recording; "stop" closes it. '
-                          'Rows are only written while the monitor is running.')
-        udp_hint.setObjectName('Hint')
-        udp_hint.setWordWrap(True)
-        card.add(udp_hint)
-
-        hint = QLabel('The CSV columns are written from the assignment in '
-                      'force when logging starts, so zones cannot be moved '
-                      'while a log is open.')
-        hint.setObjectName('Hint')
-        hint.setWordWrap(True)
-        card.add(hint)
         return card
 
     def _remember_log_destination(self, text):
@@ -526,7 +520,11 @@ class OperationTab(QWidget):
 
     # -- auto-calculate --------------------------------------------------- #
     def _card_autocalc(self):
-        card = Card('Auto-Calculate Flows', index=1)
+        card = Card(
+            'Auto-Calculate Flows', index=1,
+            help_text=('Calculate and store controller targets from firing '
+                       'power, hydrogen fraction, stage split, and equivalence '
+                       'ratios. Calculation alone never sends a flow command.'))
         grid, entries = field_grid([
             ('Power (kW)', 10), ('H₂ percentage (%)', 30),
             ('Stage 1 split (%)', 99.99), ('φ stage 1', 1.1),
@@ -609,7 +607,11 @@ class OperationTab(QWidget):
 
     # -- ignition --------------------------------------------------------- #
     def _card_ignition(self):
-        card = Card('Ignition Sequence', index=2)
+        card = Card(
+            'Ignition Sequence', index=2,
+            help_text=('Prepare scaled pre-ignition flows, then ramp to the '
+                       'stored targets. Targets can also be copied into the '
+                       'manual setpoint fields for review without sending.'))
         self.banner = StateBanner()
         card.add(self.banner)
 
@@ -682,7 +684,12 @@ class OperationTab(QWidget):
 
     # -- batch ------------------------------------------------------------ #
     def _card_batch(self):
-        card = Card('Batch Control', index=3)
+        card = Card(
+            'Batch Control', index=3,
+            help_text=('Send every visible controller setpoint together or '
+                       'zero every assigned flow. Air and pilot lines are '
+                       'always approached as ramps to avoid a pressure '
+                       'transient into the burner.'))
         send_all = QPushButton("Set All Flows Together   (send every card's SP)")
         send_all.clicked.connect(self._send_all)
         card.add(send_all)
@@ -692,12 +699,6 @@ class OperationTab(QWidget):
         zero.clicked.connect(lambda: self.session.zero_all())
         card.add(zero)
 
-        hint = QLabel('Air and pilot lines are always approached as a ramp, '
-                      'whichever button sends them — a step change there is a '
-                      'pressure transient into the burner.')
-        hint.setObjectName('Hint')
-        hint.setWordWrap(True)
-        card.add(hint)
         return card
 
     def _send_all(self):
@@ -706,19 +707,16 @@ class OperationTab(QWidget):
 
     # -- sequence --------------------------------------------------------- #
     def _card_sequence(self):
-        card = Card('Sequence', index=4)
+        card = Card(
+            'Sequence', index=4,
+            help_text=('Record every commanded setpoint while monitoring, '
+                       'edit the resulting curve, then replay or repeat it. '
+                       'Saved sequences can be loaded, run, or deleted below.'))
         self.sequence_btn = QPushButton('▸  Record / Replay Sequence')
         self.sequence_btn.setCheckable(True)
         self.sequence_btn.setProperty('variant', 'quiet')
         self.sequence_btn.toggled.connect(self._toggle_sequence)
         card.add(self.sequence_btn)
-
-        hint = QLabel('Captures every setpoint the session commands while the '
-                      'monitor is running, so the curve can be edited and the '
-                      'transition replayed or repeated.')
-        hint.setObjectName('Hint')
-        hint.setWordWrap(True)
-        card.add(hint)
 
         card.add(divider())
         card.add(label('SAVED SEQUENCES  —  CLICK TO LOAD,  ▶ RUN,  ✕ DELETE',
@@ -903,7 +901,10 @@ class OperationTab(QWidget):
 
     # -- system log ------------------------------------------------------- #
     def _card_syslog(self):
-        card = Card('System Log', collapsed=True)
+        card = Card(
+            'System Log', collapsed=True,
+            help_text=('Show recent connection, control, logging, sequence, '
+                       'and safety events. The newest 2,000 lines are kept.'))
         self.syslog = QPlainTextEdit()
         self.syslog.setReadOnly(True)
         self.syslog.setFixedHeight(theme.scale(140))
@@ -932,8 +933,11 @@ class OperationTab(QWidget):
                                   theme.PAD_LG, theme.PAD_LG)
         column.setSpacing(theme.CARD_GAP)
 
-        self._cards_card = Card('Live Controller Readings & Manual Control',
-                                collapsible=False)
+        self._cards_card = Card(
+            'Live Controller Readings & Manual Control', collapsible=False,
+            help_text=('Review each assigned controller, enter individual '
+                       'setpoints, and configure its remembered full scale and '
+                       'ramp behavior.'))
         self._empty_note = label(
             'No controllers assigned yet — connect and assign them on the '
             'Connection tab.', color=theme.TEXT_DIM, size=9)
@@ -998,8 +1002,12 @@ class OperationTab(QWidget):
         return strip
 
     def _build_combustion_staged(self):
-        card = Card('Combustion — RQL   (NH₃ / H₂ / CH₄ — pilot included in φ)',
-                    collapsible=False)
+        card = Card(
+            'Combustion — RQL', collapsible=False,
+            help_text=('Live RQL estimate from the assigned NH₃, H₂, CH₄, '
+                       'air, and pilot flows. Pilot fuel is included in φ. '
+                       'All values are read-only calculations; bulk velocity '
+                       'appears only when the relevant inlet diameter is set.'))
         flows = [(key, SHORT_LABELS[key],
                   theme.INFO if key in roles.AIR_KEYS else theme.TEXT)
                  for key, _role_label in roles.ROLES]
@@ -1041,8 +1049,12 @@ class OperationTab(QWidget):
         return card
 
     def _build_combustion_standard(self):
-        card = Card('Combustion   (live estimate from the assigned gases)',
-                    collapsible=False)
+        card = Card(
+            'Combustion', collapsible=False,
+            help_text=('Live estimate from the gases and flows assigned to '
+                       'the controllers. It reports blend, φ, power, '
+                       'stoichiometric air, air/fuel ratios, and bulk velocity '
+                       'without writing anything to hardware.'))
         flows = [(fuel, FUEL_LABELS[fuel], theme.GAS_COLORS.get(fuel, theme.TEXT))
                  for fuel in combustion.FUELS]
         flows.append(('total', 'TOTAL FUEL', theme.WARN))

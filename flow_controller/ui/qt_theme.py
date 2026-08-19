@@ -334,6 +334,13 @@ QTabBar::tab:selected {{
     min-width: 18px;  max-width: 18px;
     min-height: 18px; max-height: 18px;
 }}
+#CardInfo {{
+    color: {INFO};
+    font-size: {pt(10)}pt;
+    min-width: 16px;
+    padding: 0 1px;
+}}
+#CardInfo:hover {{ color: {TEXT_BRIGHT}; }}
 #CardChevron {{ color: {TEXT_DIM}; font-size: {pt(9)}pt; padding-right: 2px; }}
 #Hint {{ color: {TEXT_DIM}; font-size: {pt(8)}pt; }}
 #FieldLabel {{ color: {TEXT_MUTED}; font-size: {pt(9)}pt; }}
