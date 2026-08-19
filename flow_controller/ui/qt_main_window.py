@@ -20,10 +20,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QTabWidget, QVBoxLayout,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .. import APP_VERSION
@@ -55,6 +55,122 @@ STATUS_FIELDS = (
 SEQ_WORDS = {SEQ_IDLE: 'idle', SEQ_RECORDING: 'RECORDING',
              SEQ_REPLAYING: 'REPLAYING'}
 
+#: How wide the window's own resize border is.  The native frame is gone, so
+#: this strip is the only thing left to drag an edge by; it is the frame's own
+#: margin rather than an overlay, which is what keeps the tabs and the bars
+#: from taking the mouse before it gets here.
+RESIZE_MARGIN = 5
+
+#: Which cursor says which edge.  Built once: it is looked up on every mouse
+#: move across the strip.
+_EDGE_CURSORS = {
+    Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor,
+    Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
+    Qt.Edge.TopEdge: Qt.CursorShape.SizeVerCursor,
+    Qt.Edge.BottomEdge: Qt.CursorShape.SizeVerCursor,
+    Qt.Edge.TopEdge | Qt.Edge.LeftEdge: Qt.CursorShape.SizeFDiagCursor,
+    Qt.Edge.BottomEdge | Qt.Edge.RightEdge: Qt.CursorShape.SizeFDiagCursor,
+    Qt.Edge.TopEdge | Qt.Edge.RightEdge: Qt.CursorShape.SizeBDiagCursor,
+    Qt.Edge.BottomEdge | Qt.Edge.LeftEdge: Qt.CursorShape.SizeBDiagCursor,
+}
+
+
+class WindowFrame(QWidget):
+    """The border the operating system used to draw.
+
+    With the native frame dropped there is nothing around the window to take
+    hold of, and a control screen that cannot be resized is a control screen
+    that cannot be put beside the rig software it is being run against.  So
+    the content is inset by :data:`RESIZE_MARGIN` and the strip that leaves is
+    handled here, handing the drag straight back to the window manager --
+    ``startSystemResize`` is a real system resize, so snapping, live outlines
+    and a move between monitors all behave as they always did.
+
+    The inset is dropped while maximised: there is no edge to pull on then,
+    and a gutter against the screen edge would only look like a mistake.
+    """
+
+    def __init__(self, content, parent=None):
+        super().__init__(parent)
+        # Without tracking, moves arrive only while a button is held, and the
+        # cursor would not change until it was too late to be a hint.
+        self.setMouseTracking(True)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(*(RESIZE_MARGIN,) * 4)
+        box.setSpacing(0)
+        box.addWidget(content)
+        self._box = box
+
+    def set_inset(self, inset):
+        """Show or hide the drag strip, following the window state."""
+        margin = RESIZE_MARGIN if inset else 0
+        self._box.setContentsMargins(*(margin,) * 4)
+
+    def _edge_at(self, point):
+        """The edge flags under ``point``, or ``None`` away from the strip."""
+        if self._box.contentsMargins().left() == 0:
+            return None
+        flags = None
+        if point.x() < RESIZE_MARGIN:
+            flags = Qt.Edge.LeftEdge
+        elif point.x() >= self.width() - RESIZE_MARGIN:
+            flags = Qt.Edge.RightEdge
+        if point.y() < RESIZE_MARGIN:
+            flags = Qt.Edge.TopEdge if flags is None else flags | Qt.Edge.TopEdge
+        elif point.y() >= self.height() - RESIZE_MARGIN:
+            flags = (Qt.Edge.BottomEdge if flags is None
+                     else flags | Qt.Edge.BottomEdge)
+        return flags
+
+    def mouseMoveEvent(self, event):
+        edge = self._edge_at(event.position().toPoint())
+        self.setCursor(_EDGE_CURSORS.get(edge, Qt.CursorShape.ArrowCursor))
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.unsetCursor()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        edge = self._edge_at(event.position().toPoint())
+        handle = self.window().windowHandle()
+        if edge is None or handle is None:
+            super().mousePressEvent(event)
+            return
+        handle.startSystemResize(edge)
+
+
+class TitleBar(GlassBar):
+    """The app's own title bar, standing in for the one Windows drew.
+
+    Dragging it moves the window and double-clicking it maximises, because
+    that is what every title bar does and an operator should not have to be
+    told that this one is ours.  Both are handed to the window manager rather
+    than rebuilt out of cursor arithmetic, so a drag to the top of the screen
+    still snaps and a drag onto a second monitor still rescales.
+    """
+
+    def __init__(self, window, parent=None):
+        super().__init__('bottom', parent)
+        self._window = window
+
+    def mousePressEvent(self, event):
+        handle = self._window.windowHandle()
+        if (event.button() != Qt.MouseButton.LeftButton or handle is None
+                or self._window.isMaximized()):
+            # Maximised, a system move means restore-and-drag: the right
+            # gesture, but not one to start from a stray click on the chrome.
+            # Double-click is how the window comes back down.
+            super().mousePressEvent(event)
+            return
+        handle.startSystemMove()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window.toggle_maximised()
+        else:
+            super().mouseDoubleClickEvent(event)
+
 
 class MainWindow(QMainWindow):
     """Chrome, three tabs, and an orderly way out."""
@@ -64,6 +180,13 @@ class MainWindow(QMainWindow):
         self.session = session if session is not None else FlowSession(self)
         self.setWindowTitle(f'Alicat Flow Controller v{APP_VERSION}')
         self.resize(theme.scale(1560), theme.scale(940))
+        # The window draws its own chrome.  The native bar is a light strip
+        # that no theme reaches, sitting above a dark instrument panel and
+        # repeating a title the app already shows; dropping it puts the
+        # minimise, maximise and close controls on the same line as the name.
+        # What the frame was also doing -- moving and resizing the window --
+        # is picked up by TitleBar and WindowFrame.
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
 
         # -- chrome state.  Not held in the widgets, because the widgets do
         #    not survive a re-theme.
@@ -113,13 +236,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_tabs(), 1)
         layout.addWidget(self._build_status_bar())
         # Replaces and destroys whatever was there before.
-        self.setCentralWidget(root)
+        self._frame = WindowFrame(root)
+        self._frame.set_inset(not self.isMaximized())
+        self.setCentralWidget(self._frame)
 
         self._paint_link()
         self._paint_status()
 
     def _build_title_bar(self):
-        bar = GlassBar('bottom')
+        bar = TitleBar(self)
         bar.setObjectName('TitleBar')
         row = QHBoxLayout(bar)
         row.setContentsMargins(theme.PAD_XL, theme.PAD_MD + 2,
@@ -151,7 +276,65 @@ class MainWindow(QMainWindow):
         settings.setCursor(Qt.CursorShape.PointingHandCursor)
         settings.clicked.connect(self._open_settings)
         row.addWidget(settings)
+
+        # The controls the native bar used to carry, in the order Windows
+        # puts them so that muscle memory still lands on the right one.
+        row.addSpacing(theme.PAD_SM)
+        row.addWidget(self._window_button(
+            '–', 'Minimise', self.showMinimized))
+        # Read from the window rather than remembered: _build_ui runs again on
+        # every re-theme, and it can run while the window is maximised.
+        self._max_btn = self._window_button(
+            '❐' if self.isMaximized() else '□',
+            'Restore' if self.isMaximized() else 'Maximise',
+            self.toggle_maximised)
+        row.addWidget(self._max_btn)
+        close = self._window_button('✕', 'Close', self.close)
+        close.setObjectName('WinClose')
+        row.addWidget(close)
         return bar
+
+    def _window_button(self, glyph, tip, slot):
+        """One of the three controls at the end of the title bar."""
+        button = QPushButton(glyph)
+        button.setObjectName('WinButton')
+        # Fixed, because the four glyphs are four different widths and three
+        # controls that jump about as the middle one changes between maximise
+        # and restore would be three controls nobody can aim at.
+        button.setFixedWidth(theme.scale(34))
+        button.setToolTip(tip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.clicked.connect(slot)
+        return button
+
+    def toggle_maximised(self):
+        """Fill the screen, or come back down to the size before that."""
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event):
+        """Follow the window state, however it was changed.
+
+        The button is not the only way in: Win+Up, a drag to the top of the
+        screen and the task bar all maximise too, and a glyph that still says
+        'maximise' on a maximised window is worse than no glyph at all.  The
+        resize strip goes with it, since a maximised window has no edge to
+        pull on.
+        """
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        maximised = self.isMaximized()
+        frame = getattr(self, '_frame', None)
+        if frame is not None:
+            frame.set_inset(not maximised)
+        button = getattr(self, '_max_btn', None)
+        if button is not None:
+            button.setText('❐' if maximised else '□')
+            button.setToolTip('Restore' if maximised else 'Maximise')
 
     def _build_tabs(self):
         tabs = QTabWidget()

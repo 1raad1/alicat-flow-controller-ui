@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox, QPlainTextEdit, QPushButton,
@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 
 from ..core.sequence import opening_mismatches
-from ..core.session import MODE_STAGED, MODE_STANDARD, SEQ_IDLE
+from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
+                           SEQ_IDLE)
 from ..domain import roles, rql
 from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
@@ -59,7 +60,68 @@ SHORT_LABELS = {
 BANNER_KINDS = {'pre': 'ready', 'ignited': 'running', 'ok': 'running',
                 'warn': 'ready', 'error': 'fault'}
 
-DEFAULT_LOG_DIR = Path.home() / 'Documents' / 'Flow Controller'
+class SavedSequenceRow(QWidget):
+    """One entry in the quick list: a name that loads, a button that runs.
+
+    The list used to do both from the same click, which put an irreversible
+    action -- writing the opening setpoints and starting the clock -- behind
+    the only gesture there was.  An operator who wanted to *look* at what they
+    recorded yesterday had to run it to see it.  So the row is split: the name
+    loads the sequence into the panel and stops there, and the ▶ beside it is
+    the one-click start, deliberately small and deliberately separate.
+    """
+
+    play = Signal()
+
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        line = QHBoxLayout(self)
+        line.setContentsMargins(0, 1, theme.PAD_XS, 1)
+        line.setSpacing(theme.PAD_SM)
+
+        self._name = name
+        self._label = QLabel(name)
+        # Ignored horizontally so the label takes whatever the row has left
+        # rather than asking for the width of the untruncated name.  With a
+        # size hint in play, eliding in resizeEvent would shrink the hint,
+        # win back the space, un-elide, and oscillate.
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                  QSizePolicy.Policy.Preferred)
+        line.addWidget(self._label, 1)
+
+        button = QPushButton('▶')
+        button.setObjectName('RowPlay')
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFixedWidth(theme.scale(24))
+        button.setToolTip('Load and run this sequence once, from the top.')
+        button.clicked.connect(self.play.emit)
+        line.addWidget(button)
+        self._button = button
+        self._line = line
+
+    def sizeHint(self):
+        """Ask for the height, and for almost none of the width.
+
+        The list gives every row the width of the widest hint it is offered,
+        and this one has no horizontal scrollbar.  Hinting at the width of the
+        untruncated name would therefore push the button off the right-hand
+        edge, where it is still there, still clickable, and impossible to see.
+        Ask small and the view stretches the row to the viewport instead.
+        """
+        return QSize(theme.scale(48), super().sizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Measured off the row, not off the label: at this point the layout
+        # has not necessarily placed its children yet, so the label's own
+        # width can still be the one it had before the resize -- which would
+        # elide a name that fits perfectly well.
+        margins = self._line.contentsMargins()
+        room = (self.width() - margins.left() - margins.right()
+                - self._line.spacing() - self._button.width())
+        self._label.setText(self._label.fontMetrics().elidedText(
+            self._name, Qt.TextElideMode.ElideMiddle, max(24, room)))
+
 
 UNAVAILABLE_NOTE = ('This assignment does not cover the RQL roles, so targets '
                     'cannot be calculated from power and φ. Set flows '
@@ -299,6 +361,12 @@ class OperationTab(QWidget):
         card = Card('Logging & Acquisition')
 
         self.log_path = QLineEdit(str(DEFAULT_LOG_DIR / 'run.csv'))
+        # textEdited, not textChanged: the field is also written to from
+        # ``_on_logging`` to show the file actually opened, and a LabVIEW run
+        # opens a timestamped sibling.  Feeding that back would stamp the
+        # stamp, and every unattended trigger would lengthen the name again.
+        self.log_path.textEdited.connect(self._remember_log_destination)
+        self._remember_log_destination(self.log_path.text())
         browse = QPushButton('Browse…')
         browse.setProperty('variant', 'quiet')
         browse.clicked.connect(self._browse_log)
@@ -330,6 +398,13 @@ class OperationTab(QWidget):
                                monospace=True)
         card.add(row(self.udp_btn, self.udp_state, None))
 
+        udp_hint = QLabel('A "log" datagram opens a timestamped copy of the '
+                          'file above and starts recording; "stop" closes it. '
+                          'Rows are only written while the monitor is running.')
+        udp_hint.setObjectName('Hint')
+        udp_hint.setWordWrap(True)
+        card.add(udp_hint)
+
         hint = QLabel('The CSV columns are written from the assignment in '
                       'force when logging starts, so zones cannot be moved '
                       'while a log is open.')
@@ -338,6 +413,17 @@ class OperationTab(QWidget):
         card.add(hint)
         return card
 
+    def _remember_log_destination(self, text):
+        """Tell the session where an unattended log should be written.
+
+        A LabVIEW ``log`` datagram opens a file with nobody at the keyboard,
+        so the destination cannot be read off this field at the moment it
+        arrives — the tab that owns the field is thrown away and rebuilt on a
+        re-theme.  It is pushed across as it is typed instead.
+        """
+        self.session.log_destination = text
+        self.session.log_dir = DEFAULT_LOG_DIR
+
     def _browse_log(self):
         DEFAULT_LOG_DIR.mkdir(parents=True, exist_ok=True)
         path, _filter = QFileDialog.getSaveFileName(
@@ -345,6 +431,7 @@ class OperationTab(QWidget):
             'CSV files (*.csv);;Excel workbooks (*.xlsx);;All files (*)')
         if path:
             self.log_path.setText(path)
+            self._remember_log_destination(path)
 
     def _start_logging(self):
         # ``resolve_log_path`` answers with two paths: the destination to show
@@ -561,7 +648,7 @@ class OperationTab(QWidget):
         card.add(hint)
 
         card.add(divider())
-        card.add(label('SAVED SEQUENCES  —  CLICK TO RUN ONCE',
+        card.add(label('SAVED SEQUENCES  —  CLICK TO LOAD,  ▶  TO RUN',
                        color=theme.TEXT_DIM, size=7, bold=True))
         self.saved_list = QListWidget()
         self.saved_list.setFixedHeight(theme.scale(104))
@@ -574,13 +661,19 @@ class OperationTab(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.saved_list.setSizePolicy(QSizePolicy.Policy.Ignored,
                                       QSizePolicy.Policy.Fixed)
+        # Rows carry a widget with a button at their right-hand end, and the
+        # default Fixed mode lays them out once at whatever width the list
+        # happened to have then.  Adjust re-lays them on every resize, which is
+        # what keeps that button inside a column the splitter can narrow.
+        self.saved_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.saved_list.itemClicked.connect(self._on_saved_clicked)
         card.add(self.saved_list)
 
-        saved_hint = QLabel('One pass, no repeats. A sequence is only started '
-                            'if the rig is already standing at the flows it '
-                            'opens with; otherwise you are told which lines '
-                            'disagree.')
+        saved_hint = QLabel('Clicking a name loads it into the panel above and '
+                            'nothing moves. ▶ loads it and runs it once, no '
+                            'repeats — and only if the rig is already standing '
+                            'at the flows it opens with; otherwise you are told '
+                            'which lines disagree.')
         saved_hint.setObjectName('Hint')
         saved_hint.setWordWrap(True)
         card.add(saved_hint)
@@ -604,17 +697,51 @@ class OperationTab(QWidget):
             # we could offer, which is not an error worth a dialog.
             paths = []
         for path in paths[:20]:
-            item = QListWidgetItem(path.name[:-len('.fcseq.json')])
+            name = path.name[:-len('.fcseq.json')]
+            item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, str(path))
-            item.setToolTip(f'{path}\n\nClick to load and run this sequence '
-                            'once, from the top.')
+            item.setToolTip(f'{path}\n\nClick the name to load it. ▶ loads '
+                            'and runs it once, from the top.')
+            widget = SavedSequenceRow(name)
+            widget.play.connect(
+                lambda chosen=str(path): self._play_saved(chosen))
+            item.setSizeHint(widget.sizeHint())
             self.saved_list.addItem(item)
+            self.saved_list.setItemWidget(item, widget)
         if not paths:
             note = QListWidgetItem('No saved sequences yet')
             note.setFlags(Qt.ItemFlag.NoItemFlags)
             self.saved_list.addItem(note)
 
     def _on_saved_clicked(self, item):
+        """Load one saved sequence into the panel.  Nothing moves.
+
+        Loading and running used to be the same click, which meant the list
+        could only be browsed by running things.  Opening it here writes no
+        setpoints and starts no clock: it puts the curve on screen, where it
+        can be read, edited, and started from the panel's own transport.
+        """
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        if not self._load_saved(path):
+            return
+        # Shown, because a sequence that has been loaded and is nowhere to be
+        # seen is indistinguishable from a click that did nothing.
+        self.sequence_btn.setChecked(True)
+        self.status.emit(f"Loaded '{self.session.sequence.name}' — press "
+                         'Replay on the panel, or ▶ beside its name, to '
+                         'run it.')
+
+    def _load_saved(self, path):
+        """Read the file onto the session, or say what stopped it."""
+        if self.session.sequence_state != SEQ_IDLE:
+            self.status.emit('Finish the recording or replay in progress first.')
+            return False
+        # ``load_sequence`` has already said why when it answers None.
+        return self.session.load_sequence(Path(path)) is not None
+
+    def _play_saved(self, path):
         """Load one saved sequence and run it once, if the rig is where it starts.
 
         The check is on the *measured* flows rather than on the commanded ones.
@@ -623,17 +750,9 @@ class OperationTab(QWidget):
         jumps at t=0, and on the air and pilot lines that is a transient into the
         burner rather than a transition.
         """
-        path = item.data(Qt.ItemDataRole.UserRole)
-        if not path:
+        if not self._load_saved(path):
             return
-        if self.session.sequence_state != SEQ_IDLE:
-            self.status.emit('Finish the recording or replay in progress first.')
-            return
-        sequence = self.session.load_sequence(Path(path))
-        if sequence is None:
-            # ``load_sequence`` has already said why.
-            return
-
+        sequence = self.session.sequence
         flows = {track.key: self.session.flow_for_role(track.key)
                  for track in sequence.tracks}
         mismatches = opening_mismatches(sequence, flows)
