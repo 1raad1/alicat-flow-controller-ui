@@ -3,8 +3,7 @@
 This is a *look and feel* spike, not working control code.  It reproduces the
 real screen — the same cards, the same fields, the same seven controllers, the
 same safety affordances — driven by a simulated plant so the live behaviour is
-visible.  Nothing here talks to hardware and nothing in the running Tk app
-imports it.
+visible. Nothing here talks to hardware or is imported by the application.
 
     <qt-venv>/python spike_qt_ui.py
 """
@@ -250,8 +249,7 @@ class OperationWindow(QMainWindow):
         tabs.setCurrentIndex(1)
 
         # The safety controls ride in the tab strip, always reachable from any
-        # tab — the same placement as the Tk app, but as real buttons with
-        # enabled/hover states rather than hand-coloured tk.Buttons.
+        # tab, with distinct enabled and hover states.
         corner = QWidget()
         corner_layout = QHBoxLayout(corner)
         corner_layout.setContentsMargins(theme.PAD_MD, theme.PAD_XS,

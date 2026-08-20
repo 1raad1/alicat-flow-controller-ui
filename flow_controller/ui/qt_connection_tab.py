@@ -114,10 +114,8 @@ def _scrolled(widget):
 class AssignRow(QFrame):
     """One detected controller, and what the operator says it is.
 
-    Inclusion is a real checkbox rather than the Tk version's click-anywhere
-    row toggle.  The row still toggles on click, but an operator should not
-    have to be told by a hint that it does — and there was no way to see, from
-    a greyed row alone, whether it was excluded or simply unreachable.
+    Inclusion uses a visible checkbox and the whole row remains clickable. This
+    makes exclusion distinct from an unreachable controller.
     """
 
     changed = Signal()

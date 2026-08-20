@@ -1,8 +1,7 @@
 """The rig's vocabulary: burner roles, zones, and the gases that fill them.
 
 These names are the contract between the assignment screen, the ignition
-sequence and the CSV columns.  They lived as class attributes on the Tk
-window, which meant that reading them required constructing a window.
+sequence and the CSV columns.
 """
 
 from __future__ import annotations

@@ -1,9 +1,7 @@
 """Reusable Qt widgets for the flow controller view layer.
 
-These are the pieces the Tk version hand-draws onto ``tk.Canvas``
-(``RoundedPanel``, ``ZenTabs``) or cannot do at all (the flow bar).  In Qt they
-are ordinary widgets with a ``paintEvent``, so they get anti-aliasing, hover
-state, layout participation and high-DPI scaling for free.
+These are ordinary widgets with a ``paintEvent``, so they get anti-aliasing,
+hover state, layout participation and high-DPI scaling.
 
 The surfaces are frosted glass.  Qt stylesheets have no ``backdrop-filter``, so
 the effect is assembled by hand: ``GlassBackdrop`` paints one soft, grainy
@@ -313,12 +311,10 @@ class StatusDot(QWidget):
 #  Collapsible card                                                       #
 # ---------------------------------------------------------------------- #
 class Card(QFrame):
-    """A titled, optionally collapsible glass panel — the Qt form of RoundedPanel.
+    """A titled, optionally collapsible glass panel.
 
-    The Tk original paints its rounded border onto a canvas and toggles
-    visibility instantly.  Here the sheet is painted with a graded rim and the
-    collapse is animated, which makes it read as one surface opening rather than
-    the layout jumping.
+    The sheet is painted with a graded rim and collapse is animated, which
+    makes it read as one surface opening rather than the layout jumping.
     """
 
     toggled = Signal(bool)
@@ -498,8 +494,7 @@ class FlowBar(QWidget):
 
     The filled portion is the live reading; the notch is the commanded
     setpoint.  Colour reflects the gap between them, so an operator can see a
-    controller failing to track without reading any numbers.  There is no
-    practical Tk equivalent short of another hand-managed canvas.
+    controller failing to track without reading any numbers.
     """
 
     def __init__(self, color=None, parent=None):

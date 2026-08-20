@@ -1,7 +1,7 @@
 """Low-level Alicat serial commands and response parsing.
 
-This module deliberately has no Tkinter dependency.  The UI owns presentation;
-this class owns protocol formatting, serial transactions, and parsing.
+The UI owns presentation; this class owns protocol formatting, serial
+transactions, and parsing.
 """
 
 from __future__ import annotations
@@ -110,4 +110,3 @@ class AlicatProtocol:
         if register_value != (gas_index & 0b111111111):
             raise OSError(
                 f"Register readback mismatch: wrote {gas_index}, got {register_value}")
-

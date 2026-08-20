@@ -1,9 +1,7 @@
 """Palette and stylesheet for the Qt view layer.
 
-The colours are lifted from the existing Tk app so the port stays recognisably
-the same instrument, rather than a different-looking program.  What changes is
-what the toolkit can express with them: hover, focus, pressed and disabled
-states are real here, instead of being approximated by hand-drawn canvas items.
+The palette keeps the application recognisable as the same instrument while
+providing distinct hover, focus, pressed and disabled states.
 
 The surface treatment is frosted glass.  Every panel is a translucent sheet over
 a single painted backdrop, so depth comes from light passing through layers
