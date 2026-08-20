@@ -246,16 +246,11 @@ Zero commands, stopping monitoring, and application shutdown cancel replay.
 
 ### Sequencing in operation
 
-The following 63-second excerpt, trimmed from `00:02` through `01:05`, shows a
-recorded sequence being replayed while the controller interface and burner
-response are monitored. The demonstration is shown at 2x speed.
+The following 90-second excerpt shows a recorded sequence being replayed while
+the controller interface and burner response are monitored. The demonstration
+is shown at 2x speed.
 
-[![Sequencing replay in operation][sequence-preview]][sequence-video]
-
-[Open or download the sequencing demonstration (MP4, 1:03)][sequence-video]
-
-[sequence-preview]: docs/media/sequencing-operation-example-preview.png
-[sequence-video]: docs/media/sequencing-operation-example-2x-63s.mp4?raw=1
+https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
 
 ## Logging, graphs, and LabVIEW
 
