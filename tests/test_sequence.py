@@ -1,9 +1,9 @@
 import unittest
 
-from flow_controller.core.sequence import (HOLD, LINEAR, Keyframe, Sequence,
-                                           SequencePlayer, SequenceRecorder,
-                                           SettleGate, Track, TrackMeta,
-                                           opening_mismatches)
+from flow_controller.core.sequence import (HOLD, LINEAR, SMOOTH, Keyframe,
+                                           Sequence, SequencePlayer,
+                                           SequenceRecorder, SettleGate, Track,
+                                           TrackMeta, opening_mismatches)
 
 
 def track(key='nh3_rich', label='NH3 rich', frames=()):
@@ -44,6 +44,12 @@ class TrackValueTests(unittest.TestCase):
     def test_linear_interpolates_between_its_neighbours(self):
         line = track(frames=[(0.0, 0.0, LINEAR), (10.0, 5.0, HOLD)])
         self.assertAlmostEqual(line.value_at(4.0), 2.0)
+
+    def test_smooth_transition_eases_without_changing_key_points(self):
+        line = track(frames=[(0.0, 0.0, SMOOTH), (10.0, 10.0, HOLD)])
+        self.assertAlmostEqual(line.value_at(2.5), 1.5625)
+        self.assertAlmostEqual(line.value_at(5.0), 5.0)
+        self.assertAlmostEqual(line.value_at(10.0), 10.0)
 
     def test_a_negative_value_from_a_file_is_clamped(self):
         line = Track.from_dict({'key': 'nh3_rich', 'label': 'NH3',
@@ -106,6 +112,17 @@ class SequenceRoundTripTests(unittest.TestCase):
         self.assertEqual(restored.markers, [2.0])
         self.assertAlmostEqual(restored.duration, 4.0)
         self.assertEqual(restored.tracks[0].sorted_frames()[1].interp, LINEAR)
+        self.assertEqual(original.to_dict()['version'], 1)
+
+    def test_a_smoothed_sequence_uses_v2_and_preserves_the_transition(self):
+        original = Sequence(tracks=[
+            track(frames=[(0.0, 0.0, SMOOTH), (4.0, 2.5, HOLD)])])
+
+        data = original.to_dict()
+        restored = Sequence.from_dict(data)
+
+        self.assertEqual(data['version'], 2)
+        self.assertEqual(restored.tracks[0].sorted_frames()[0].interp, SMOOTH)
 
     def test_a_foreign_file_is_rejected_by_format(self):
         with self.assertRaisesRegex(ValueError, 'Not a flow-controller'):
@@ -123,6 +140,32 @@ class SequenceRoundTripTests(unittest.TestCase):
             lambda key: 'A' if key == 'nh3_rich' else None)
         self.assertEqual(bound, {'nh3_rich': 'A'})
         self.assertEqual([line.key for line in missing], ['ch4_pilot'])
+
+    def test_speed_change_retimes_every_track_and_marker_together(self):
+        sequence = Sequence(
+            tracks=[track(frames=[(0.0, 0.0, HOLD),
+                                  (12.0, 2.0, LINEAR)]),
+                    track(key='ch4_pilot', label='Pilot',
+                          frames=[(0.0, 1.0, HOLD),
+                                  (6.0, 2.0, HOLD)])],
+            markers=[3.0, 9.0])
+
+        self.assertTrue(sequence.scale_speed(1.2))
+
+        self.assertAlmostEqual(sequence.duration, 10.0)
+        self.assertEqual(sequence.markers, [2.5, 7.5])
+        self.assertAlmostEqual(sequence.track('ch4_pilot').duration, 5.0)
+
+    def test_smooth_all_changes_every_real_transition_but_not_values(self):
+        sequence = Sequence(tracks=[track(frames=[
+            (0.0, 1.0, HOLD), (5.0, 4.0, LINEAR), (10.0, 2.0, HOLD)])])
+
+        sequence.smooth_all()
+
+        frames = sequence.tracks[0].sorted_frames()
+        self.assertEqual([frame.interp for frame in frames],
+                         [SMOOTH, SMOOTH, HOLD])
+        self.assertEqual([frame.value for frame in frames], [1.0, 4.0, 2.0])
 
 
 class RecorderTests(unittest.TestCase):

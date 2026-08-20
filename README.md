@@ -221,7 +221,17 @@ measured response of the rig.
 - Clicking a saved sequence loads it without moving the rig. The adjacent play
   button loads and runs it once.
 - Drag a point to move it, double-click empty space to add a point, or
-  right-click a point to edit its exact time, value, and step/linear transition.
+  right-click a point to edit its exact time, value, and step, linear, or smooth
+  transition.
+- **Slower** and **Speed up** expand or compress every track and timeline marker
+  together. Each 1.2× step is reversible with the opposite button.
+- Shift-click selects a continuous group of points and Ctrl-click adds or
+  removes individual points. **Smooth selected** eases only the transitions
+  enclosed by that group; **Smooth whole sequence** applies the same
+  no-overshoot easing to every transition on every track.
+- In **All tracks (overview)**, fuel setpoints use the left y-axis and air
+  setpoints use the right y-axis, so the larger air range does not flatten the
+  fuel traces.
 - **Hold if flows lag** pauses the replay clock for all tracks until lagging
   measurements catch up, with a 30-second maximum hold.
 - Repeats ramp from the final values back to the opening values rather than
@@ -233,6 +243,14 @@ Before starting, measured flows are compared with the sequence's opening
 setpoints; the operator must resolve or explicitly override any mismatch.
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
+
+### Sequencing in operation
+
+The following 90-second excerpt shows a recorded sequence being replayed while
+the controller interface and burner response are monitored. The demonstration
+is shown at 2x speed.
+
+[Watch the sequencing demonstration (MP4, 1:30)](docs/media/sequencing-operation-example-2x-90s.mp4)
 
 ## Logging, graphs, and LabVIEW
 

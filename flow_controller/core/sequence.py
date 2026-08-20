@@ -17,8 +17,8 @@ wrong:
 * A recorded keyframe *holds* until the next one.  That is what actually
   happened -- a setpoint written to a controller does not decay -- so the
   recorded interpolation is ``HOLD``.  An operator who wants a smooth
-  transition between two points changes that keyframe to ``LINEAR``, which is
-  an edit, not a re-interpretation of the recording.
+  transition between two points changes that keyframe to ``LINEAR`` or
+  ``SMOOTH``, which is an edit, not a re-interpretation of the recording.
 * Replay rate-limits the controllers that must never see a step change.  A
   ``HOLD`` edge on the pilot or on either air line is spread over
   :data:`MIN_RAMP_S` instead of being written as a jump, and says so in the
@@ -49,11 +49,15 @@ from pathlib import Path
 #: On-disk marker, so a file that is not one of ours is rejected by name
 #: rather than by the first ``KeyError`` it happens to raise.
 FILE_FORMAT = "flow-controller-sequence"
-FILE_VERSION = 1
+#: Version 2 adds the eased ``SMOOTH`` transition.  Files that only use the
+#: original transitions are still written as v1 for backwards compatibility;
+#: a v2 marker prevents an older app from silently reading easing as a step.
+FILE_VERSION = 2
 
 #: How a keyframe leaves itself, towards the next one.
 HOLD = "hold"
 LINEAR = "linear"
+SMOOTH = "smooth"
 
 #: Shortest time a rate-limited track is allowed to take over a step edge.
 MIN_RAMP_S = 1.0
@@ -121,7 +125,8 @@ class Keyframe:
         interp = raw.get('i', HOLD)
         return cls(t=max(0.0, float(raw.get('t', 0.0))),
                    value=_clean(raw.get('v', 0.0)),
-                   interp=interp if interp in (HOLD, LINEAR) else HOLD)
+                   interp=(interp if interp in (HOLD, LINEAR, SMOOTH)
+                           else HOLD))
 
 
 @dataclass
@@ -165,8 +170,15 @@ class Track:
         for left, right in zip(frames, frames[1:]):
             if left.t <= t <= right.t:
                 if left.interp != LINEAR or right.t <= left.t:
-                    return left.value
+                    if left.interp != SMOOTH or right.t <= left.t:
+                        return left.value
                 fraction = (t - left.t) / (right.t - left.t)
+                if left.interp == SMOOTH:
+                    # Smoothstep has a zero slope at both ends, so adjacent
+                    # smoothed segments meet without a corner.  Unlike an
+                    # unconstrained spline it cannot overshoot either key
+                    # point, which matters when values are physical flows.
+                    fraction = fraction * fraction * (3.0 - 2.0 * fraction)
                 return left.value + (right.value - left.value) * fraction
         return frames[-1].value
 
@@ -195,15 +207,18 @@ class Track:
             if index + 1 >= len(frames):
                 break
             following = frames[index + 1]
-            if frame.interp != LINEAR:
+            if frame.interp not in (LINEAR, SMOOTH):
                 # Hold flat right up to the next keyframe, then step.
                 times.append(following.t)
                 values.append(frame.value)
             elif step > 0:
                 gap = following.t - frame.t
-                count = int(gap / step)
-                for point in range(1, min(count, 200)):
-                    at = frame.t + point * step
+                count = min(int(gap / step), 200)
+                for point in range(1, count):
+                    # Spread the capped sample count over the complete span.
+                    # A fixed 0.05 s stride followed by the far endpoint draws
+                    # most of a long eased transition as one straight chord.
+                    at = frame.t + gap * point / count
                     times.append(at)
                     values.append(self.value_at(at))
         return times, values
@@ -251,9 +266,41 @@ class Track:
         frames = self.sorted_frames()
         if not 0 <= index < len(frames):
             return False
-        frames[index] = replace(frames[index],
-                                interp=LINEAR if interp == LINEAR else HOLD)
+        kind = interp if interp in (HOLD, LINEAR, SMOOTH) else HOLD
+        frames[index] = replace(frames[index], interp=kind)
         self.keyframes = frames
+        return True
+
+    def set_interps(self, indices, interp):
+        """Apply one transition type to several key points at once."""
+        frames = self.sorted_frames()
+        chosen = {int(index) for index in indices
+                  if 0 <= int(index) < len(frames)}
+        kind = interp if interp in (HOLD, LINEAR, SMOOTH) else HOLD
+        changed = 0
+        for index in chosen:
+            if frames[index].interp == kind:
+                continue
+            frames[index] = replace(frames[index], interp=kind)
+            changed += 1
+        if changed:
+            self.keyframes = frames
+        return changed
+
+    def scale_time(self, divisor):
+        """Retime this track by a relative playback-speed multiplier.
+
+        A multiplier above one makes the track faster by dividing every time;
+        one below one makes it slower.  Values and transitions are untouched.
+        """
+        try:
+            divisor = float(divisor)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(divisor) or divisor <= 0.0:
+            return False
+        self.keyframes = [replace(frame, t=frame.t / divisor)
+                          for frame in self.sorted_frames()]
         return True
 
     def set_ramp_rate(self, rate):
@@ -333,6 +380,42 @@ class Sequence:
     def values_at(self, t):
         return {track.key: track.value_at(t) for track in self.tracks}
 
+    def scale_speed(self, multiplier):
+        """Increase or decrease the speed of the complete sequence.
+
+        Tracks and operator markers are transformed together so their timing
+        cannot drift apart.  ``1.2`` is 20% faster; ``1 / 1.2`` exactly undoes
+        it.  The method edits key-point times rather than adding a hidden replay
+        setting, so the graph and the saved file always show the true timing.
+        """
+        try:
+            multiplier = float(multiplier)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(multiplier) or multiplier <= 0.0:
+            return False
+        # Point editing reserves 1 ms between neighbours.  Refuse a timing
+        # transform that would collapse a real interval below that resolution.
+        for track in self.tracks:
+            frames = track.sorted_frames()
+            if any(0.0 < right.t - left.t < multiplier * 0.001
+                   for left, right in zip(frames, frames[1:])):
+                return False
+        for track in self.tracks:
+            track.scale_time(multiplier)
+        self.markers = [max(0.0, float(marker)) / multiplier
+                        for marker in self.markers]
+        return True
+
+    def smooth_all(self):
+        """Use eased transitions throughout every track in the sequence."""
+        changed = 0
+        for track in self.tracks:
+            # The final key point has no following transition to smooth.
+            changed += track.set_interps(
+                range(max(0, len(track.sorted_frames()) - 1)), SMOOTH)
+        return changed
+
     def bind(self, resolve_unit):
         """``(bound, missing)`` for the assignment in force right now.
 
@@ -352,9 +435,13 @@ class Sequence:
     # -- persistence ------------------------------------------------------ #
 
     def to_dict(self):
+        version = (2 if any(frame.interp == SMOOTH
+                            for track in self.tracks
+                            for frame in track.keyframes)
+                   else 1)
         return {
             'format': FILE_FORMAT,
-            'version': FILE_VERSION,
+            'version': version,
             'name': self.name,
             'mode': self.mode,
             'created': self.created or datetime.now().isoformat(timespec='seconds'),
