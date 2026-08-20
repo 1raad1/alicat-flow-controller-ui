@@ -1,536 +1,67 @@
 # Alicat Flow Controller
 
-A desktop application for running a rack of addressed Alicat mass flow
-controllers on one serial bus: find them, say what each one is, drive them,
-watch them, log them, and put them all to zero in one gesture when something
-looks wrong.
+Desktop control, monitoring, sequencing, and logging for addressed Alicat mass
+flow controllers on a shared serial bus.
 
-It was written for an ammonia/hydrogen **rich-quench-lean (RQL)** burner rig,
-so it knows about stages, equivalence ratios and saved flow sequences. That
-half switches off. In **standard** mode the same window is plain multi-channel
-flow control — setpoints, readings, logging and graphs — with the staged
-arithmetic gone and the combustion estimate reduced to the single inlet such a
-rig actually has.
+The application was built for an ammonia/hydrogen rich-quench-lean (RQL)
+burner rig, but it can also operate as a general multi-channel flow controller.
+Use **Standard** mode for ordinary setpoint control and **Staged (RQL)** mode
+for stage-aware assignments, flow calculations, and combustion estimates.
 
-The interface is PySide6 (Qt). The original Tk build is still in the tree and
-still starts, as `run.py --legacy`, until the Qt port has been proven against
-the hardware.
+> [!WARNING]
+> This is a supervisory control interface, not a safety system. Physical
+> interlocks and independent emergency shutdown protection must not depend on
+> Windows, Python, or the USB serial connection. Closing the application does
+> not make a controller forget its last setpoint; use **ZERO ALL** before
+> shutdown when the process requires it.
 
-## The rig it models
+The application uses a PySide6/Qt interface.
 
-Up to seven lines matter to the combustion calculations, named by the gas on
-them and the zone they feed:
+## Contents
 
-| Zone | Lines |
-| --- | --- |
-| Stage 1 (rich) | NH₃, H₂, Air |
-| Stage 2 (lean) | NH₃, H₂, Air |
-| Pilot | CH₄ |
+- [Quick start](#quick-start)
+- [First connection](#first-connection)
+- [Operating modes](#operating-modes)
+- [Controls and safety behavior](#controls-and-safety-behavior)
+- [Sequences](#sequences)
+- [Logging, graphs, and LabVIEW](#logging-graphs-and-labview)
+- [Combustion calculations](#combustion-calculations)
+- [Configuration and data files](#configuration-and-data-files)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
 
-A controller gets its role from that pair — `NH3` on `Zone 1` is stage-1
-ammonia — and roles are what the auto-calculation, saved sequences and the
-live φ readouts address. Anything assigned to **General**, or to a gas/zone
-pair with no combustion meaning, is still connected, still monitored, still
-graphed and still logged. It simply takes no part in the arithmetic.
+## Quick start
 
-Two configurations are recognised automatically: **Full RQL** (all seven) and
-**rich + quench-air** (stage 1, stage-2 air and the pilot, with no second fuel
-zone). Anything else runs fine, but with the calculator disabled and a line on
-screen saying which assignments are missing.
+### Requirements
 
-## The three tabs
+- Windows 10 or 11
+- 64-bit Python 3.11 or newer
+- A USB-to-serial adapter matching the rig's electrical interface
+  (RS-232 and RS-485 are not interchangeable)
+- Alicat controllers configured with unique single-letter addresses
 
-`SET ALL FLOWS`, `ZERO FUEL`, and `ZERO ALL` sit in the corner of the tab strip,
-so they are reachable whichever tab is open.
+### Install and run on Windows
 
-### 1 · Connection & Assignment
+1. Double-click `install.bat` once.
+2. Double-click `run.bat` whenever you want to start the application.
 
-Four steps in the order they are actually done.
+The installer creates a virtual environment at
+`%USERPROFILE%\.flow-controller-v3\venv`. Keeping the environment out of the
+project folder avoids OneDrive synchronization and common Windows path-length
+failures from PySide6's deeply nested files.
 
-- **COM port** — pick the port. The application's own baud defaults to 57,600
-  and does not reconfigure the instruments; every device on the bus must
-  already be set to match.
-- **Scan units A–Z** — probe all twenty-six single-letter Alicat addresses.
-  Each controller that answers reports its live reading, and then its own
-  supported-gas table is read off the device, so the gas list you are offered
-  per controller is the list that controller actually has.
-- **Assign controllers** — give each discovered unit a gas and a zone. Zones can
-  be changed after connecting without reconnecting, unless a CSV log is open —
-  the log's columns are fixed when it starts.
-- **Connect & monitor** — open the connections and start the polling loop.
+To run from PowerShell instead:
 
-A **Live Monitor** panel on the same tab shows what came back, so the
-assignment can be checked against real readings before leaving the screen.
-
-### 2 · Operation & Monitoring
-
-The screen a run is driven from. Setup on the left, live values on the right,
-with the sequence panel folding out underneath.
-
-The mode switch starts on **Standard** on every launch. Choose **Staged (RQL)**
-explicitly to expose the stage-aware controls; connecting a complete RQL
-assignment does not change the selected mode on the operator's behalf.
-
-**Live controller cards.** One card per assigned unit, grouped by stage in
-staged mode, each with a bar tracking flow against setpoint, a setpoint box, and
-the per-meter declarations described below. The card is where a single setpoint
-is typed and sent.
-
-**Auto-Calculate Flows** (staged mode). Give it a firing rate in kW, the
-hydrogen fraction of the fuel blend by volume, the fraction of fuel through
-stage 1, and the two equivalence ratios you want (φ stage 1 and φ global). It
-returns the SLPM every line has to deliver. Nothing is sent: the targets are
-stored and shown on tiles. A request that cannot be met — stage 1 leaner than
-the global mixture, which leaves negative air for stage 2 — is refused with
-the figure that has to move rather than with a negative number.
-
-**Sequences.** Ignition and other repeatable flow profiles are saved sequences,
-not a separate fixed card. Load or run one from the saved list, or open the
-record/replay panel to inspect and edit its curves first.
-
-**Batch control.** `SET ALL FLOWS` sends every card's setpoint together from the
-top strip. `ZERO ALL` zeros every flow while monitoring continues.
-
-**Combustion estimate.** Derived figures recomputed from the telemetry cache as
-the samples land, in a card that follows the mode.
-
-In **staged** mode it reads by role, with compact Pilot, Stage 1, and Stage 2
-groups arranged horizontally. Pilot reports its percentage of the Stage 1 fuel
-flow by volume. Each combustion stage shows only φ, firing rate, and inlet bulk
-velocity. The pilot's CH₄ counts into Stage 1 exactly as it does in the CSV.
-
-In **standard** mode there are no roles and one inlet, so the card shows the
-same three run-level figures: φ, firing rate, and inlet bulk velocity. It
-aggregates every assigned controller by gas for those calculations.
-
-The **☰ menu** in the combustion card header holds the inlet geometry and
-estimate controls. Enter the inlet diameter in millimetres — once for Standard,
-or once per stage for RQL — and the cross-sectional area is calculated and
-shown beside it. Stage 2 also takes its number of identical inlets; its bulk
-velocity uses the area of one entered diameter multiplied by that count.
-Nothing is assumed if a diameter is blank, so the velocity tile stays `--`.
-**Compute live** and the interval in the same menu decide
-how often the card is redrawn, from every acquisition pass down to every
-fiftieth, or not at all; pausing blanks the derived tiles rather than leaving a
-stale number on a live card. That setting is *display only*. Acquisition,
-logging, ramps, the auto-calculation and the CSV columns are untouched by it,
-and the φ columns in the log are computed on the logging path whatever the card
-is doing. Both the diameters and the refresh setting live in
-`combustion_prefs.json` next to the application, with
-`FLOW_CONTROLLER_COMBUSTION_PREFS` overriding the location; a missing or damaged
-store costs the declared bores and nothing else. Every formula behind the tiles
-is written out under *The combustion estimate* below.
-
-**System Log.** Every action, refusal and confirmation, in one place.
-
-### 3 · Logging & Graphs
-
-Series selection and axis limits on the left, plots on the right. Flow,
-setpoint, pressure, temperature, internal setpoint error and valve drive can be
-plotted per controller, stacked by metric group, with each axis either automatic
-or pinned to typed limits.
-
-**Nothing is plotted until it is asked for.** History accumulates from the
-moment the monitor starts, whatever tab is open, so switching to this tab
-mid-run shows the whole trace with no gap. Rendering runs only while the tab is
-visible *and* at least one series is ticked; leaving the tab stops the render
-loop. Axis limits are reconsidered on a hysteresis rather than on every frame,
-so a rising trace climbs through its axis instead of re-scaling under the
-operator. A rendering fault marks the figure for a redraw and the loop
-continues: polling, setpoints and the zero commands are never on that path.
-
-**History & Export** sets how many samples are retained (3,600 by default) and
-writes the stored history out as CSV, or as `.xlsx` if `openpyxl` is installed.
-The export covers every assigned controller, not only the ticked series.
-
-## Safety rules
-
-Two rules hold everywhere in the control layer, and everything else is built on
-top of them.
-
-- **A zero command outranks everything.** It purges pending setpoints for the
-  units it targets, and while it is outstanding no nonzero setpoint for a locked
-  unit is written, whoever asks — a typed value, a batch send, an ignition ramp,
-  a replay or a UDP-triggered anything.
-- **Nothing writes to hardware except the monitor loop.** Ramps, the ignition
-  sequence and sequence replay all enqueue setpoints like a hand-typed one, so
-  none of them can slip past the zero lock.
-
-`ZERO FUEL` commands and verifies zero on every assigned controller whose gas is
-not `Air`. `ZERO ALL` does the same for every assigned controller. Both keep the
-connections open and the monitor running: closing the port would take the rig
-off screen at the moment it matters most. Both cancel any ramp, ignition state
-or replay in progress, and both are recorded into an open sequence recording at
-the instant the operator asked, so a recording that ends in a shutdown replays
-as one.
-
-**Air and pilot lines are never stepped.** A step change on the CH₄ pilot or on
-either air line is a pressure transient into a lit burner, not just a different
-number, so a setpoint sent to those three is always spread over time whichever
-button sent it.
-
-`Reconnect Flow Meters` closes and reopens the serial connections while keeping
-assignments, history and confirmed setpoints. Ten consecutive read timeouts on
-one unit are taken as a wedged port and the monitor restarts rather than going
-quietly stale.
-
-## Per-meter full scale and ramp rate
-
-Under each card's bar, on one row, are the settings that describe the meter and
-the plumbing behind it rather than the session: **FULL SCALE**, then **RAMP**
-and its **OFF** latch. Unit `C` is the same 50 SLPM meter tomorrow morning as it
-was last night, so all three are remembered per unit in `unit_prefs.json` next
-to the application and only ever need typing once per meter.
-`FLOW_CONTROLLER_UNIT_PREFS` overrides the file location; a missing or damaged
-store costs the cards their declared figures rather than stopping the
-application from starting.
-
-**FULL SCALE** is the span the bar is drawn against, in SLPM. The controllers do
-not report it over the wire, so it has to be declared: read the figure off the
-sticker on the front of the meter and type it in. Setting the box back to `auto`
-(or `0`) withdraws the declaration. Nothing here touches control — the full
-scale is the bar's span, not a limit the hardware is driven against.
-
-Left at **auto**, the bar spans a round figure *above* the largest flow or
-setpoint that line has been asked for, never less than 1 SLPM and never equal to
-the peak itself. Both parts matter: an undeclared meter starts with no peak at
-all, so a span tracking it exactly showed every bar pegged at the first reading,
-and one that merely caught up to each new peak was pegged again a sample later.
-The span steps between readable figures (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 ×
-10ⁿ).
-
-**RAMP** does touch control. It is how fast the line may move, in SLPM per
-second, and it paces *every* setpoint the application writes to that unit —
-typed on the card, sent by `SET ALL FLOWS`, driven by the ignition sequence, or
-replayed from a recording. A setpoint 10 SLPM away on a line declared at
-2.5 SLPM/s is walked out over four seconds. The steps go through the ordinary
-setpoint queue, so a paced move is subject to every interlock a single write is.
-Typing a new setpoint while a line is still moving redirects it from wherever
-the flow actually is rather than being refused.
-
-Leaving the box at **step** writes the setpoint in one go and lets the
-controller travel at its own pace. The pilot and the two air lines are the
-exception: with no rate declared, a setpoint sent to them is still spread over
-ten seconds. They can be told to move *slower* than that, never faster.
-
-**OFF** is how that exception is lifted. It turns ramping off for that
-controller altogether — no rate, and no minimum move time either, so every
-setpoint written to that unit goes out in a single write whatever line it is
-driving and whatever figure is left in the rate box. On the pilot or on either
-air line **this removes a protection**. It latches red while it is on, greys out
-the rate box beside it so the figure there cannot be mistaken for something in
-force, writes a line to the system log, and is remembered between runs. Turning
-it back off restores whatever rate was typed. It is a deliberate, visible state
-rather than a rate of zero, which only ever meant *no rate declared*.
-
-## The combustion estimate
-
-Every figure on the card comes from the volumetric flows the meters reported on
-that pass and from nothing else: no pressure, no temperature, no gas analysis,
-no assumption about what the flame is doing. It describes what is being
-*supplied*, which is the part an operator can act on.
-
-**Standard litres.** Alicat's SLPM are referenced to 25 °C and 1 atm, so one
-standard litre is the same mole count for every gas on the rig:
-
-```
-Vm = 24.465 L/mol
+```powershell
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" run.py
 ```
 
-A ratio of two standard flows is therefore a ratio of two mole counts, and no
-density enters it. Density appears only where a *mass* is genuinely wanted —
-heating values are per kilogram, and the mass air/fuel ratio is what a
-combustion text tabulates — and it is taken from the same molar volume,
+`python -m flow_controller` is equivalent.
 
-```
-ρ = M / Vm          (g/L, which is kg/m³)
-```
+### Manual installation
 
-rather than from the per-gas `RHO_*` figures in `domain/roles.py`, which were
-taken at slightly different reference conditions and would make the two routes
-disagree in the third decimal.
-
-**The constants.** Everything below is built out of these.
-
-| | CH₄ | H₂ | NH₃ | Air |
-|---|---|---|---|---|
-| O₂ demanded, mol per mol of fuel | 2.00 | 0.50 | 0.75 | — |
-| Molar mass `M`, g/mol | 16.043 | 2.016 | 17.031 | 28.965 |
-| Lower heating value, MJ/kg | 50.0 | 120.0 | 18.6 | — |
-| Density at 25 °C, 1 atm, kg/m³ | 0.656 | 0.082 | 0.696 | 1.184 |
-| Firing rate, kW per SLPM | 0.5465 | 0.1648 | 0.2158 | — |
-
-Dry air is taken as 21 % O₂ by volume.
-
-**Stoichiometric air and φ.** The oxygen demands come from the three complete
-reactions:
-
-```
-CH4  + 2 O2   ->  CO2 + 2 H2O
-2 H2 +   O2   ->  2 H2O
-4 NH3 + 3 O2  ->  2 N2 + 6 H2O
-```
-
-which give one oxygen balance for whatever mixture is flowing, in SLPM:
-
-```
-0.21 · a_stoich = 2.00·CH4 + 0.50·H2 + 0.75·NH3
-
-φ = a_stoich / a_supplied
-```
-
-φ is the stoichiometric air requirement over the air actually supplied: above 1
-is rich, below 1 is lean. With no fuel flowing, or no air, there is no mixture
-to describe and the tile reads `--` rather than 0 or ∞.
-
-In staged mode the balance is struck three times over. Stage 1 is the rich
-fuels and the pilot against the rich air (`nh3_rich + h2_rich + ch4_pilot`
-against `rich_air`), stage 2 is the lean fuels against the lean air (`nh3_lean +
-h2_lean` against `lean_air`), and the global figure is every fuel against every
-air — identical to the φ columns in the CSV and to what the auto-calculation
-solves against. In standard mode there is one balance, over every assigned fuel
-and every assigned air line.
-
-**Firing rate.** Lower heating value per standard litre, summed over the fuels:
-
-```
-Q̇ [kW] = Σ  V̇_fuel · LHV_fuel · M_fuel / (Vm · 60)
-```
-
-with `V̇` in SLPM. The chain of units is `MJ/kg × g/mol = kJ/mol`, `÷ L/mol =
-kJ/L`, `÷ 60 s = kW per L/min`, which is where the per-SLPM figures in the table
-come from — methane at about half a kilowatt per SLPM is the one worth carrying
-in your head. This is heat *released* by complete combustion, not shaft or
-electrical output, and it is not corrected for anything left unburnt. It is the
-same quantity the RQL auto-calculation takes as its input, so a stored 10 kW
-target should read back as about 10 kW once the flows have settled.
-
-**Air/fuel ratios.** As supplied, and at φ = 1, by volume and then by mass:
-
-```
-(A/F)_vol         = a_supplied / Σ V̇_fuel
-(A/F)_stoich,vol  = a_stoich   / Σ V̇_fuel
-(A/F)_stoich,mass = ρ_air · a_stoich / Σ (ρ_fuel · V̇_fuel)
-```
-
-The volume ratios are pure flow arithmetic; the mass ratio is the tabulated one
-(17.19 for methane, 34.2 for hydrogen, 6.07 for ammonia), and it is a property
-of the fuel blend rather than of the air being supplied, so it stands even with
-the air shut. The three agree with φ by construction:
-`φ = (A/F)_stoich,vol ÷ (A/F)_vol`.
-
-**Blend fractions.** Each fuel's share of the fuel volume:
-
-```
-x_fuel = V̇_fuel / Σ V̇_fuel
-```
-
-By volume rather than by mass, because that is what the meters read and what a
-blend is set in — "70/30 NH₃/H₂" on this rig has always meant by volume, and the
-auto-calculation takes its hydrogen fraction the same way.
-
-**Bulk velocity.** Volumetric flow over the cross-section of a round inlet of
-declared diameter `d`, in millimetres:
-
-```
-u [m/s] = (V̇_total / 60000) / (π · (d/1000)² / 4)
-```
-
-`V̇_total` is everything entering that inlet — fuel, air *and* any non-reacting
-line, because nitrogen does not burn but does occupy the duct. 60 SLPM through a
-10 mm bore is 12.7 m/s. This is the cold-flow velocity of the mixture at
-standard conditions: it is not a flame speed, and it carries no correction for
-preheat or for expansion across the flame. Without a declared bore there is no
-answer at all, which is the whole reason the box exists.
-
-**What a missing reading does.** A controller that did not answer, or answered
-with something unparseable, contributes zero rather than stopping the refresh
-halfway through. A small negative flow — what an Alicat reports on a closed line
-sitting at zero — is also read as zero, since subtracting it would make a lean
-mixture look leaner than it is.
-
-## Recorded sequences
-
-A sequence is what the rig was *asked* to do, not what it did. Open the panel
-with **Record / Replay Sequence** in the *Sequence* card. The same card lists
-everything already saved under `Documents/Flow Controller/sequences`, newest
-first: **clicking a name loads it** into the panel and nothing moves, and the
-**▶** beside it loads and runs it once. **✎** renames a saved sequence and
-**✕** deletes it after confirmation.
-
-- **Record** captures every setpoint the session commands — typed, batched, or
-  ramped — as one track of keyframes per assigned controller. The
-  monitor has to be running first: nothing is being written to the controllers
-  otherwise, so there would be nothing to record. There is no *add key point*
-  button, because every setpoint change already lands a keyframe.
-- **Stopping** closes the recording and writes it as `*.fcseq.json`.
-- **Renaming** changes both the filename and the name stored inside the
-  sequence, without overwriting another saved sequence.
-- **Editing**: drag a point to move it and double-click empty space to add one.
-  Right-click a point for its exact time and setpoint, transition type, and a
-  deliberate delete action; double-clicking a point opens the same numerical
-  editor. A recorded keyframe *holds* until the next one, because a setpoint
-  written to a controller does not decay; switch a point to **Ramp (linear)** to
-  make the transition out of it smooth. Only the selected track is editable, and
-  the axis frames that track, so a 0.4 SLPM pilot is not a flat line on an axis
-  scaled for stage air.
-- **All tracks (overview)** is the first row of the track list and the view a
-  sequence opens on: every controller on one pair of axes, answering what the
-  rig as a whole does before you go looking at any one line. Nothing is editable
-  there.
-- **Replay** walks the keyframes back out through the ordinary setpoint queue,
-  so it is subject to every interlock a hand-typed setpoint is. A step edge on
-  the pilot or either air line is spread over a second rather than written as a
-  jump, and the log says so. Replay needs the monitor running; asking while it
-  is stopped offers to start it.
-- **Starting is gated on where the rig is standing.** A replay begins by writing
-  the sequence's opening setpoints, so starting one from somewhere else makes
-  every line jump at `t = 0`. The *measured* flows are compared against those
-  opening setpoints, within a couple of percent of each track's largest figure
-  and with a small floor so a 0.4 SLPM pilot is not judged on noise. If any line
-  disagrees you are told which, with the figure it wants and the figure it has,
-  and can either set the flows to match or run it anyway. A line that is not
-  reporting counts as no flow.
-- **How fast each line moves** during a replay is the **RAMP** figure on that
-  controller's own card, so a line that has been slowed down stays slow however
-  its setpoint arrives. Sequences recorded before the rate moved onto the cards
-  carry a per-track rate of their own; that is still read back, and stands in
-  wherever the card has nothing to say.
-- **Hold if flows lag** compares each track's measured flow against what it was
-  commanded, and stops the replay clock for **every** controller until a lagging
-  line catches up, so transitions stay in step rather than the fast lines running
-  ahead. Holds are marked on the timeline, named in the log, and time-boxed at
-  30 s so a genuinely stuck controller delays the run rather than stalling it
-  forever. The check can be turned off, and its tolerance changed, mid-replay.
-- **Repeat** (`× N`, or *until stopped*) runs the sequence more than once. Each
-  wrap is an ordinary edge rather than a fresh start, so rate-limited lines ramp
-  from the closing value back to the opening one instead of stepping, and the log
-  names the lines that will move at each wrap before the replay begins.
-- **Clear** puts the sequence down so the next recording starts from an empty
-  timeline. Files already on disk are untouched.
-
-Stopping the monitor, a zero-flow command, or shutdown all cancel a replay.
-Replay is refused rather than half-run if a track's role is not currently
-assigned; roles are re-resolved against the assignment in force at replay time,
-so a sequence recorded with stage-1 ammonia on unit A still runs after it has
-been moved to unit D.
-
-## Logging and data out
-
-**The CSV acquisition log** writes one row per completed serial polling pass:
-timestamp, then flow, setpoint, pressure, temperature, internal setpoint error
-and first valve drive for each unit, then live φ for stage 1, stage 2 and
-global. Column names carry the gas, zone and unit letter. The column set is
-decided once, when logging starts, from the units on the monitor at that
-moment — including General-zone and custom units — because a file whose columns
-shift mid-run cannot be loaded by anything. That is also why zones cannot be
-moved while a log is open.
-
-Rows are line-buffered and flushed as they are written, and the file is fsynced
-on close. A logging fault can never stop control: a failed write is dropped, not
-raised. Failed reads are left blank rather than repeating the previous value, so
-a column that holds steady is a controller that is genuinely not moving.
-
-Default destination is `Documents/Flow Controller`.
-
-**The LabVIEW UDP listener** accepts two datagrams and only two: `log` opens a
-timestamped copy of the destination file and starts recording, `stop` closes it.
-Anything else is reported and discarded. The point is that one operator action
-can start both systems' records at the same instant, which is the only way the
-two logs line up afterwards. A LabVIEW-triggered log is timestamped because
-those arrive unattended and repeatedly, and overwriting the previous capture
-would be a silent data loss. A second `log` while one is open is refused rather
-than allowed to clobber it. Rows are only written while the monitor is running.
-
-**Graph export** is a separate thing: a dump of the plotted history for someone
-doing arithmetic afterwards, from the *Logging & Graphs* tab.
-
-## Appearance
-
-Colours, fonts, corner radii, spacing and the glass alphas are read from
-`ui_theme.json` next to the application, and editable in-app from the settings
-dialog — which writes that same file, so a hand-edit and a dialog edit cannot
-drift apart. **Apply** re-themes the running window without touching the disk,
-which is how you actually pick a colour; **Save** writes it. The file is
-optional and partial, and anything malformed falls back to defaults rather than
-stopping the application. `FLOW_CONTROLLER_UI_CONFIG` overrides its location.
-
-Gas colours are not part of the theme by default: an operator learns that
-hydrogen is blue, and it should not move when the theme does.
-
-The window is frameless and draws its own title bar, with minimise, maximise and
-close on the same line as the name, so no light strip sits above a dark
-instrument panel. Dragging and double-clicking that bar are handed to the window
-manager, so snapping and monitor-to-monitor moves work as usual.
-
-## How it is built
-
-```
-flow_controller/
-  domain/          pure rules and arithmetic — no hardware, no widgets
-    roles.py         the rig's vocabulary: roles, zones, gases, colours
-    rql.py           firing rate + φ  ->  SLPM per role
-    combustion.py    the oxygen balance, firing rate, velocity, A/F
-    assignments.py   which auto-calc configuration an assignment supports
-    safety.py        which units a zero command targets
-    graphing.py      axis limits and rescale hysteresis
-    models.py        typed controller and telemetry records
-  infrastructure/  the wire
-    alicat_protocol.py   raw gas-table and register commands, response parsing
-    serial_worker.py     the one asyncio loop all serial work runs on
-  services/
-    discovery.py     scan a port, then read each device's own gas table
-  core/            the control layer, with no widgets in it
-    session.py       connecting, polling, setpoints, zero, ramps, ignition
-    sequence.py      record, edit, replay, the settle gate
-    ramps.py         paced setpoint moves
-    telemetry.py     live reads and the per-device capability cache
-    csv_logger.py    the acquisition log
-    graph_history.py retained samples
-    unit_prefs.py    per-meter declarations, remembered between runs
-    combustion_prefs.py  inlet bores and how often the estimate runs
-    udp_listener.py  the LabVIEW trigger socket
-  ui/              PySide6 views, plus the legacy Tk widgets
-  app.py           the original Tk application (run.py --legacy)
-```
-
-The split is what lets the arithmetic be tested without a controller and
-without a display: `domain` and most of `core` import neither serial nor a
-toolkit. `core.session` is the one deliberate Qt dependency outside `ui`, and it
-is there because results arriving off the serial thread have to reach the GUI
-thread, which Qt signals already do correctly.
-
-Views render session signals and call session methods. No serial call, no state
-rule and no interlock lives in a tab: the Connect button does not check whether
-monitoring is running, it asks, and the session says no.
-
-Alicat firmware varies in what it will answer. The fast path asks for six
-statistics in one transaction; units that cannot do that are polled one
-statistic at a time instead, and each unit's answer is remembered so the probe
-is not repeated.
-
-## Install
-
-Install 64-bit Python 3.11 or newer. Then, from this directory, **double-click
-`install.bat` once**.
-
-The environment is created in `%USERPROFILE%\.flow-controller-v3\venv`, not
-beside the application. Two reasons, both learned the hard way:
-
-- **Path length.** PySide6 unpacks QML resource files about 160 characters deep,
-  and Windows rejects any path beyond 260 characters unless long paths have been
-  enabled machine-wide. A program folder inside
-  `OneDrive - <organisation>\Desktop\...` spends most of that budget by itself,
-  and pip fails partway through with a misleading
-  `OSError: [Errno 2] No such file or directory: '...qrc_qmake_Qt_labs_assetdownloader_init.cpp.obj'`.
-- **Store Python.** The Microsoft Store build redirects writes to
-  `%LOCALAPPDATA%` into its own package `LocalCache`, so an environment created
-  there is not where it was asked for. `%USERPROFILE%` is not redirected.
-
-Keeping it out of the program folder also keeps a 250 MB environment out of
-OneDrive's sync.
-
-To do the same by hand in PowerShell:
+The pinned `requirements.txt` installs the application plus Excel-export
+support:
 
 ```powershell
 python -m venv "$env:USERPROFILE\.flow-controller-v3\venv"
@@ -538,81 +69,351 @@ python -m venv "$env:USERPROFILE\.flow-controller-v3\venv"
 & "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
-`install.bat` prefers the `py` launcher and falls back to `python`, because not
-every Python build installs `py` — the Microsoft Store build in particular puts
-only `python.exe` on PATH.
-
-## Run
-
-After installing, **double-click `run.bat`**. It uses the environment above, or
-a `.venv` beside the application if an older install left one there.
-
-To start it by hand, from this directory:
+For development or a minimal install, use the package metadata:
 
 ```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" run.py
+python -m pip install -e .
 ```
 
-Equivalently, `-m flow_controller` in place of `run.py`. Either form must be run
-with the program folder as the working directory, or with its full path given —
-the application is imported from this source tree, not from site-packages.
+Add `.[xlsx]` for Excel export.
 
-`run.bat` passes its arguments through, so `run.bat --legacy` starts the
-original Tk interface. That build needs matplotlib and a Python built with
-Tcl/Tk; `requirements.txt` installs matplotlib, but the packaged `legacy` extra
-in `pyproject.toml` treats it as optional, so an environment installed from
-`pyproject.toml` needs `pip install matplotlib` first.
+## First connection
 
-Any environment with the requirements installed will do — nothing in the program
-depends on where the interpreter lives.
+The normal setup order is:
 
-## Uninstall
+1. Open **Connection & Assignment**.
+2. Select the COM port and baud rate.
+3. Click **Scan A-Z** to probe Alicat addresses `A` through `Z`.
+4. Assign a gas and zone to each controller you intend to use.
+5. Select those controllers and click **Connect Selected**.
+6. Click **Start Live Monitor** and confirm that the readings are plausible.
+7. Open **Operation & Monitoring** to enter setpoints, start logging, or run a
+   saved sequence.
 
-**Double-click `uninstall.bat`** and type `YES` when it asks. It removes
-`%USERPROFILE%\.flow-controller-v3` (and a `.venv` beside the program, if an
-older install left one), and nothing else.
+The application defaults to **57,600 baud**. It does not reconfigure the
+instruments: every device on the selected bus must already use the chosen baud
+rate. Alicat's common factory default is 19,200, so verify the device settings
+before assuming a scan failure is a wiring problem.
 
-It deliberately leaves the program folder, logs, saved sequences and
-`ui_theme.json` alone — that is experiment data, and throwing it away should be
-a deliberate act. Delete them by hand once you are sure. Python itself is also
-left installed, since other programs may be using it.
+During discovery the application reads each controller's supported-gas table.
+The assignment list therefore reflects what that device actually reports,
+rather than a hard-coded gas list.
 
-## USB serial adapter notes
+## Operating modes
 
-The application defaults to 57,600 baud. The adapter is most likely
-USB-to-RS-232 or USB-to-RS-485, depending on the controller wiring, and is not
-normally the limiting factor; many adapters can operate at 115,200 baud or
-above. Confirm all of the following before increasing the application baud:
+The application starts in **Standard** mode on every launch. Connecting a full
+RQL assignment does not switch modes automatically.
 
-- every controller on the bus has been configured to the same baud;
-- the adapter supports the electrical interface in use (RS-232 is not RS-485);
-- the correct adapter driver is installed on the target PC;
-- cable length, grounding, termination, and topology are suitable;
-- communication remains reliable under repeated multi-controller polling.
+### Standard
 
-Higher baud reduces byte-transmission time, but controller response latency and
-the number of command/response round trips can still limit the effective polling
-rate.
+Standard mode provides general multi-channel operation:
 
-## Tests
+- individual and batch setpoints;
+- live flow, setpoint, pressure, temperature, setpoint-error, and valve-drive
+  telemetry where supported by the controller;
+- CSV logging and retained-history export;
+- live graphs; and
+- aggregate equivalence ratio, firing rate, and inlet bulk velocity.
 
-Tests do not require a controller or a display:
+Every assigned controller participates in monitoring and logging. Controllers
+assigned to **General**, or to a gas/zone pair without an RQL meaning, simply do
+not participate in stage-aware calculations.
+
+### Staged (RQL)
+
+Staged mode models these seven possible process lines:
+
+| Zone | Required roles |
+| --- | --- |
+| Stage 1 (rich) | NH3, H2, Air |
+| Stage 2 (lean) | NH3, H2, Air |
+| Pilot | CH4 |
+
+Auto-calculation is enabled for either of these assignments:
+
+- **Full RQL:** all seven roles.
+- **Rich + quench-air:** Stage 1 fuels and air, Stage 2 air, and the CH4 pilot.
+
+The calculator accepts firing rate, hydrogen fraction by volume, Stage 1 fuel
+split, Stage 1 equivalence ratio, and global equivalence ratio. It calculates
+and stores target flows but **does not send them**. Use **SET ALL FLOWS** only
+after reviewing the targets. Impossible requests, such as a Stage 1 mixture
+leaner than the requested global mixture, are rejected instead of producing a
+negative flow.
+
+## Interface overview
+
+### Connection & Assignment
+
+Use this tab to choose the serial settings, scan the bus, inspect device gas
+tables, assign roles, connect controllers, and verify live telemetry. Zones can
+be reassigned after connection unless a CSV log is open, because the log's
+columns are fixed when recording starts.
+
+### Operation & Monitoring
+
+This is the main run screen. Each connected controller has a card containing
+its current values, setpoint entry, full-scale declaration, and ramp setting.
+The left column contains logging, RQL auto-calculation, saved sequences, and the
+system log. The live combustion card shows the metrics appropriate to the
+selected operating mode.
+
+### Logging & Graphs
+
+Choose flow, setpoint, pressure, temperature, internal setpoint error, or valve
+drive for each controller. Nothing is rendered until at least one series is
+selected, but history begins accumulating as soon as monitoring starts. Leaving
+the tab stops graph rendering without stopping acquisition.
+
+Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
+rising trace does not continually rescale beneath the operator. The default
+history limit is 3,600 samples.
+
+## Controls and safety behavior
+
+The batch controls are available from every tab:
+
+- **SET ALL FLOWS** queues each card's current setpoint.
+- **ZERO FUEL** targets every assigned controller whose gas name is not exactly
+  `Air`.
+- **ZERO ALL** targets every assigned controller.
+
+Two rules are enforced in the control layer:
+
+1. A zero command outranks all pending or new nonzero setpoints for its target
+   units.
+2. Only the monitoring loop writes to hardware. Typed setpoints, batch sends,
+   ramps, and sequence replay all pass through the same queue and interlocks.
+
+Zero commands keep the serial connection and monitoring active so the result
+can be verified. They also cancel active ramps and sequence replay. Stopping
+monitoring or closing the application is not a substitute for zeroing the rig.
+
+After ten consecutive read timeouts from one unit, the application treats the
+port as wedged and restarts monitoring. **Reconnect** closes and reopens the
+connections while preserving assignments, history, and confirmed setpoints.
+
+### Full scale and ramp rate
+
+Each controller card remembers three per-unit settings:
+
+- **FULL SCALE** sets the SLPM span of the card's bar. It is a display setting,
+  not a hardware limit. Enter the value printed on the meter, or use `auto`/`0`
+  to let the application choose a readable span.
+- **RAMP** limits how quickly the application's commands may move that line, in
+  SLPM/s. It applies to typed, batch, calculated, and replayed setpoints.
+- **OFF** disables application-side ramping for that controller. It also
+  disables the built-in minimum move time for air and pilot lines.
+
+When no explicit rate is declared, CH4 pilot and air lines are still spread
+over a minimum ten-second move. Turning **OFF** on for one of these lines removes
+that protection and is shown as a persistent red latch.
+
+## Sequences
+
+A recorded sequence stores what the application was asked to do, not the
+measured response of the rig.
+
+- Start monitoring, expand **Record / Replay Sequence**, and click **Record**.
+  Every commanded setpoint becomes a keyframe.
+- Stopping a recording saves a `.fcseq.json` file under
+  `Documents\Flow Controller\sequences`.
+- Clicking a saved sequence loads it without moving the rig. The adjacent play
+  button loads and runs it once.
+- Drag a point to move it, double-click empty space to add a point, or
+  right-click a point to edit its exact time, value, and step/linear transition.
+- **Hold if flows lag** pauses the replay clock for all tracks until lagging
+  measurements catch up, with a 30-second maximum hold.
+- Repeats ramp from the final values back to the opening values rather than
+  treating each pass as a fresh, unprotected start.
+
+Replay uses the current assignment, so a role recorded on controller `A` can
+later run on controller `D`. Replay is refused if a required role is missing.
+Before starting, measured flows are compared with the sequence's opening
+setpoints; the operator must resolve or explicitly override any mismatch.
+
+Zero commands, stopping monitoring, and application shutdown cancel replay.
+
+## Logging, graphs, and LabVIEW
+
+### Acquisition CSV
+
+The acquisition logger writes one row after each completed serial polling pass:
+
+- timestamp;
+- flow, setpoint, pressure, temperature, internal setpoint error, and first
+  valve drive for each connected unit; and
+- live Stage 1, Stage 2, and global equivalence ratios.
+
+Column names include gas, zone, and unit. The header is fixed when logging
+starts, so assignments cannot change while the file is open. Failed readings
+are left blank rather than replaced with stale values. Writes are line-buffered,
+and a logging error is reported without stopping control.
+
+The default log directory is `Documents\Flow Controller`.
+
+### Graph-history export
+
+**Logging & Graphs > History & Export** exports the retained in-memory history
+for every assigned controller, not just the plotted series. CSV is always
+available; `.xlsx` is available when `openpyxl` is installed.
+
+### LabVIEW UDP trigger
+
+The Qt interface can listen for two case-insensitive UDP datagrams:
+
+- `log` starts a new timestamped acquisition log;
+- `stop` closes the active log.
+
+The listener defaults to `127.0.0.1:61557` and is started from **Operation &
+Monitoring > Logging & Acquisition**. A second `log` command is refused while a
+log is already open. Rows are written only while monitoring is running.
+
+## Combustion calculations
+
+The live estimate uses reported volumetric flows only. It does not infer flame
+state or correct for pressure, temperature, preheat, incomplete combustion, or
+gas analysis. Missing and small negative readings contribute zero.
+
+The card reports:
+
+- equivalence ratio, `phi`;
+- fuel firing rate from lower heating value; and
+- cold-flow inlet bulk velocity when an inlet diameter has been declared.
+
+In Staged mode the pilot CH4 contributes to Stage 1 and the global result. In
+Standard mode all assigned controllers are aggregated by gas. Use the menu on
+the combustion card to set inlet diameters, the number of Stage 2 inlets, and
+the display refresh interval. Pausing the card affects display only; logging
+continues to calculate its equivalence-ratio columns.
+
+<details>
+<summary>Calculation reference</summary>
+
+Standard litres are referenced to 25 C and 1 atm, using a molar volume of
+`24.465 L/mol`. Dry air is treated as 21% oxygen by volume.
+
+| Constant | CH4 | H2 | NH3 | Air |
+| --- | ---: | ---: | ---: | ---: |
+| O2 demand, mol/mol fuel | 2.00 | 0.50 | 0.75 | - |
+| Molar mass, g/mol | 16.043 | 2.016 | 17.031 | 28.965 |
+| Lower heating value, MJ/kg | 50.0 | 120.0 | 18.6 | - |
+| Density at 25 C and 1 atm, kg/m3 | 0.656 | 0.082 | 0.696 | 1.184 |
+| Firing rate, kW/SLPM | 0.5465 | 0.1648 | 0.2158 | - |
+
+Stoichiometric air and equivalence ratio are calculated from:
+
+```text
+0.21 * air_stoich = 2.00*CH4 + 0.50*H2 + 0.75*NH3
+phi = air_stoich / air_supplied
+```
+
+Firing rate is the sum over all fuel streams:
+
+```text
+power [kW] = sum(flow_fuel * LHV_fuel * molar_mass_fuel / (24.465 * 60))
+```
+
+For a circular inlet with diameter `d` in millimetres:
+
+```text
+velocity [m/s] = (total_flow / 60000) / (pi * (d/1000)^2 / 4)
+```
+
+The total flow used for velocity includes non-reacting gases because they still
+occupy the inlet. Stage 2 multiplies the area of one declared inlet by the
+declared number of identical inlets.
+
+</details>
+
+## Configuration and data files
+
+| Data | Default location | Override |
+| --- | --- | --- |
+| Acquisition logs | `Documents\Flow Controller` | Choose a path in the UI |
+| Saved sequences | `Documents\Flow Controller\sequences` | Choose a path when saving |
+| Per-unit full scale/ramp settings | `unit_prefs.json` beside the project | `FLOW_CONTROLLER_UNIT_PREFS` |
+| Combustion inlet/refresh settings | `combustion_prefs.json` beside the project | `FLOW_CONTROLLER_COMBUSTION_PREFS` |
+| UI theme | `ui_theme.json` beside the project | `FLOW_CONTROLLER_UI_CONFIG` |
+
+The JSON preference files are optional. Missing or malformed files fall back to
+safe defaults rather than preventing the application from starting. Appearance
+settings can be previewed with **Apply** and persisted with **Save** from the
+settings dialog.
+
+`uninstall.bat` removes the environment at
+`%USERPROFILE%\.flow-controller-v3` and an older local `.venv` if present. It
+does not remove Python, this source folder, logs, sequences, or preference
+files.
+
+## Development
+
+### Project layout
+
+```text
+flow_controller/
+  domain/          pure assignment, combustion, graphing, RQL, and safety rules
+  infrastructure/  Alicat protocol and the serial worker
+  services/        controller discovery
+  core/            session, telemetry, logging, ramps, sequences, and preferences
+  ui/              PySide6 interface
+tests/              hardware-free unit and Qt tests
+run.py              source-tree launcher
+```
+
+The domain and most core modules do not import serial hardware or a GUI toolkit,
+which keeps their behavior testable without a controller. `core.session` is the
+deliberate Qt-aware boundary: it receives results from the serial thread and
+delivers them to the interface through signals.
+
+### Run the tests
+
+The suite does not require a display or connected controller:
 
 ```powershell
 & "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m unittest discover -s tests -v
 ```
 
-They cover the combustion and RQL arithmetic, assignment assessment, the zero
-selection rule, protocol parsing, discovery, ramps, the graphing helpers, unit
-preferences and the sequence engine.
+It covers protocol parsing, discovery, assignments, safety selection, ramps,
+sequences, preferences, graphing, combustion/RQL arithmetic, and Qt behavior.
 
-Before using this build in an experiment, perform a hardware acceptance test
-covering scan, per-controller gas choices, connect/readback, setpoints,
-monitoring, logging, reconnect, UDP commands, verified fuel zero, and verified
-all-flow zero.
+Tests do not replace hardware acceptance. Before an experiment, verify scanning,
+device gas tables, assignments, readback, individual and batch setpoints,
+ramping, logging, reconnect behavior, UDP commands, **ZERO FUEL**, and **ZERO
+ALL** against the real installation.
 
-## Safety
+## Troubleshooting
 
-This is a supervisory control interface. Physical interlocks and independent
-emergency shutdown protection should not depend only on Windows, Python, or the
-USB serial connection.
+### No controllers are found
+
+- Confirm the selected COM port.
+- Confirm every controller and the application use the same baud rate.
+- Check that controller addresses are unique letters from `A` to `Z`.
+- Verify the adapter is the correct RS-232 or RS-485 type and that its driver is
+  installed.
+- Check cable topology, termination, grounding, and power.
+- Close any other program that may have the COM port open.
+
+### Installation fails on a long path
+
+Use `install.bat`, which places the environment under `%USERPROFILE%`. If pip
+still reports a deeply nested `No such file or directory` error, move the
+project nearer the drive root or enable Windows long paths.
+
+### The environment was created in an unexpected location
+
+Some Microsoft Store Python installations redirect filesystem writes. Install
+64-bit Python from python.org, ensure `python.exe` is on `PATH`, and run
+`install.bat` again.
+
+### A telemetry field is blank
+
+Alicat firmware varies. The application first attempts combined telemetry and
+falls back to individual register reads. Unsupported fields remain blank; the
+system log records the detected capability and any communication failures.
+
+## Final safety note
+
+Treat the application as one layer of supervision. Validate the complete
+system on the real rig, keep independent hardware interlocks in service, and
+make shutdown behavior part of the operating procedure.

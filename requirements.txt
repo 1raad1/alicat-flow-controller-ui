@@ -4,8 +4,5 @@ numpy==2.4.4
 PySide6==6.11.1
 pyqtgraph==0.14.0
 
-# Only for `run.py --legacy` (the Tk app) and .xlsx export.  The Qt app runs
-# without either: CSV is the primary export, and .xlsx is offered only when
-# openpyxl imports.
-matplotlib==3.10.8
+# Optional .xlsx export dependency. CSV export works without it.
 openpyxl==3.1.5

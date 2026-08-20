@@ -11,9 +11,8 @@ widget the operator uses rather than a lookalike.
 
 The scaling policy stays in ``flow_controller.domain.graphing``: limits are
 computed by ``padded_limits``/``should_rescale`` and pushed into pyqtgraph,
-rather than being left to the toolkit's own autorange.  That is what keeps
-the rescaling behaviour identical across toolkits -- and pyqtgraph repaints
-on every range change, so the hysteresis is a performance measure here too.
+rather than being left to automatic range selection. Pyqtgraph repaints on
+every range change, so the hysteresis is a performance measure here too.
 """
 
 from __future__ import annotations
@@ -27,9 +26,7 @@ from ..core.graph_history import GROUP_LABELS, GROUP_ORDER, METRICS
 from ..domain.graphing import padded_limits, should_rescale
 from . import qt_theme as theme
 
-#: matplotlib's dash vocabulary, which this module's pen table is keyed by.
-#: The core metric table names its dashes rather than spelling them, so that
-#: neither toolkit's notation leaks into the domain layer.
+#: Stable dash codes shared with the core metric table.
 _DASH_CODES = {'solid': '-', 'dash': '--', 'dot': ':', 'dashdot': '-.'}
 
 #: ``metric key -> (label, group, unit, sample key, dash)``.  Derived from the
@@ -80,9 +77,9 @@ class QtGraphPanel(QWidget):
     """Lazily-rendered multi-axis trace panel.
 
     Rendering runs only while the widget is visible *and* at least one series
-    is selected, matching the v3 Tk behaviour.  History is owned by the caller
-    and keeps accumulating regardless, so re-showing the panel draws the full
-    trace rather than restarting it.
+    is selected. History is owned by the caller and keeps accumulating
+    regardless, so re-showing the panel draws the full trace rather than
+    restarting it.
     """
 
     RENDER_MS = 200
@@ -364,9 +361,8 @@ class QtGraphPanel(QWidget):
     def _update_limits(self, force=False):
         """Apply manual limits, or auto-scale only when it is worth it.
 
-        pyqtgraph repaints on any range change, so the same hysteresis the
-        matplotlib panel uses to protect its blit path is applied here to
-        avoid needless full repaints.
+        Pyqtgraph repaints on any range change, so hysteresis avoids needless
+        full repaints.
         """
         if not self._plots:
             return

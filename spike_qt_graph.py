@@ -3,9 +3,9 @@
 Two modes:
 
     python spike_qt_graph.py --demo    live window, look and feel + lazy behaviour
-    python spike_qt_graph.py --bench   head-to-head render timing vs matplotlib
+    python spike_qt_graph.py --bench   compare Qt rendering options
 
-Nothing here is imported by the running application.  The Tk app is untouched.
+Nothing here is imported by the running application.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def bench(app, unit_count, metrics, frames=60, **panel_options):
     for _ in range(frames):
         panel.render_frame()
         # repaint() is synchronous, so the paint cost lands inside the timed
-        # region exactly as canvas.draw()/blit() does in the matplotlib bench.
+        # region.
         viewport.repaint()
         app.processEvents()
     elapsed = time.perf_counter() - start
@@ -113,22 +113,15 @@ VARIANTS = (
 def run_bench():
     app = QApplication.instance() or QApplication(sys.argv)
     random.seed(1)
-    print(f"points={HISTORY_POINTS}  frames=60")
-    print("matplotlib reference measured earlier on the same shapes\n")
-    # (v2 full-redraw path, v3 blitted path)
-    reference = {6: (42.35, 6.96), 20: (70.95, 11.55)}
+    print(f"points={HISTORY_POINTS}  frames=60\n")
     shapes = ((3, ('flow', 'sp')), (5, ('flow', 'sp', 'press', 'temp')))
 
     for unit_count, metrics in shapes:
         series = unit_count * len(metrics)
-        old_ms, new_ms = reference[series]
         print(f"=== {series} series ===")
-        print(f"  {'matplotlib v2 (full redraw)':<44} {old_ms:>7.2f} ms/frame")
-        print(f"  {'matplotlib v3 (blitted)':<44} {new_ms:>7.2f} ms/frame")
         for label, options in VARIANTS:
             qt_ms = bench(app, unit_count, metrics, **options)
-            print(f"  {'Qt: ' + label:<44} {qt_ms:>7.2f} ms/frame"
-                  f"   ({new_ms / qt_ms:.2f}x vs blitted mpl)")
+            print(f"  {label:<44} {qt_ms:>7.2f} ms/frame")
         print()
 
 
@@ -188,7 +181,7 @@ class SpikeWindow(QMainWindow):
         self._status.setStyleSheet("color: #8a8a84;")
         graph_layout.addWidget(self._status)
 
-        # Acquisition is independent of rendering, exactly as in the Tk app.
+        # Acquisition is independent of rendering.
         self._feed = QTimer(self)
         self._feed.setInterval(100)
         self._feed.timeout.connect(self._append)
@@ -238,7 +231,7 @@ def run_demo():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bench', action='store_true',
-                        help="time the Qt panel against the matplotlib panel")
+                        help="compare Qt panel rendering options")
     parser.add_argument('--demo', action='store_true',
                         help="open the live spike window (default)")
     args = parser.parse_args()

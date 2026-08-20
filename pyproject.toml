@@ -15,10 +15,7 @@ dependencies = [
     "pyqtgraph>=0.13,<1",
 ]
 
-# matplotlib is the legacy Tk app's plotting, openpyxl its .xlsx export; the Qt
-# app needs neither.  Install them only to run ``--legacy`` or to export .xlsx.
 [project.optional-dependencies]
-legacy = ["matplotlib>=3.10,<4"]
 xlsx = ["openpyxl>=3.1,<4"]
 
 [project.scripts]
