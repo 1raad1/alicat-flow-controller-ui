@@ -40,8 +40,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog,
                                QListWidgetItem, QMenu, QMessageBox, QPushButton,
                                QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
-from ..core.sequence import HOLD, LINEAR
+from ..core.sequence import HOLD, LINEAR, SMOOTH
 from ..core.session import SEQ_IDLE, SEQ_RECORDING, SEQ_REPLAYING
+from ..domain.roles import AIR_KEYS
 from . import qt_theme as theme
 from .qt_widgets import label, paint_glass
 
@@ -67,6 +68,12 @@ def _track_color(track, index):
     if color:
         return color
     return FALLBACK_COLORS[index % len(FALLBACK_COLORS)]
+
+
+def _is_air_track(track):
+    """Whether ``track`` belongs on the overview's air-flow axis."""
+    return (track.key in AIR_KEYS
+            or (track.gas or '').strip().casefold() == 'air')
 
 
 class KeyPointDialog(QDialog):
@@ -132,7 +139,9 @@ class KeyPointDialog(QDialog):
         self.interp_combo.setObjectName('KeyPointTransition')
         self.interp_combo.addItem('Hold (step)', HOLD)
         self.interp_combo.addItem('Ramp (linear)', LINEAR)
-        self.interp_combo.setCurrentIndex(1 if interp == LINEAR else 0)
+        self.interp_combo.addItem('Smooth (eased)', SMOOTH)
+        selected = self.interp_combo.findData(interp)
+        self.interp_combo.setCurrentIndex(max(0, selected))
         self.interp_combo.setToolTip(
             'How this point leads into the following point.')
         form.addRow('Transition after', self.interp_combo)
@@ -328,8 +337,10 @@ class CurveEditor(pg.PlotWidget):
     handles do the framing instead.
 
     With no track selected the widget is an overview: every curve at full
-    weight on a shared axis, nothing draggable.  Select a track and the rest
-    fade back to context so there is no doubt which line a drag will move.
+    weight and nothing draggable.  Fuel uses the left scale and air the right,
+    because the air span is usually much larger and would otherwise flatten the
+    fuel traces.  Select a track and the editor returns to one dedicated scale;
+    the rest fade back to context so there is no doubt which line a drag moves.
     """
 
     edited = Signal()
@@ -341,9 +352,12 @@ class CurveEditor(pg.PlotWidget):
         self._active_key = None
         self._hidden = set()
         self._curves = {}
+        self._air_curve_keys = set()
         self._colors = {}
         self._drag_index = None
         self._selected_index = None
+        self._selected_indices = set()
+        self._selection_anchor = None
         self._read_only = False
 
         self.setMenuEnabled(False)
@@ -357,6 +371,21 @@ class CurveEditor(pg.PlotWidget):
         for axis in ('bottom', 'left'):
             plot.getAxis(axis).setPen(pg.mkPen(theme.BORDER))
             plot.getAxis(axis).setTextPen(pg.mkPen(theme.TEXT_MUTED))
+
+        # Pyqtgraph implements a second y-axis with a linked ViewBox.  It is
+        # enabled only for the all-track overview; individual-track editing
+        # keeps the original single coordinate system for hit testing and drag.
+        self._air_view = pg.ViewBox(enableMenu=False)
+        self._air_view.setMouseEnabled(False, False)
+        plot.scene().addItem(self._air_view)
+        plot.getAxis('right').linkToView(self._air_view)
+        self._air_view.setXLink(plot.getViewBox())
+        plot.getViewBox().sigResized.connect(self._sync_air_view)
+        right = plot.getAxis('right')
+        right.setPen(pg.mkPen(theme.BORDER))
+        right.setTextPen(pg.mkPen(theme.GAS_COLORS.get('Air', theme.TEXT_MUTED)))
+        plot.hideAxis('right')
+        self._sync_air_view()
 
         self._points = pg.ScatterPlotItem(
             size=9, pen=pg.mkPen(theme.BG, width=1),
@@ -373,11 +402,13 @@ class CurveEditor(pg.PlotWidget):
     def set_sequence(self, sequence):
         self._sequence = sequence
         # No active track to begin with, which is the overview: every curve at
-        # full weight on one pair of axes.  It is the right thing to land on
+        # full weight, with fuel and air scaled separately.  It is right to land on
         # because the first question about a sequence just opened is what the
         # rig as a whole does, not what one line does.
         self._active_key = None
         self._selected_index = None
+        self._selected_indices.clear()
+        self._selection_anchor = None
         self._hidden.clear()
         self._colors = {}
         if sequence is not None:
@@ -391,6 +422,8 @@ class CurveEditor(pg.PlotWidget):
         self._active_key = key
         self._drag_index = None
         self._selected_index = None
+        self._selected_indices.clear()
+        self._selection_anchor = None
         self._redraw()
         self.fit_active()
 
@@ -418,15 +451,30 @@ class CurveEditor(pg.PlotWidget):
     def color_for(self, key):
         return self._colors.get(key, theme.TEXT)
 
+    @property
+    def selected_indices(self):
+        """The active track's selected points, in timeline order."""
+        return tuple(sorted(self._selected_indices))
+
     # -- framing --------------------------------------------------------- #
     def fit(self):
         """Frame every visible track."""
         if self._sequence is None or not self._sequence.tracks:
             return
         duration = max(self._sequence.duration, 1.0)
-        span = max((track.span for track in self._sequence.tracks
-                    if track.key not in self._hidden), default=1.0)
-        self._set_range(duration, span)
+        visible = [track for track in self._sequence.tracks
+                   if track.key not in self._hidden]
+        if self._active_key is None and any(_is_air_track(track)
+                                            for track in visible):
+            fuel_span = max((track.span for track in visible
+                             if not _is_air_track(track)), default=1.0)
+            air_span = max((track.span for track in visible
+                            if _is_air_track(track)), default=1.0)
+            self._set_overview_ranges(duration, max(fuel_span, 1.0),
+                                      max(air_span, 1.0))
+        else:
+            span = max((track.span for track in visible), default=1.0)
+            self._set_range(duration, span)
 
     def fit_active(self):
         """Frame the track being edited, so a small line is not a flat trace.
@@ -447,12 +495,62 @@ class CurveEditor(pg.PlotWidget):
         view.setXRange(-duration * 0.02, duration * 1.02, padding=0)
         view.setYRange(-span * 0.06, span * 1.12, padding=0)
 
+    def _set_overview_ranges(self, duration, fuel_span, air_span):
+        """Frame fuel and air independently while sharing one time range."""
+        view = self.getPlotItem().getViewBox()
+        view.setXRange(-duration * 0.02, duration * 1.02, padding=0)
+        view.setYRange(-fuel_span * 0.06, fuel_span * 1.12, padding=0)
+        self._air_view.setYRange(-air_span * 0.06, air_span * 1.12, padding=0)
+
+    def _sync_air_view(self):
+        """Keep the secondary plotting area exactly over the main ViewBox."""
+        plot = self.getPlotItem()
+        primary = plot.getViewBox()
+        self._air_view.setGeometry(primary.sceneBoundingRect())
+        self._air_view.linkedViewChanged(primary, self._air_view.XAxis)
+
+    def _configure_curve_axes(self, overview):
+        """Put air curves on the secondary axis only in the grouped view."""
+        plot = self.getPlotItem()
+        wanted_air = {
+            track.key for track in (self._sequence.tracks
+                                    if self._sequence is not None else ())
+            if overview and _is_air_track(track)
+        }
+        for key, curve in self._curves.items():
+            on_air = key in self._air_curve_keys
+            should_be_air = key in wanted_air
+            if on_air == should_be_air:
+                continue
+            if should_be_air:
+                plot.removeItem(curve)
+                self._air_view.addItem(curve)
+                self._air_curve_keys.add(key)
+            else:
+                self._air_view.removeItem(curve)
+                plot.addItem(curve)
+                self._air_curve_keys.discard(key)
+
+        visible_air = bool(wanted_air - self._hidden)
+        if visible_air:
+            plot.showAxis('right')
+            plot.setLabel('left', 'Fuel setpoint', units='SLPM')
+            plot.setLabel('right', 'Air setpoint', units='SLPM')
+        else:
+            plot.hideAxis('right')
+            plot.setLabel('left', 'Setpoint', units='SLPM')
+        self._sync_air_view()
+
     # -- drawing --------------------------------------------------------- #
     def _rebuild(self):
         plot = self.getPlotItem()
-        for curve in self._curves.values():
-            plot.removeItem(curve)
+        for key, curve in self._curves.items():
+            if key in self._air_curve_keys:
+                self._air_view.removeItem(curve)
+            else:
+                plot.removeItem(curve)
         self._curves = {}
+        self._air_curve_keys.clear()
         for line in self._marker_lines:
             plot.removeItem(line)
         self._marker_lines = []
@@ -476,12 +574,14 @@ class CurveEditor(pg.PlotWidget):
 
     def _redraw(self):
         if self._sequence is None:
+            self._configure_curve_axes(False)
             self._points.setData([], [])
             return
         # With no track selected every curve is drawn at full weight -- the
         # overview.  Dimming is what says "this one is being edited, the rest
         # are context", and in the overview nothing is being edited.
         overview = self._active_key is None
+        self._configure_curve_axes(overview)
         for track in self._sequence.tracks:
             curve = self._curves.get(track.key)
             if curve is None:
@@ -506,17 +606,19 @@ class CurveEditor(pg.PlotWidget):
             return
         frames = track.sorted_frames()
         color = QColor(self.color_for(track.key))
-        selected = self._selected_index
+        selected = self._selected_indices
         self._points.setData(
             [frame.t for frame in frames],
             [frame.value for frame in frames],
-            brush=[pg.mkBrush(color if frame.interp == LINEAR
-                              else QColor(theme.TEXT_BRIGHT))
+            brush=[pg.mkBrush(
+                color if frame.interp == LINEAR else
+                QColor(theme.ACCENT) if frame.interp == SMOOTH else
+                QColor(theme.TEXT_BRIGHT))
                    for frame in frames],
-            pen=[pg.mkPen(theme.WARN if index == selected else theme.BG,
-                          width=2 if index == selected else 1)
+            pen=[pg.mkPen(theme.WARN if index in selected else theme.BG,
+                          width=2 if index in selected else 1)
                  for index, _frame in enumerate(frames)],
-            size=[12 if index == selected else 9
+            size=[12 if index in selected else 9
                   for index, _frame in enumerate(frames)])
 
     def refresh(self):
@@ -558,11 +660,19 @@ class CurveEditor(pg.PlotWidget):
             return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        self._drag_index = index
         if index is not None:
-            self._selected_index = index
-            self._redraw()
-            self.selection_changed.emit(index)
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                self._select_range(index)
+                self._drag_index = None
+            elif modifiers & Qt.KeyboardModifier.ControlModifier:
+                self._toggle_select(index)
+                self._drag_index = None
+            else:
+                self._select(index)
+                self._drag_index = index
+        else:
+            self._clear_selection()
 
     def mouseMoveEvent(self, event):
         if self._read_only or self._drag_index is None:
@@ -615,9 +725,57 @@ class CurveEditor(pg.PlotWidget):
         super().keyPressEvent(event)
 
     def _select(self, index):
+        self._selected_indices = {index}
+        self._selected_index = index
+        self._selection_anchor = index
+        self._redraw()
+        self.selection_changed.emit(index)
+
+    def _select_range(self, index):
+        """Select every point between the anchor and ``index``."""
+        anchor = (self._selection_anchor if self._selection_anchor is not None
+                  else self._selected_index)
+        if anchor is None:
+            anchor = index
+        low, high = sorted((anchor, index))
+        self._selected_indices = set(range(low, high + 1))
         self._selected_index = index
         self._redraw()
         self.selection_changed.emit(index)
+
+    def _toggle_select(self, index):
+        """Add or remove one point without losing the rest of the group."""
+        if index in self._selected_indices:
+            self._selected_indices.remove(index)
+        else:
+            self._selected_indices.add(index)
+        self._selection_anchor = index
+        self._selected_index = (index if index in self._selected_indices else
+                                (max(self._selected_indices)
+                                 if self._selected_indices else None))
+        self._redraw()
+        self.selection_changed.emit(
+            self._selected_index if self._selected_index is not None else -1)
+
+    def _clear_selection(self):
+        self._selected_indices.clear()
+        self._selected_index = None
+        self._selection_anchor = None
+        self._redraw()
+        self.selection_changed.emit(-1)
+
+    def select_indices(self, indices):
+        """Select a point group programmatically (also useful for shortcuts)."""
+        track = self.active_track
+        count = len(track.sorted_frames()) if track is not None else 0
+        selected = {int(index) for index in indices
+                    if 0 <= int(index) < count}
+        self._selected_indices = selected
+        self._selected_index = max(selected) if selected else None
+        self._selection_anchor = self._selected_index
+        self._redraw()
+        self.selection_changed.emit(
+            self._selected_index if self._selected_index is not None else -1)
 
     def _show_context_menu(self, index, point, global_position):
         """Show deliberate point actions instead of deleting on right-click."""
@@ -646,7 +804,9 @@ class CurveEditor(pg.PlotWidget):
         transition = menu.addMenu('Transition after point')
         hold_action = transition.addAction('Hold (step)')
         linear_action = transition.addAction('Ramp (linear)')
-        for action, kind in ((hold_action, HOLD), (linear_action, LINEAR)):
+        smooth_action = transition.addAction('Smooth (eased)')
+        for action, kind in ((hold_action, HOLD), (linear_action, LINEAR),
+                             (smooth_action, SMOOTH)):
             action.setCheckable(True)
             action.setChecked(frame.interp == kind)
 
@@ -663,6 +823,8 @@ class CurveEditor(pg.PlotWidget):
             self._set_point_interp(index, HOLD)
         elif chosen == linear_action:
             self._set_point_interp(index, LINEAR)
+        elif chosen == smooth_action:
+            self._set_point_interp(index, SMOOTH)
         elif chosen == delete_action:
             self._delete_point(index)
 
@@ -698,11 +860,38 @@ class CurveEditor(pg.PlotWidget):
             self._select(index)
             self.edited.emit()
 
+    def set_selected_interp(self, interp, *, between_only=False):
+        """Apply a transition to the selected group.
+
+        For smoothing, ``between_only`` keeps the transition leaving the final
+        selected point unchanged.  The edit then affects only the span visibly
+        enclosed by the selected group.
+        """
+        track = self.active_track
+        selected = set(self._selected_indices)
+        if track is None or not selected:
+            return False
+        targets = selected
+        if between_only:
+            targets = {index for index in selected if index + 1 in selected}
+        if not targets:
+            return False
+        track.set_interps(targets, interp)
+        self._redraw()
+        self.edited.emit()
+        return True
+
+    def smooth_selected(self):
+        """Ease the transitions contained inside the selected point group."""
+        return self.set_selected_interp(SMOOTH, between_only=True)
+
     def _delete_point(self, index):
         track = self.active_track
         if track is None or not track.remove(index):
             return
         self._selected_index = None
+        self._selected_indices.clear()
+        self._selection_anchor = None
         self._redraw()
         self.selection_changed.emit(-1)
         self.edited.emit()
@@ -739,6 +928,7 @@ class SequencePanel(QWidget):
         self.editor.edited.connect(self._on_edited)
         self.editor.selection_changed.connect(self._on_frame_selected)
         editor_column.addWidget(self.editor, 1)
+        editor_column.addLayout(self._build_edit_controls())
         editor_column.addLayout(self._build_frame_controls())
         body.addLayout(editor_column, 1)
         outer.addLayout(body, 1)
@@ -876,8 +1066,10 @@ class SequencePanel(QWidget):
         bar.addWidget(label('TRANSITION', color=theme.TEXT_DIM, size=7,
                             bold=True))
         self.interp_combo = QComboBox()
-        self.interp_combo.addItems(['Hold (step)', 'Ramp (linear)'])
-        self.interp_combo.setFixedWidth(theme.scale(128))
+        self.interp_combo.addItem('Hold (step)', HOLD)
+        self.interp_combo.addItem('Ramp (linear)', LINEAR)
+        self.interp_combo.addItem('Smooth (eased)', SMOOTH)
+        self.interp_combo.setFixedWidth(theme.scale(142))
         self.interp_combo.setEnabled(False)
         self.interp_combo.activated.connect(self._on_interp)
         bar.addWidget(self.interp_combo)
@@ -887,6 +1079,53 @@ class SequencePanel(QWidget):
         fit.setProperty('density', 'compact')
         fit.clicked.connect(self.editor.fit)
         bar.addWidget(fit)
+        return bar
+
+    def _build_edit_controls(self):
+        """Whole-timeline timing and smoothing transforms."""
+        bar = QHBoxLayout()
+        bar.setSpacing(theme.PAD_SM)
+
+        bar.addWidget(label('SEQUENCE SPEED', color=theme.TEXT_DIM, size=7,
+                            bold=True))
+        self.slower_btn = QPushButton('− Slower')
+        self.slower_btn.setProperty('variant', 'quiet')
+        self.slower_btn.setProperty('density', 'compact')
+        self.slower_btn.setToolTip(
+            'Expand every track and marker by 1.2×. Press Speed up once to '
+            'reverse this exact timing change.')
+        self.slower_btn.clicked.connect(
+            lambda: self._on_speed(1.0 / 1.2))
+        bar.addWidget(self.slower_btn)
+
+        self.faster_btn = QPushButton('+ Speed up')
+        self.faster_btn.setProperty('variant', 'quiet')
+        self.faster_btn.setProperty('density', 'compact')
+        self.faster_btn.setToolTip(
+            'Compress every track and marker by 1.2×. Press Slower once to '
+            'reverse this exact timing change.')
+        self.faster_btn.clicked.connect(lambda: self._on_speed(1.2))
+        bar.addWidget(self.faster_btn)
+
+        bar.addSpacing(theme.PAD_MD)
+        self.smooth_selected_btn = QPushButton('Smooth selected')
+        self.smooth_selected_btn.setProperty('variant', 'quiet')
+        self.smooth_selected_btn.setProperty('density', 'compact')
+        self.smooth_selected_btn.setToolTip(
+            'Ease the transitions between the selected points. Shift-click '
+            'selects a continuous range; Ctrl-click adds or removes points.')
+        self.smooth_selected_btn.clicked.connect(self._on_smooth_selected)
+        bar.addWidget(self.smooth_selected_btn)
+
+        self.smooth_all_btn = QPushButton('Smooth whole sequence')
+        self.smooth_all_btn.setProperty('variant', 'quiet')
+        self.smooth_all_btn.setProperty('density', 'compact')
+        self.smooth_all_btn.setToolTip(
+            'Ease every transition on every track while preserving all key '
+            'point times and values.')
+        self.smooth_all_btn.clicked.connect(self._on_smooth_all)
+        bar.addWidget(self.smooth_all_btn)
+        bar.addStretch(1)
         return bar
 
     # -- session signals ------------------------------------------------- #
@@ -1065,8 +1304,8 @@ class SequencePanel(QWidget):
             overview.setData(Qt.ItemDataRole.UserRole, None)
             overview.setForeground(QColor(theme.TEXT_BRIGHT))
             overview.setToolTip(
-                'Every controller overlaid on one pair of axes. Pick a track '
-                'below to edit its curve.')
+                'Every controller overlaid against time. Fuel uses the left '
+                'scale and air the right. Pick a track below to edit its curve.')
             self.track_list.addItem(overview)
             for index, track in enumerate(sequence.tracks):
                 item = QListWidgetItem(track.label)
@@ -1115,10 +1354,34 @@ class SequencePanel(QWidget):
         track = self.editor.active_track
         if track is None or self._selected_index is None:
             return
-        track.set_interp(self._selected_index, LINEAR if choice else HOLD)
+        interp = self.interp_combo.itemData(choice)
+        self.editor.set_selected_interp(interp)
+
+    def _on_speed(self, multiplier):
+        """Retime the complete sequence by one reversible speed step."""
+        sequence = self.session.sequence
+        if (sequence is None or self.session.sequence_state != SEQ_IDLE
+                or not sequence.scale_speed(multiplier)):
+            return
+        self.timeline.set_markers(sequence.markers)
+        self.timeline.set_progress(
+            self.timeline.position / multiplier, sequence.duration)
+        self.editor.refresh()
+        self.editor.fit_active()
+        self._on_edited()
+
+    def _on_smooth_selected(self):
+        if self.session.sequence_state != SEQ_IDLE:
+            return
+        self.editor.smooth_selected()
+
+    def _on_smooth_all(self):
+        sequence = self.session.sequence
+        if sequence is None or self.session.sequence_state != SEQ_IDLE:
+            return
+        sequence.smooth_all()
         self.editor.refresh()
         self._on_edited()
-        self._describe_frame()
 
     def _describe_frame(self):
         track = self.editor.active_track
@@ -1127,14 +1390,35 @@ class SequencePanel(QWidget):
                 or not 0 <= self._selected_index < len(frames):
             self.frame_label.setText('No key point selected')
             self.interp_combo.setEnabled(False)
+            self.smooth_selected_btn.setEnabled(False)
             return
         frame = frames[self._selected_index]
+        selected = self.editor.selected_indices
+        if len(selected) > 1:
+            first, last = frames[selected[0]], frames[selected[-1]]
+            self.frame_label.setText(
+                f"{track.label}   {len(selected)} key points selected   "
+                f"{first.t:.2f}–{last.t:.2f} s")
+            kinds = {frames[index].interp for index in selected}
+            if len(kinds) == 1:
+                self.interp_combo.setCurrentIndex(
+                    self.interp_combo.findData(next(iter(kinds))))
+            else:
+                self.interp_combo.setCurrentIndex(-1)
+            self.interp_combo.setEnabled(
+                self.session.sequence_state == SEQ_IDLE)
+            self.smooth_selected_btn.setEnabled(
+                self.session.sequence_state == SEQ_IDLE
+                and any(index + 1 in selected for index in selected))
+            return
         pinned = '  (pinned to the start)' if self._selected_index == 0 else ''
         self.frame_label.setText(
             f"{track.label}   t = {frame.t:.2f} s   "
             f"{frame.value:.3f} SLPM{pinned}")
         self.interp_combo.setEnabled(self.session.sequence_state == SEQ_IDLE)
-        self.interp_combo.setCurrentIndex(1 if frame.interp == LINEAR else 0)
+        self.interp_combo.setCurrentIndex(
+            self.interp_combo.findData(frame.interp))
+        self.smooth_selected_btn.setEnabled(False)
 
     def _on_edited(self):
         sequence = self.session.sequence
@@ -1183,6 +1467,14 @@ class SequencePanel(QWidget):
         self.clear_btn.setEnabled(idle and has_sequence)
         self.repeat_spin.setEnabled(idle)
         self.track_list.setEnabled(not recording)
+        can_edit = idle and has_sequence
+        self.slower_btn.setEnabled(can_edit)
+        self.faster_btn.setEnabled(can_edit)
+        self.smooth_all_btn.setEnabled(can_edit)
+        self.smooth_selected_btn.setEnabled(
+            can_edit and len(self.editor.selected_indices) > 1
+            and any(index + 1 in self.editor.selected_indices
+                    for index in self.editor.selected_indices))
         self._describe_frame()
 
     # -- painting -------------------------------------------------------- #
