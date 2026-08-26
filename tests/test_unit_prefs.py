@@ -266,15 +266,15 @@ class RampOffFlagTests(unittest.TestCase):
         for value in (True, 1, 'true', 'TRUE', ' yes ', 'on', '1'):
             self.assertIs(unit_prefs.clean_flag(value), True, repr(value))
 
-    def test_anything_that_is_not_a_yes_is_not_declared(self):
-        # ``False`` and "never set" are deliberately the same state: the flag
-        # is only ever written when it is on.
-        for value in (False, None, 0, '', 'false', 'no', 'off', 'maybe'):
+    def test_obvious_no_values_are_retained_as_false(self):
+        for value in (False, 0, 'false', 'no', 'off', '0'):
+            self.assertIs(unit_prefs.clean_flag(value), False, repr(value))
+        for value in (None, '', 'maybe'):
             self.assertIsNone(unit_prefs.clean_flag(value), repr(value))
 
     def test_the_flag_is_cleaned_by_field_name_rather_than_by_ceiling(self):
         self.assertIs(unit_prefs.clean_field('ramp_off', True), True)
-        self.assertIsNone(unit_prefs.clean_field('ramp_off', False))
+        self.assertIs(unit_prefs.clean_field('ramp_off', False), False)
         self.assertIn('ramp_off', unit_prefs.FLAGS)
         self.assertNotIn('ramp_off', unit_prefs.CEILINGS)
 
@@ -293,10 +293,10 @@ class RampOffFlagTests(unittest.TestCase):
     def test_a_rate_of_zero_does_not_turn_ramping_off(self):
         self.assertEqual(unit_prefs.clean_record({'ramp': 0}), {})
 
-    def test_a_flag_that_is_off_leaves_no_trace_in_the_record(self):
+    def test_a_false_flag_is_kept_to_override_the_default(self):
         self.assertEqual(
             unit_prefs.clean_record({'ramp': 2.5, 'ramp_off': False}),
-            {'ramp': 2.5})
+            {'ramp': 2.5, 'ramp_off': False})
 
     def test_the_flag_round_trips_through_the_file_as_a_boolean(self):
         prefs = {'A': {'ramp': 2.5, 'ramp_off': True}}
@@ -312,11 +312,12 @@ class RampOffFlagTests(unittest.TestCase):
         self.assertEqual(unit_prefs.load(store_path=self.store),
                          {'A': {'ramp_off': True}})
 
-    def test_a_false_flag_is_not_written_out(self):
+    def test_a_false_flag_is_written_out(self):
         unit_prefs.save({'A': {'full_scale': 50.0, 'ramp_off': False}},
                         store_path=self.store)
         raw = json.loads(self.store.read_text(encoding='utf-8'))
-        self.assertEqual(raw, {'A': {'full_scale': 50.0}})
+        self.assertEqual(
+            raw, {'A': {'full_scale': 50.0, 'ramp_off': False}})
 
     def test_a_hand_edited_file_reads_the_obvious_yeses(self):
         self.store.write_text(json.dumps({'A': {'ramp_off': 'true'},
@@ -324,7 +325,8 @@ class RampOffFlagTests(unittest.TestCase):
                                           'C': {'ramp_off': 1}}),
                               encoding='utf-8')
         self.assertEqual(unit_prefs.load(store_path=self.store),
-                         {'A': {'ramp_off': True}, 'C': {'ramp_off': True}})
+                         {'A': {'ramp_off': True}, 'B': {'ramp_off': False},
+                          'C': {'ramp_off': True}})
 
     def test_the_flag_does_not_disturb_the_legacy_bare_number_form(self):
         self.assertEqual(unit_prefs.clean_record(50), {'full_scale': 50.0})

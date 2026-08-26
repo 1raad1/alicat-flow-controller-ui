@@ -30,8 +30,10 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QPushButton, QScrollArea, QSizePolicy, QSpinBox,
                                QSplitter, QVBoxLayout, QWidget, QWidgetAction)
 
-from ..core.combustion_prefs import (MAX_INLET_COUNT, SCOPE_ALL, SCOPE_STAGE1,
-                                     SCOPE_STAGE2)
+from ..core.combustion_prefs import (
+    GEOMETRY_AREA, GEOMETRY_DIAMETER, MAX_INLET_COUNT, SCOPE_ALL,
+    SCOPE_STAGE1, SCOPE_STAGE2,
+)
 from ..core.sequence import Sequence, opening_mismatches
 from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
                            SEQ_IDLE)
@@ -280,12 +282,12 @@ class OperationTab(QWidget):
         self._target_tiles = {}
         self._combustion = {}
         self._combustion_std = {}
-        #: Scope -> the inlet-diameter boxes showing it.  A list per scope
-        #: because both cards are built, only one is shown, and the figure
-        #: they display is the same figure.
-        self._combustion_diam = {}
-        #: Scope -> labels displaying the area calculated from the editable
-        #: inlet diameter.  Diameter remains the single stored input.
+        #: Scope -> geometry selector, value entry, and unit label widgets. A
+        #: list per scope because both mode-specific cards are built.
+        self._combustion_geometry_combos = {}
+        self._combustion_geometry_entries = {}
+        self._combustion_geometry_units = {}
+        #: Scope -> labels displaying the effective inlet area.
         self._combustion_area_labels = {}
         self._combustion_inlet_spins = {}
         self._combustion_live_boxes = []
@@ -1134,7 +1136,7 @@ class OperationTab(QWidget):
         button = QPushButton('☰')
         button.setObjectName('CardMenuButton')
         button.setAccessibleName('Combustion estimate settings')
-        button.setToolTip('Inlet diameter and live-estimate settings')
+        button.setToolTip('Inlet geometry and live-estimate settings')
         button.setFixedSize(theme.scale(30), theme.scale(26))
 
         menu = QMenu(button)
@@ -1155,24 +1157,40 @@ class OperationTab(QWidget):
             line = QHBoxLayout(geometry)
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(theme.PAD_SM)
-            line.addWidget(label(f'{caption} diameter',
-                                 color=theme.TEXT_MUTED, size=8))
+            line.addWidget(label(caption, color=theme.TEXT_MUTED, size=8))
+            geometry_mode = QComboBox()
+            geometry_mode.setObjectName('CombustionGeometryMode')
+            geometry_mode.addItem('Diameter', GEOMETRY_DIAMETER)
+            geometry_mode.addItem('Area', GEOMETRY_AREA)
+            geometry_mode.setFixedWidth(theme.scale(98))
+            geometry_mode.setToolTip(
+                'Use diameter for a circular inlet, or enter the actual '
+                'cross-sectional area for square and other inlet shapes.')
+            geometry_mode.currentIndexChanged.connect(
+                lambda _index, scope=scope, combo=geometry_mode:
+                self._on_combustion_geometry(scope, combo.currentData()))
+            self._combustion_geometry_combos.setdefault(
+                scope, []).append(geometry_mode)
+            line.addWidget(geometry_mode)
             line.addStretch(1)
             entry = QLineEdit()
-            entry.setObjectName('CombustionDiameterInput')
+            entry.setObjectName('CombustionGeometryInput')
             entry.setProperty('scope', scope)
             entry.setFixedWidth(theme.scale(72))
             entry.setAlignment(Qt.AlignmentFlag.AlignRight)
             entry.setPlaceholderText('—')
             entry.setToolTip(
-                'Internal inlet diameter in millimetres. The cross-sectional '
-                'area is calculated from this value and used for bulk velocity.')
+                'Circular diameter in mm, or actual cross-sectional area in '
+                'mm². This value is used only for the bulk-velocity estimate.')
             entry.editingFinished.connect(
                 lambda scope=scope, entry=entry:
-                self._on_combustion_diameter(scope, entry.text()))
-            self._combustion_diam.setdefault(scope, []).append(entry)
+                self._on_combustion_geometry_value(scope, entry.text()))
+            self._combustion_geometry_entries.setdefault(scope, []).append(entry)
             line.addWidget(entry)
-            line.addWidget(label('mm', color=theme.TEXT_MUTED, size=8))
+            units = label('mm', color=theme.TEXT_MUTED, size=8)
+            units.setFixedWidth(theme.scale(30))
+            self._combustion_geometry_units.setdefault(scope, []).append(units)
+            line.addWidget(units)
             layout.addWidget(geometry)
             if scope == SCOPE_STAGE2:
                 count_row = QWidget()
@@ -1190,8 +1208,8 @@ class OperationTab(QWidget):
                 count.setAlignment(Qt.AlignmentFlag.AlignRight)
                 count.setToolTip(
                     'Number of identical Stage 2 inlets. Bulk velocity uses '
-                    'the entered per-inlet diameter multiplied across this '
-                    'many circular areas.')
+                    'the entered per-inlet area multiplied across this many '
+                    'identical inlets.')
                 count.valueChanged.connect(
                     lambda value, scope=scope:
                     self.session.set_combustion_inlets(scope, value))
@@ -1239,9 +1257,17 @@ class OperationTab(QWidget):
         self._combustion_menus.append(menu)
 
     # -- combustion: operator input ---------------------------------------- #
-    def _on_combustion_diameter(self, scope, text):
-        """A bore was typed.  The session cleans it; the boxes show the result."""
-        self.session.set_combustion_diameter(scope, text.strip() or None)
+    def _on_combustion_geometry(self, scope, mode):
+        self.session.set_combustion_geometry(scope, mode)
+        self._apply_combustion_prefs()
+
+    def _on_combustion_geometry_value(self, scope, text):
+        """Clean a diameter/area entry, then redraw every copy of it."""
+        value = text.strip() or None
+        if self.session.combustion_geometry(scope) == GEOMETRY_AREA:
+            self.session.set_combustion_area(scope, value)
+        else:
+            self.session.set_combustion_diameter(scope, value)
         # Unconditionally, not only when the session announces a change: a
         # figure that cleaned to the one already in force still has to replace
         # whatever was typed, or the box keeps showing a number nothing uses.
@@ -1253,12 +1279,26 @@ class OperationTab(QWidget):
 
     def _apply_combustion_prefs(self):
         """Draw the stored settings onto both cards, then catch the tiles up."""
-        for scope, entries in self._combustion_diam.items():
-            value = self.session.combustion_diameter(scope)
+        for scope, entries in self._combustion_geometry_entries.items():
+            mode = self.session.combustion_geometry(scope)
+            value = (self.session.combustion_area(scope)
+                     if mode == GEOMETRY_AREA
+                     else self.session.combustion_diameter(scope))
             text = '' if value is None else f'{value:g}'
             for entry in entries:
                 if entry.text() != text:
                     entry.setText(text)
+        for scope, combos in self._combustion_geometry_combos.items():
+            mode = self.session.combustion_geometry(scope)
+            for combo in combos:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(combo.findData(mode))
+                combo.blockSignals(False)
+        for scope, units in self._combustion_geometry_units.items():
+            unit_text = ('mm²' if self.session.combustion_geometry(scope)
+                         == GEOMETRY_AREA else 'mm')
+            for unit in units:
+                unit.setText(unit_text)
         for scope, spins in self._combustion_inlet_spins.items():
             count = self.session.combustion_inlets(scope)
             for spin in spins:
@@ -1266,8 +1306,7 @@ class OperationTab(QWidget):
                 spin.setValue(count)
                 spin.blockSignals(False)
         for scope, labels in self._combustion_area_labels.items():
-            diameter = self.session.combustion_diameter(scope)
-            area = _area_from_diameter(diameter)
+            area = self.session.combustion_area(scope)
             if area is None:
                 text = 'AREA  — mm²'
             elif scope == SCOPE_STAGE2:

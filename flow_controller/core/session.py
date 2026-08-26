@@ -582,8 +582,8 @@ class FlowSession(QObject):
         return cleaned
 
     def ramp_disabled_for(self, unit):
-        """True when the operator has turned ramping off on this controller."""
-        return bool(self.pref_for(unit, 'ramp_off'))
+        """Whether application ramping is off; new controllers default off."""
+        return bool(self.unit_prefs.get(unit, {}).get('ramp_off', True))
 
     def set_ramp_disabled(self, unit, off):
         """Turn this controller's ramping off outright, or back on.
@@ -1525,6 +1525,22 @@ class FlowSession(QObject):
         field = combustion_prefs.DIAMETER_FIELDS.get(scope)
         return self.combustion_prefs.get(field) if field else None
 
+    def combustion_geometry(self, scope=SCOPE_ALL):
+        """Whether this inlet is entered as ``diameter`` or ``area``."""
+        field = combustion_prefs.GEOMETRY_FIELDS.get(scope)
+        return combustion_prefs.clean_geometry(
+            self.combustion_prefs.get(field) if field else None)
+
+    def combustion_area(self, scope=SCOPE_ALL):
+        """The selected per-inlet cross-sectional area in mm²."""
+        if self.combustion_geometry(scope) == combustion_prefs.GEOMETRY_AREA:
+            field = combustion_prefs.AREA_FIELDS.get(scope)
+            return self.combustion_prefs.get(field) if field else None
+        diameter = self.combustion_diameter(scope)
+        if diameter is None:
+            return None
+        return math.pi * (float(diameter) / 2.0) ** 2
+
     def combustion_inlets(self, scope=SCOPE_ALL):
         """Parallel inlet count for a scope; only Stage 2 may exceed one."""
         if scope != SCOPE_STAGE2:
@@ -1540,10 +1556,11 @@ class FlowSession(QObject):
         Passing that to the existing velocity calculation is exactly the same
         as dividing total flow by ``count × area_per_inlet``.
         """
-        diameter = self.combustion_diameter(scope)
-        if diameter is None:
+        area = self.combustion_area(scope)
+        if area is None:
             return None
-        return diameter * math.sqrt(self.combustion_inlets(scope))
+        total_area = float(area) * self.combustion_inlets(scope)
+        return math.sqrt(4.0 * total_area / math.pi)
 
     def set_combustion_diameter(self, scope, millimetres):
         """Declare -- or with ``None``/0 withdraw -- one inlet bore, in mm.
@@ -1565,6 +1582,49 @@ class FlowSession(QObject):
         else:
             self._log(f"Combustion: {scope} inlet diameter → "
                       f"{cleaned:.2f} mm")
+        self._save_combustion_prefs()
+        return cleaned
+
+    def set_combustion_area(self, scope, square_millimetres):
+        """Declare one inlet's cross-sectional area in square millimetres."""
+        field = combustion_prefs.AREA_FIELDS.get(scope)
+        if field is None:
+            return None
+        cleaned = combustion_prefs.clean_area(square_millimetres)
+        if self.combustion_prefs.get(field) == cleaned:
+            return cleaned
+        self.combustion_prefs[field] = cleaned
+        if cleaned is None:
+            self._log(f'Combustion: {scope} inlet area cleared '
+                      '(bulk velocity not shown)')
+        else:
+            self._log(f'Combustion: {scope} inlet area → '
+                      f'{cleaned:.2f} mm²')
+        self._save_combustion_prefs()
+        return cleaned
+
+    def set_combustion_geometry(self, scope, mode):
+        """Choose the inlet input representation without changing its area."""
+        field = combustion_prefs.GEOMETRY_FIELDS.get(scope)
+        if field is None:
+            return combustion_prefs.GEOMETRY_DIAMETER
+        cleaned = combustion_prefs.clean_geometry(mode)
+        if self.combustion_geometry(scope) == cleaned:
+            return cleaned
+
+        # Carry the current cross-section across the representation switch so
+        # changing the editor does not make a live estimate jump or disappear.
+        current_area = self.combustion_area(scope)
+        self.combustion_prefs[field] = cleaned
+        if current_area is not None:
+            if cleaned == combustion_prefs.GEOMETRY_AREA:
+                area_field = combustion_prefs.AREA_FIELDS[scope]
+                self.combustion_prefs[area_field] = current_area
+            else:
+                diameter_field = combustion_prefs.DIAMETER_FIELDS[scope]
+                self.combustion_prefs[diameter_field] = math.sqrt(
+                    4.0 * current_area / math.pi)
+        self._log(f'Combustion: {scope} inlet input → {cleaned}')
         self._save_combustion_prefs()
         return cleaned
 

@@ -19,7 +19,7 @@ from flow_controller.ui import qt_theme as theme
 from flow_controller.ui.qt_agent_launcher import (
     AGENT_PROFILES, AgentLauncherPane, AgentProcessManager,
     _WinPtyProcess, discover_agents, format_plan_authority_review,
-    launch_command,
+    authentication_command, launch_command,
 )
 from flow_controller.core.experiment_plan import (
     AbortProcedure, ExperimentPlan, PlanStage, StabilityCondition)
@@ -131,6 +131,37 @@ class AgentLauncherTests(unittest.TestCase):
             '--ask-for-approval', 'on-request',
         ])
         self.assertEqual(command[-2:], ['--cd', 'C:\\project'])
+
+    def test_provider_login_commands_are_explicit_argument_lists(self):
+        self.assertEqual(
+            authentication_command('codex', 'codex.exe'),
+            ['codex.exe', 'login'])
+        self.assertEqual(
+            authentication_command('claude', 'claude.exe'),
+            ['claude.exe', 'auth', 'login'])
+
+    def test_sign_in_uses_terminal_without_starting_mcp_or_live_authority(self):
+        process = FakeProcess()
+        gateway = Mock()
+        service = FakeAuthorityService()
+        popen = Mock(return_value=process)
+        manager = AgentProcessManager(
+            Path('C:/flow-controller-project'),
+            which={'codex': 'C:/agents/codex.exe'}.get,
+            process_factory=popen, platform='nt', gateway=gateway,
+            authority_service=service)
+        self.addCleanup(manager.shutdown)
+        pane = AgentLauncherPane(manager, collapsed=False)
+        self.addCleanup(pane.close)
+
+        self.assertTrue(manager.start_auth('codex'))
+
+        self.assertEqual(
+            popen.call_args.args[0], ['C:/agents/codex.exe', 'login'])
+        gateway.start.assert_not_called()
+        self.assertFalse(manager.live_authority_available())
+        self.assertFalse(pane.live_toggle.isEnabled())
+        self.assertFalse(service.authority.enabled)
 
     def test_default_launcher_uses_embedded_conpty_backend(self):
         process = FakeProcess()
@@ -367,6 +398,8 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertEqual(
             pane.buttons['claude'].iconSize().width(), theme.scale(22))
         self.assertFalse(pane.stop_button.isEnabled())
+        self.assertTrue(pane.setup_button.isEnabled())
+        self.assertEqual(set(pane.sign_in_actions), {'claude', 'codex'})
         pane.set_collapsed(False, animate=False)
         self.assertFalse(pane.is_collapsed())
         self.assertIn('not a security boundary', pane._warning.text())

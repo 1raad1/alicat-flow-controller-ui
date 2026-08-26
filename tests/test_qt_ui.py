@@ -15,7 +15,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
 
-from flow_controller.core.combustion_prefs import SCOPE_STAGE2
+from flow_controller.core.combustion_prefs import (GEOMETRY_AREA,
+                                                   SCOPE_STAGE2)
 from flow_controller.core.session import (FlowSession, MODE_STAGED,
                                           MODE_STANDARD)
 from flow_controller.core.sequence import Sequence
@@ -147,7 +148,9 @@ class QtUiTests(unittest.TestCase):
         })
         self.assertEqual(set(tab._combustion_std), {'phi', 'vel', 'power'})
         self.assertEqual(len(tab.findChildren(
-            QWidget, 'CombustionDiameterInput')), 3)
+            QWidget, 'CombustionGeometryInput')), 3)
+        self.assertEqual(len(tab.findChildren(
+            QWidget, 'CombustionGeometryMode')), 3)
         self.assertEqual(len(tab.findChildren(
             QWidget, 'CombustionInletCountInput')), 1)
         self.assertEqual(len(tab.findChildren(QWidget, 'CardMenuButton')), 2)
@@ -155,6 +158,8 @@ class QtUiTests(unittest.TestCase):
                             for menu in tab._combustion_menus))
         session.combustion_prefs['stage1_mm'] = 20.0
         session.combustion_prefs['stage2_mm'] = 20.0
+        session.combustion_prefs['stage1_geometry'] = 'diameter'
+        session.combustion_prefs['stage2_geometry'] = 'diameter'
         session.combustion_prefs['stage2_inlets'] = 4
         tab._apply_combustion_prefs()
         self.assertIn('314.2',
@@ -163,6 +168,14 @@ class QtUiTests(unittest.TestCase):
                       tab._combustion_area_labels['stage2'][0].text())
         self.assertAlmostEqual(
             session.combustion_effective_diameter(SCOPE_STAGE2), 40.0)
+        session.combustion_prefs['stage2_geometry'] = GEOMETRY_AREA
+        session.combustion_prefs['stage2_area_mm2'] = 400.0
+        tab._apply_combustion_prefs()
+        self.assertIn('1600',
+                      tab._combustion_area_labels['stage2'][0].text())
+        self.assertAlmostEqual(
+            session.combustion_effective_diameter(SCOPE_STAGE2),
+            math.sqrt(4.0 * 1600.0 / math.pi))
         tab._refresh_combustion_staged({}, flows={
             'ch4_pilot': 1.0, 'nh3_rich': 7.0, 'h2_rich': 2.0,
         })
@@ -187,6 +200,16 @@ class QtUiTests(unittest.TestCase):
         self.assertEqual(tab._cards_view, 'list')
         self.assertTrue(tab._cards_view_buttons['list'].isChecked())
         self.assertTrue(all(not card._compact
+                            for card in tab._cards.values()))
+        self.assertTrue(all(not card.settings_button.isHidden()
+                            for card in tab._cards.values()))
+        self.assertTrue(all(not card.settings_menu.isVisible()
+                            for card in tab._cards.values()))
+        self.assertTrue(all(card.settings_menu.isAncestorOf(card.scale_spin)
+                            and card.settings_menu.isAncestorOf(card.max_flow_spin)
+                            and card.settings_menu.isAncestorOf(card.ramp_spin)
+                            for card in tab._cards.values()))
+        self.assertTrue(all(card.ramp_off_btn.isChecked()
                             for card in tab._cards.values()))
         tab._cards['A'].entry.setText('1.25')
 

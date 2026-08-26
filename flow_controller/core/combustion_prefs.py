@@ -3,11 +3,10 @@
 Two kinds of declaration, both properties of the rig or of the machine running
 the software rather than of a session:
 
-* the **inlet diameters** -- one for the standard single-inlet rig, one per
-  stage for the RQL burner.  Bulk velocity cannot be computed without a bore,
-  the controllers obviously do not report it, and the same burner is the same
-  bore tomorrow, so it is typed once and kept.
-* the **number of Stage 2 inlets**.  Its entered diameter describes one inlet;
+* the **inlet geometry** -- either a circular inlet diameter or a directly
+  entered cross-sectional area. This lets rectangular and multi-shape burner
+  inlets use the same bulk-velocity estimate without inventing a diameter.
+* the **number of Stage 2 inlets**. The entered geometry describes one inlet;
   velocity uses the combined area of every identical Stage 2 inlet.
 * whether the estimate runs **live** and **how often**.  The arithmetic itself
   is a few dozen floating-point operations per pass and costs nothing; what
@@ -48,10 +47,30 @@ DIAMETER_FIELDS = {
     SCOPE_STAGE2: 'stage2_mm',
 }
 
+AREA_FIELDS = {
+    SCOPE_ALL: 'inlet_area_mm2',
+    SCOPE_STAGE1: 'stage1_area_mm2',
+    SCOPE_STAGE2: 'stage2_area_mm2',
+}
+
+GEOMETRY_FIELDS = {
+    SCOPE_ALL: 'inlet_geometry',
+    SCOPE_STAGE1: 'stage1_geometry',
+    SCOPE_STAGE2: 'stage2_geometry',
+}
+
+GEOMETRY_DIAMETER = 'diameter'
+GEOMETRY_AREA = 'area'
+GEOMETRY_MODES = (GEOMETRY_DIAMETER, GEOMETRY_AREA)
+
 #: A bore past this is a typo or a units mix-up -- metres typed into a
 #: millimetre box reads as a velocity a thousand times too low, which is the
 #: kind of wrong number that gets believed.
 MAX_DIAMETER_MM = 2000.0
+
+# Same upper bound expressed as the area of the largest accepted circular
+# inlet. It catches obvious unit mistakes without constraining inlet shape.
+MAX_AREA_MM2 = 3_141_592.6536
 
 #: Enough to catch a pasted diameter or flow figure without constraining any
 #: plausible multi-port injector arrangement.
@@ -72,6 +91,12 @@ DEFAULTS = {
     'inlet_mm': None,
     'stage1_mm': None,
     'stage2_mm': None,
+    'inlet_area_mm2': None,
+    'stage1_area_mm2': None,
+    'stage2_area_mm2': None,
+    'inlet_geometry': GEOMETRY_DIAMETER,
+    'stage1_geometry': GEOMETRY_DIAMETER,
+    'stage2_geometry': GEOMETRY_DIAMETER,
     'stage2_inlets': 1,
     'live': True,
     'interval': 1,
@@ -100,6 +125,23 @@ def clean_diameter(value):
     if not number > 0.0 or number != number or number == float('inf'):
         return None
     return min(number, MAX_DIAMETER_MM)
+
+
+def clean_area(value):
+    """One declared inlet area in square millimetres, or ``None``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not number > 0.0 or number != number or number == float('inf'):
+        return None
+    return min(number, MAX_AREA_MM2)
+
+
+def clean_geometry(value):
+    """The editable geometry representation, defaulting to diameter."""
+    mode = str(value or '').strip().lower()
+    return mode if mode in GEOMETRY_MODES else GEOMETRY_DIAMETER
 
 
 def clean_interval(value):
@@ -133,6 +175,10 @@ def clean_field(field, value):
     """Clean ``value`` against whatever rule belongs to ``field``."""
     if field in DIAMETER_FIELDS.values():
         return clean_diameter(value)
+    if field in AREA_FIELDS.values():
+        return clean_area(value)
+    if field in GEOMETRY_FIELDS.values():
+        return clean_geometry(value)
     if field == 'interval':
         return clean_interval(value)
     if field == 'stage2_inlets':

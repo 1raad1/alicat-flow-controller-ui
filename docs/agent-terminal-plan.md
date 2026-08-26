@@ -244,7 +244,10 @@ Requirements:
   below the current last command invokes verified zero on that controller.
 - Embedded ConPTY Claude/Codex terminal in the Operation sidebar. Both profiles
   can be explicitly armed; Codex displays an additional warning because it
-  retains shell access.
+  retains shell access. The Agent setup menu runs Codex or Claude sign-in in
+  the same terminal, links to each official installation guide, and can refresh
+  CLI detection after installation. Authentication sessions never start the MCP
+  gateway or expose live authority, and the app does not store provider credentials.
 - Human-approved condition-plan runner with stable windows, fresh-telemetry
   checks, explicit timeouts, required verified-zero abort action, and an
   independent priority-zero watchdog for safe-abort deadlines during UI stalls.

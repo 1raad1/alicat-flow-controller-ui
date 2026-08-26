@@ -36,7 +36,8 @@ class AgentAuthorityTests(unittest.TestCase):
         self.session.assignments["nh3_rich"] = "A"
         self.session.selection = {"A": ("NH3", "Rich")}
         self.session.unit_prefs = {
-            "A": {"max_flow": 10.0, "ramp": 2.0}}
+            "A": {"max_flow": 10.0, "ramp": 2.0,
+                  "ramp_off": False}}
         self.session.controllers_connected = True
         self.session.is_monitoring = True
         self.authority = AgentAuthority(self.session, self.session)
@@ -170,7 +171,8 @@ class AgentAuthorityTests(unittest.TestCase):
             self.authority.enable(plan)
 
         self.session.assignments["air_stage1"] = "B"
-        self.session.unit_prefs["B"] = {"max_flow": 20.0, "ramp": 4.0}
+        self.session.unit_prefs["B"] = {
+            "max_flow": 20.0, "ramp": 4.0, "ramp_off": False}
         envelope = self.authority.enable(plan)
         self.assertEqual(
             envelope["plan"]["command_roles"],

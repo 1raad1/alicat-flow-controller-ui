@@ -129,7 +129,7 @@ class AgentDraftServiceTests(unittest.TestCase):
         self.session.controllers_connected = True
         self.session.is_monitoring = True
         self.session.unit_prefs["A"] = {
-            "max_flow": 5.0, "ramp": 100.0}
+            "max_flow": 5.0, "ramp": 100.0, "ramp_off": False}
 
     def test_supervised_setpoint_requires_and_records_operator_approval(self):
         self._make_live_ready()

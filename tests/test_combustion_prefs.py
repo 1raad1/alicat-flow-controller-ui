@@ -45,6 +45,18 @@ class CleanDiameterTests(unittest.TestCase):
                               repr(value))
 
 
+class CleanAreaTests(unittest.TestCase):
+    def test_positive_area_and_shape_mode_are_kept(self):
+        self.assertEqual(combustion_prefs.clean_area('625'), 625.0)
+        self.assertEqual(combustion_prefs.clean_geometry('area'), 'area')
+
+    def test_bad_area_is_not_a_declaration(self):
+        for value in (None, '', 0, -1, float('nan'), float('inf')):
+            self.assertIsNone(combustion_prefs.clean_area(value), repr(value))
+
+    def test_unknown_geometry_falls_back_to_diameter(self):
+        self.assertEqual(combustion_prefs.clean_geometry('square'), 'diameter')
+
 class CleanIntervalTests(unittest.TestCase):
     def test_one_pass_is_the_floor(self):
         for value in (1, 0, -5, 0.4):
@@ -125,7 +137,9 @@ class LoadAndSaveTests(unittest.TestCase):
 
     def test_settings_survive_a_round_trip(self):
         prefs = dict(combustion_prefs.DEFAULTS,
-                     inlet_mm=30.0, stage1_mm=25.0, stage2_inlets=6,
+                     inlet_mm=30.0, stage1_mm=25.0,
+                     stage2_area_mm2=400.0, stage2_geometry='area',
+                     stage2_inlets=6,
                      live=False, interval=10)
         self.assertIsNone(combustion_prefs.save(prefs, self.path))
         self.assertEqual(combustion_prefs.load(self.path), prefs)

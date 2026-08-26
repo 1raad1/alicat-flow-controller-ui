@@ -29,7 +29,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QMenu, QPushButton, QSizePolicy, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from ..core import unit_prefs
@@ -594,7 +594,7 @@ class UnitCard(QFrame):
 
     def __init__(self, unit, gas_name, color, full_scale, caption=None,
                  declared_scale=None, declared_ramp=None,
-                 declared_ramp_off=False, declared_max_flow=None,
+                 declared_ramp_off=True, declared_max_flow=None,
                  compact=False, parent=None):
         super().__init__(parent)
         self._unit = unit
@@ -654,16 +654,10 @@ class UnitCard(QFrame):
         self._bar = FlowBar(color)
         flow_block.addWidget(self._bar)
 
-        # The things the instrument cannot tell us, declared per meter and
-        # remembered between runs: how far its bar reaches, and how fast -- or
-        # whether -- its line is paced.  They sit under the bar rather than out
-        # among the readings because the reading columns cannot scroll sideways
-        # -- a control parked there widens every card, and past the column
-        # width there is no way to reach it.  One row, scale then ramp, so the
-        # block reads as a single line of settings under the bar rather than a
-        # stack that pushes the card taller; spin boxes rather than a dialog,
-        # because the full scale is on the sticker on the front of the meter
-        # and reading it off should be one gesture.
+        # The things the instrument cannot report are declared per meter and
+        # remembered between runs. They live in the card's hamburger menu so
+        # the live reading stays compact while every setting remains local to
+        # the controller it affects.
         prefs_grid = QGridLayout()
         prefs_grid.setHorizontalSpacing(5)
         prefs_grid.setVerticalSpacing(2)
@@ -695,9 +689,7 @@ class UnitCard(QFrame):
         # The gap that separates the two settings.  A spacer column would have
         # to be given a minimum width, and a fixed column in this grid is what
         # widened every card the last time this block was laid out.
-        if not self._compact:
-            ramp_caption.setContentsMargins(theme.PAD_MD, 0, 0, 0)
-        ramp_row, ramp_column = ((2, 0) if self._compact else (0, 3))
+        ramp_row, ramp_column = 2, 0
         prefs_grid.addWidget(ramp_caption, ramp_row, ramp_column)
         self.ramp_spin = QDoubleSpinBox()
         self.ramp_spin.setRange(0.0, unit_prefs.MAX_RAMP_RATE)
@@ -763,8 +755,32 @@ class UnitCard(QFrame):
         for spin in (self.scale_spin, self.ramp_spin, self.max_flow_spin):
             spin.setMinimumWidth(theme.scale(66))
             spin.setMaximumWidth(theme.scale(84))
-        prefs_grid.setColumnStretch(4 if self._compact else 7, 1)
-        flow_block.addLayout(prefs_grid)
+        prefs_grid.setColumnStretch(4, 1)
+
+        self.settings_button = QPushButton('☰')
+        self.settings_button.setObjectName('ControllerMenuButton')
+        self.settings_button.setAccessibleName(
+            f'Controller settings for Unit {unit}')
+        self.settings_button.setToolTip(
+            'Full scale, maximum command flow, and ramp settings')
+        self.settings_button.setFixedSize(theme.scale(30), theme.scale(26))
+        self.settings_menu = QMenu(self.settings_button)
+        self.settings_menu.setObjectName('ControllerSettingsMenu')
+        settings_panel = QWidget()
+        settings_panel.setObjectName('ControllerSettingsPanel')
+        settings_panel.setMinimumWidth(theme.scale(330))
+        settings_layout = QVBoxLayout(settings_panel)
+        settings_layout.setContentsMargins(
+            theme.PAD_MD, theme.PAD_MD, theme.PAD_MD, theme.PAD_MD)
+        settings_layout.setSpacing(theme.PAD_SM)
+        settings_layout.addWidget(label(
+            f'UNIT {unit} SETTINGS', color=theme.TEXT_BRIGHT, size=8,
+            bold=True))
+        settings_layout.addLayout(prefs_grid)
+        settings_action = QWidgetAction(self.settings_menu)
+        settings_action.setDefaultWidget(settings_panel)
+        self.settings_menu.addAction(settings_action)
+        self.settings_button.setMenu(self.settings_menu)
 
         flow_holder = QWidget()
         flow_holder.setLayout(flow_block)
@@ -847,6 +863,8 @@ class UnitCard(QFrame):
             heading.setContentsMargins(0, 0, 0, 0)
             heading.addWidget(identity_holder)
             heading.addStretch(1)
+            heading.addWidget(self.settings_button)
+            heading.addSpacing(theme.PAD_XS)
             heading.addWidget(self._dot)
             card_layout.addLayout(heading)
             card_layout.addWidget(flow_holder)
@@ -869,6 +887,8 @@ class UnitCard(QFrame):
             for holder in reading_holders:
                 row.addWidget(holder)
             row.addWidget(entry_holder)
+            row.addSpacing(theme.PAD_SM)
+            row.addWidget(self.settings_button)
             row.addSpacing(theme.PAD_SM)
             row.addWidget(self._dot)
 
