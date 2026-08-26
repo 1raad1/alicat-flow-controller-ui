@@ -133,6 +133,19 @@ class AgentDraftServiceTests(unittest.TestCase):
             [row["approval"] for row in rows],
             ["live_toggle", "live_toggle"])
 
+    def test_live_setpoint_needs_no_max_flow_or_ramp_declaration(self):
+        self.session.controllers_connected = True
+        self.session.is_monitoring = True
+        self.session.unit_prefs.clear()
+        self.service.set_live_enabled(True)
+
+        result = self.service.handle(
+            "agent-1", "set_role_setpoint",
+            {"role": "nh3_rich", "value": 2.0})
+
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(self.session.setpoint_queue.get_nowait(), ("A", 2.0))
+
     def test_session_refusal_still_fails_closed_after_toggle_approval(self):
         self._make_live_ready()
         self.service.set_live_enabled(True)

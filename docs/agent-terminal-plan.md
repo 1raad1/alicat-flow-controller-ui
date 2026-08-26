@@ -83,9 +83,9 @@ Two visibly distinct modes:
 - **Draft** — read telemetry and configuration; create sequence drafts.
   Cannot move hardware.
 - **Live control** — after one explicit warning, the agent may set values and
-  run saved sequences inside the frozen envelope. No per-setpoint dialog is
-  shown. Authority is revoked by disconnects, assignment changes,
-  communication faults, or agent termination.
+  run saved sequences through the same optional MAX FLOW and ramp policies as
+  manual entry. No per-setpoint dialog is shown. Authority is revoked by
+  disconnects, assignment changes, communication faults, or agent termination.
 
 ### 3.3 Arming vs. abort semantics
 
@@ -214,11 +214,12 @@ Requirements:
 ### Step 7 — Toggle-authorized execution
 
 - **Automatic setpoints:** one operator warning enables
-  `set_role_setpoint` calls inside the frozen envelope. Each call is audited but
-  does not open another dialog.
+  `set_role_setpoint` calls for every assigned role. MAX FLOW and ramp settings
+  are optional and behave exactly as they do for manual entry. Each call is
+  audited but does not open another dialog.
 - **Saved-sequence execution:** while the operator's live-control toggle is on,
   an agent may call `run_saved_sequence` for a local sequence. Every track and
-  keyframe must fit the frozen role, max-flow, and ramp envelope. The file is
+  keyframe must use an assigned role and obey any declared MAX FLOW. The file is
   fingerprinted and re-read after pre-execution audit, and replay is refused
   unless measured flows match its opening. Each request starts one pass.
 - Only after the runner (Step 5) has been exercised against the simulated rig and
@@ -240,8 +241,9 @@ Requirements:
 - Telemetry adapter design for non-Alicat conditions (emissions, flame detection) —
   needed before plans can gate on them; not needed for Steps 1–7.
 - One visible live-control warning authorizes automatic setpoints and saved
-  sequences inside the frozen envelope until the toggle is switched off or
-  authority is revoked.
+  sequences for the captured assignments, using the same optional MAX FLOW and
+  ramp behavior as manual entry, until the toggle is switched off or authority
+  is revoked.
 
 ## 7. Implemented milestone (2026-08-26)
 
@@ -266,8 +268,8 @@ Requirements:
   approval state, and outcome. An unwritable audit refuses a draft before it
   mutates state and refuses a live action before it executes.
 - Default-off persistent **LIVE CONTROL** toggle. Its confirmation
-  shows the frozen permitted roles, role-to-unit mapping, MAX FLOW and ramp
-  ceilings, plus the rules for agent-selected saved sequences.
+  shows the frozen permitted roles, role-to-unit mapping, and optional MAX FLOW
+  and ramp policies, plus the rules for agent-selected saved sequences.
 - `set_role_setpoint` MCP requests are authorized by the live-control toggle,
   durably audited, and revalidated immediately before entering the existing
   ramped session boundary. `run_saved_sequence` starts one saved sequence pass

@@ -55,7 +55,8 @@ class FakeAuthority(QObject):
         self.enabled = False
         self.envelope = {
             "roles": {"nh3_rich": {
-                "unit": "A", "max_flow": 5.0, "ramp_rate": 1.0}},
+                "unit": "A", "max_flow": None, "ramp_rate": None,
+                "ramp_off": True}},
             "excluded_roles": [], "plan": None,
         }
 
@@ -450,6 +451,26 @@ class AgentLauncherTests(unittest.TestCase):
             Qt.KeyboardModifier.ControlModifier, ''))
         self.assertEqual(process.writes, ['i', '\r', '\x03'])
 
+    def test_embedded_terminal_keeps_scrolled_output_history(self):
+        process = FakeProcess()
+        manager, _popen = self._manager(process, available=('codex',))
+        pane = AgentLauncherPane(manager, collapsed=False)
+        self.addCleanup(pane.close)
+        self.assertTrue(manager.start('codex'))
+
+        visible_lines = pane._terminal_screen.lines
+        output = ''.join(
+            f'line {number}\r\n'
+            for number in range(visible_lines + 8))
+        manager.terminal_output.emit(output)
+        self.app.processEvents()
+
+        rendered = pane.terminal.toPlainText()
+        self.assertIn('line 0', rendered)
+        self.assertIn(f'line {visible_lines + 7}', rendered)
+        self.assertGreater(
+            pane.terminal.document().blockCount(), visible_lines)
+
     def test_terminal_output_is_coalesced_and_bounded(self):
         process = FakeProcess()
         manager, _popen = self._manager(process, available=('codex',))
@@ -495,6 +516,8 @@ class AgentLauncherTests(unittest.TestCase):
             pane.live_toggle.click()
         self.assertTrue(confirm.called)
         self.assertIn('ONLY CONTROL WARNING', confirm.call_args.args[2])
+        self.assertIn('same setpoint rules', confirm.call_args.args[2])
+        self.assertIn('no MAX FLOW, ramp OFF (step)', confirm.call_args.args[2])
         self.assertTrue(service.authority.enabled)
         self.assertEqual(pane.live_toggle.text(), 'LIVE CONTROL ON')
 

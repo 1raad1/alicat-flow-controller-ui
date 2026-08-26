@@ -1,8 +1,8 @@
 """Toggle-controlled, fail-closed authority for AI live commands.
 
-The authority object deliberately owns no command path.  It only freezes the
-operator-approved limits and assignments into an envelope which the MCP
-service must check immediately before it calls the existing session boundary.
+The authority object deliberately owns no command path. It freezes assignments
+and the optional policies already used by manual entry into an envelope which
+the MCP service checks immediately before calling the existing session boundary.
 Any relevant rig change revokes the envelope rather than trying to amend live
 authority underneath an agent.
 """
@@ -85,7 +85,7 @@ class AgentAuthority(QObject):
                 "review the new envelope before enabling live control.")
         if not envelope["roles"]:
             raise AuthorityError(
-                "No assigned role has both a positive MAX FLOW and ramp rate.")
+                "No controller roles are assigned.")
 
         # Capture every referenced sequence into the same immutable bundle
         # that is being armed. If a file changed between the operator preview
@@ -140,10 +140,11 @@ class AgentAuthority(QObject):
         number = self._number(value, "Setpoint")
         if number < 0.0:
             raise AuthorityError("Setpoint cannot be negative.")
-        if number > role_envelope["max_flow"]:
+        maximum = role_envelope["max_flow"]
+        if maximum is not None and number > maximum:
             raise AuthorityError(
                 f"Setpoint for '{role}' exceeds the armed MAX FLOW of "
-                f"{role_envelope['max_flow']:g} SLPM.")
+                f"{maximum:g} SLPM.")
         return self._json_copy(role_envelope)
 
     def check_armed_plan(self, plan):
@@ -201,14 +202,11 @@ class AgentAuthority(QObject):
             unit = assigned[role]
             maximum = self._positive_or_none(self.session.max_flow_for(unit))
             ramp = self._positive_or_none(self.session.ramp_rate_for(unit))
-            if (maximum is None or ramp is None
-                    or self.session.ramp_disabled_for(unit)):
-                excluded.append(role)
-                continue
             permitted[role] = {
                 "unit": unit,
                 "max_flow": maximum,
                 "ramp_rate": ramp,
+                "ramp_off": bool(self.session.ramp_disabled_for(unit)),
             }
         return permitted, excluded
 

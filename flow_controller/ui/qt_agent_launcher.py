@@ -38,6 +38,7 @@ POLL_INTERVAL_MS = 500
 TERMINAL_FLUSH_INTERVAL_MS = 33
 TERMINAL_MAX_PENDING_CHARS = 256 * 1024
 TERMINAL_MAX_FLUSH_CHARS = 32 * 1024
+TERMINAL_HISTORY_LINES = 2_000
 
 
 def _provider_icon(key, side):
@@ -752,7 +753,8 @@ class AgentLauncherPane(Card):
         intro.setWordWrap(True)
         self.add(intro)
 
-        self._terminal_screen = pyte.Screen(80, 18)
+        self._terminal_screen = pyte.HistoryScreen(
+            80, 18, history=TERMINAL_HISTORY_LINES)
         self._terminal_stream = pyte.Stream(self._terminal_screen)
         self.terminal = _EmbeddedTerminal()
         self.terminal.setObjectName('AgentEmbeddedTerminal')
@@ -777,7 +779,8 @@ class AgentLauncherPane(Card):
         self.live_toggle.setProperty('density', 'compact')
         self._live_tooltip = (
             'Default off. One warning enables automatic setpoint changes and '
-            'saved-sequence starts within the frozen envelope until revoked.')
+            'saved-sequence starts through the normal manual-control rules '
+            'until revoked.')
         self.live_toggle.setToolTip(self._live_tooltip)
         self.live_toggle.toggled.connect(self._on_live_toggled)
         authority_row.addWidget(self.live_toggle)
@@ -942,7 +945,13 @@ class AgentLauncherPane(Card):
     def _on_terminal_output(self, chunk):
         try:
             self._terminal_stream.feed(str(chunk))
-            text = '\n'.join(self._terminal_screen.display).rstrip()
+            history = [
+                ''.join(line[column].data
+                        for column in range(self._terminal_screen.columns))
+                for line in self._terminal_screen.history.top
+            ]
+            text = '\n'.join(
+                history + self._terminal_screen.display).rstrip()
         except (TypeError, ValueError):
             text = self.terminal.toPlainText() + str(chunk)
         self.terminal.setPlainText(text)
@@ -1007,15 +1016,27 @@ class AgentLauncherPane(Card):
             QMessageBox.critical(self, 'Cannot enable live control', str(exc))
             return
         roles = envelope.get('roles', {})
-        role_lines = '\n'.join(
-            f"  {role} → Unit {policy['unit']}: max {policy['max_flow']:g} "
-            f"SLPM, ramp {policy['ramp_rate']:g} SLPM/s"
-            for role, policy in sorted(roles.items()))
+        role_lines = []
+        for role, policy in sorted(roles.items()):
+            maximum = policy.get('max_flow')
+            max_text = (f"MAX {maximum:g} SLPM" if maximum is not None
+                        else "no MAX FLOW")
+            ramp = policy.get('ramp_rate')
+            if policy.get('ramp_off', False):
+                ramp_text = "ramp OFF (step)"
+            elif ramp is not None:
+                ramp_text = f"ramp {ramp:g} SLPM/s"
+            else:
+                ramp_text = "default ramp policy"
+            role_lines.append(
+                f"  {role} → Unit {policy['unit']}: {max_text}, {ramp_text}")
+        role_lines = '\n'.join(role_lines)
         sequence_authority = (
             "Saved sequences: while this toggle is on, the agent may select "
             "any valid .fcseq.json file in the app's sequence folder. Every "
-            "track and setpoint must fit the limits below. A sequence runs "
-            "once and is refused unless measured flows match its opening.")
+            "track and setpoint uses the same optional limits and ramp behavior "
+            "as manual control. A sequence runs once and is refused unless "
+            "measured flows match its opening.")
         profile_warning = ""
         if self.manager.active_agent == 'codex':
             profile_warning = (
@@ -1028,7 +1049,8 @@ class AgentLauncherPane(Card):
             "revokes it after a safety-relevant change.\n\n"
             "THIS IS THE ONLY CONTROL WARNING. After you enable it, the agent "
             "may change setpoints automatically without asking again. It "
-            "cannot exceed these snapshotted limits:\n"
+            "uses the same setpoint rules as entering values yourself. MAX "
+            "FLOW and ramp rates are optional; configured values still apply:\n"
             f"{role_lines}\n\n{sequence_authority}\n\n"
             "Disconnection, communication fault, monitoring stop, "
             "assignment/limit/ramp changes, "

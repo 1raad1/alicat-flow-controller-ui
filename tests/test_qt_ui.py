@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QPoint, Qt, Signal
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
 
 from flow_controller.core.combustion_prefs import (GEOMETRY_AREA,
@@ -223,6 +224,17 @@ class QtUiTests(unittest.TestCase):
                             for card in tab._cards.values()))
         self.assertTrue(all(card.ramp_off_btn.isChecked()
                             for card in tab._cards.values()))
+        card = tab._cards['A']
+        self.assertTrue(card.ramp_spin.isEnabled())
+        card.settings_button.click()
+        self.app.processEvents()
+        QTest.mouseClick(
+            card.ramp_spin, Qt.MouseButton.LeftButton,
+            pos=QPoint(card.ramp_spin.width() - 3,
+                       card.ramp_spin.height() // 4))
+        self.app.processEvents()
+        self.assertTrue(card.settings_menu.isVisible())
+        card.settings_menu.close()
         tab._cards['A'].entry.setText('1.25')
 
         tab._cards_view_buttons['grid'].click()

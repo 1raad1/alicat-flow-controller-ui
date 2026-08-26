@@ -63,20 +63,26 @@ class AgentAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthorityError, "Monitoring"):
             self.authority.enable()
 
-    def test_role_envelope_is_json_safe_and_returns_frozen_limits(self):
+    def test_role_envelope_includes_assigned_roles_and_optional_policies(self):
         self.session.assignments["air_stage1"] = "B"
         self.session.unit_prefs["B"] = {"max_flow": 20.0}
         envelope = self.authority.enable()
         self.assertEqual(envelope["roles"], {
             "nh3_rich": {
-                "unit": "A", "max_flow": 10.0, "ramp_rate": 2.0}})
-        self.assertEqual(envelope["excluded_roles"], ["air_stage1"])
+                "unit": "A", "max_flow": 10.0, "ramp_rate": 2.0,
+                "ramp_off": False},
+            "air_stage1": {
+                "unit": "B", "max_flow": 20.0, "ramp_rate": None,
+                "ramp_off": True},
+        })
+        self.assertEqual(envelope["excluded_roles"], [])
         self.assertIsNone(envelope["plan"])
         json.dumps(self.authority.status(), allow_nan=False)
 
         role = self.authority.check_role("nh3_rich", 10.0)
         self.assertEqual(role, {
-            "unit": "A", "max_flow": 10.0, "ramp_rate": 2.0})
+            "unit": "A", "max_flow": 10.0, "ramp_rate": 2.0,
+            "ramp_off": False})
         role["max_flow"] = 999
         self.assertEqual(
             self.authority.status()["envelope"]["roles"]["nh3_rich"]
@@ -90,7 +96,7 @@ class AgentAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthorityError, "exceeds"):
             self.authority.check_role("nh3_rich", 10.01)
         with self.assertRaisesRegex(AuthorityError, "not in"):
-            self.authority.check_role("air_stage1", 0)
+            self.authority.check_role("unknown_role", 0)
 
     def test_authority_stays_enabled_until_revoked(self):
         changes = []
@@ -206,7 +212,7 @@ class AgentAuthorityTests(unittest.TestCase):
             frozen[str(sequence_path)]["tracks"][0]["keyframes"][-1]["v"],
             1.0)
 
-    def test_missing_or_disabled_limits_exclude_roles_and_refuse_enable(self):
+    def test_max_flow_and_ramp_are_optional_like_manual_entry(self):
         cases = (
             {},
             {"max_flow": 10.0},
@@ -219,10 +225,17 @@ class AgentAuthorityTests(unittest.TestCase):
             with self.subTest(prefs=prefs):
                 self.session.unit_prefs = {"A": prefs}
                 preview = self.authority.preview()
-                self.assertEqual(preview["roles"], {})
-                self.assertEqual(preview["excluded_roles"], ["nh3_rich"])
-                with self.assertRaisesRegex(AuthorityError, "No assigned role"):
-                    self.authority.enable()
+                policy = preview["roles"]["nh3_rich"]
+                self.assertEqual(policy["unit"], "A")
+                self.assertEqual(preview["excluded_roles"], [])
+                self.authority.enable()
+                self.authority.check_role("nh3_rich", 1.0)
+                self.authority.revoke("next case")
+
+    def test_enable_requires_an_assigned_role(self):
+        self.session.assignments.clear()
+        with self.assertRaisesRegex(AuthorityError, "No controller roles"):
+            self.authority.enable()
 
     def test_enable_rejects_changes_after_operator_preview(self):
         preview = self.authority.preview()
