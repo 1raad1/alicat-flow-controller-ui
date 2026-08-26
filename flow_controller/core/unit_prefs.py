@@ -7,6 +7,8 @@ session:
   tracking bar.  The instruments do not report it over the wire.
 * ``ramp`` -- how fast that line is allowed to move, in SLPM per second, applied
   to every setpoint the application writes to it.
+* ``max_flow`` -- the largest setpoint the application may command, in SLPM.
+  Unlike ``full_scale`` this is a control limit, not a presentation setting.
 * ``ramp_off`` -- ramping turned off outright.  Not the same thing as an absent
   ``ramp``: no rate only means none was typed, and the application still holds
   the pilot and air lines to a minimum move time of its own.  This flag is the
@@ -42,8 +44,13 @@ MAX_FULL_SCALE = 10000.0
 #: arrives inside one polling interval, which is what "no limit" already means.
 MAX_RAMP_RATE = 1000.0
 
+#: The widest command ceiling the application will retain.  This is an input
+#: sanity bound, not a substitute for the declared per-unit ``max_flow``.
+MAX_COMMAND_FLOW = 10000.0
+
 #: The figures a unit's record may hold, and the ceiling each is held to.
-CEILINGS = {'full_scale': MAX_FULL_SCALE, 'ramp': MAX_RAMP_RATE}
+CEILINGS = {'full_scale': MAX_FULL_SCALE, 'ramp': MAX_RAMP_RATE,
+            'max_flow': MAX_COMMAND_FLOW}
 
 #: The fields that are a declaration rather than a figure.  Only ``True`` is
 #: ever stored -- "not turned off" is the absence of the field -- so a record

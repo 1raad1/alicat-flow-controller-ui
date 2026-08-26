@@ -38,7 +38,9 @@ from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
 from ..domain import combustion, roles, rql
 from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
+from .qt_agent_launcher import AgentLauncherPane
 from .qt_sequence_panel import SequencePanel
+from .qt_experiment_plan import ExperimentPlanPane
 from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
 
@@ -260,9 +262,12 @@ class OperationTab(QWidget):
     #: so the window can put it in the status bar rather than a dialog.
     status = Signal(str)
 
-    def __init__(self, session, parent=None):
+    def __init__(self, session, parent=None, *, agent_manager=None,
+                 agent_collapsed=True):
         super().__init__(parent)
         self.session = session
+        self.agent_manager = agent_manager
+        self.agent_collapsed = bool(agent_collapsed)
         self._cards = {}
         self._card_keys = {}
         #: Unit to the largest figure that line has been asked for, and unit to
@@ -292,6 +297,11 @@ class OperationTab(QWidget):
         self._combustion_tick = 0
         self._combustion_paused = False
         self._pending_generation = None
+        # Kept on the session so an appearance re-theme, which rebuilds this
+        # tab, does not unexpectedly put the operator back into list view.
+        self._cards_view = getattr(session, 'controller_cards_view', 'list')
+        if self._cards_view not in ('list', 'grid'):
+            self._cards_view = 'list'
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -394,8 +404,9 @@ class OperationTab(QWidget):
         self.saved_list.setEnabled(state == SEQ_IDLE)
 
     def _toggle_sequence(self, shown):
-        self.sequence_btn.setText(('▾  Record / Replay Sequence' if shown
-                                   else '▸  Record / Replay Sequence'))
+        self.sequence_btn.setText((
+            '▾  Record / Replay Flow Sequence' if shown
+            else '▸  Record / Replay Flow Sequence'))
         self.sequence_panel.setVisible(shown)
         if shown:
             # Opening the panel is the other moment the folder is worth
@@ -451,6 +462,10 @@ class OperationTab(QWidget):
         column.addWidget(self._autocalc_card)
         self._sequence_card = self._card_sequence()
         column.addWidget(self._sequence_card)
+        if self.agent_manager is not None:
+            self.agent_pane = AgentLauncherPane(
+                self.agent_manager, collapsed=self.agent_collapsed)
+            column.addWidget(self.agent_pane)
         column.addWidget(self._card_syslog())
         column.addStretch(1)
         scroll.setWidget(holder)
@@ -648,23 +663,25 @@ class OperationTab(QWidget):
     # -- sequence --------------------------------------------------------- #
     def _card_sequence(self):
         card = Card(
-            'Sequence', index=2,
+            'Sequences', index=None,
             help_text=('Record every commanded setpoint while monitoring, '
                        'edit the resulting curve, then replay or repeat it. '
+                       'Automated test sequences use the same section but '
+                       'advance through labelled stages from live meter conditions. '
                        'Clicking a saved name loads it into the panel and '
                        'nothing moves. ▶ loads and runs it once, with no '
                        'repeats, and only if the rig is already standing at '
                        'the flows it opens with; otherwise the lines that '
                        'disagree are shown. ✎ renames the saved file. '
                        '✕ deletes it after confirmation.'))
-        self.sequence_btn = QPushButton('▸  Record / Replay Sequence')
+        self.sequence_btn = QPushButton('▸  Record / Replay Flow Sequence')
         self.sequence_btn.setCheckable(True)
         self.sequence_btn.setProperty('variant', 'quiet')
         self.sequence_btn.toggled.connect(self._toggle_sequence)
         card.add(self.sequence_btn)
 
         card.add(divider())
-        card.add(label('SAVED SEQUENCES  —  CLICK LOAD,  ▶ RUN,  ✎ RENAME,  ✕ DELETE',
+        card.add(label('SAVED FLOW SEQUENCES  —  CLICK LOAD,  ▶ RUN,  ✎ RENAME,  ✕ DELETE',
                        color=theme.TEXT_DIM, size=7, bold=True))
         self.saved_list = QListWidget()
         self.saved_list.setFixedHeight(theme.scale(104))
@@ -684,6 +701,11 @@ class OperationTab(QWidget):
         self.saved_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.saved_list.itemClicked.connect(self._on_saved_clicked)
         card.add(self.saved_list)
+
+        card.add(divider())
+        self._experiment_plan_card = ExperimentPlanPane(
+            self.session.experiment_plans)
+        card.add(self._experiment_plan_card)
 
         self._refresh_saved()
         return card
@@ -949,6 +971,21 @@ class OperationTab(QWidget):
             help_text=('Review each assigned controller, enter individual '
                        'setpoints, and configure its remembered full scale and '
                        'ramp behavior.'))
+        self._cards_view_buttons = {}
+        for view, text in (('list', 'List'), ('grid', 'Grid')):
+            button = QPushButton(text)
+            button.setObjectName(
+                'ControllerListView' if view == 'list'
+                else 'ControllerGridView')
+            button.setAccessibleName(f'Show controllers in {view} view')
+            button.setCheckable(True)
+            button.setProperty('density', 'compact')
+            button.clicked.connect(
+                lambda _checked=False, selected=view:
+                self._set_cards_view(selected))
+            self._cards_card.add_header_widget(button)
+            self._cards_view_buttons[view] = button
+        self._sync_cards_view_buttons()
         self._empty_note = label(
             'No controllers assigned yet — connect and assign them on the '
             'Connection tab.', color=theme.TEXT_DIM, size=9)
@@ -960,9 +997,12 @@ class OperationTab(QWidget):
         # controllers back out of a layout that also holds the empty note and
         # the trailing stretch.
         self._cards_holder = QWidget()
-        self._cards_layout = QVBoxLayout(self._cards_holder)
+        self._cards_layout = QGridLayout(self._cards_holder)
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
-        self._cards_layout.setSpacing(theme.PAD_SM)
+        self._cards_layout.setHorizontalSpacing(theme.PAD_SM)
+        self._cards_layout.setVerticalSpacing(theme.PAD_SM)
+        self._cards_layout.setColumnStretch(0, 1)
+        self._cards_layout.setColumnStretch(1, 1)
         self._cards_card.add(self._cards_holder)
         self._cards_card.body_layout.addStretch(1)
         column.addWidget(self._cards_card, 1)
@@ -1332,6 +1372,27 @@ class OperationTab(QWidget):
         self._combustion_std['vel'].set_value(_fmt(estimate.velocity))
 
     # -- live cards ------------------------------------------------------- #
+    def _sync_cards_view_buttons(self):
+        """Make the two header buttons read as one exclusive view switch."""
+        for view, button in self._cards_view_buttons.items():
+            active = view == self._cards_view
+            button.setChecked(active)
+            button.setProperty('variant', 'accent' if active else 'quiet')
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _set_cards_view(self, view):
+        """Switch between full-width rows and compact two-column cards."""
+        if view not in ('list', 'grid'):
+            return
+        if view == self._cards_view:
+            self._sync_cards_view_buttons()
+            return
+        self._cards_view = view
+        self.session.controller_cards_view = view
+        self._sync_cards_view_buttons()
+        self._rebuild_cards()
+
     def _rebuild_cards(self):
         """Rebuild the controller cards from the current assignment.
 
@@ -1375,21 +1436,33 @@ class OperationTab(QWidget):
             # a structure the operator has explicitly said is not there.
             groups = [('Controllers', metas)]
 
+        grid_view = self._cards_view == 'grid'
+        layout_row = 0
         for title, group in groups:
             if not group:
                 continue
             header = StageHeader(title)
-            self._cards_layout.addWidget(header)
+            self._cards_layout.addWidget(header, layout_row, 0, 1, 2)
+            layout_row += 1
             self._stage_headers[title] = header
-            for meta in group:
-                self._add_card(meta)
+            if grid_view:
+                for index, meta in enumerate(group):
+                    card = self._add_card(meta, compact=True)
+                    self._cards_layout.addWidget(
+                        card, layout_row + index // 2, index % 2)
+                layout_row += (len(group) + 1) // 2
+            else:
+                for meta in group:
+                    card = self._add_card(meta)
+                    self._cards_layout.addWidget(card, layout_row, 0, 1, 2)
+                    layout_row += 1
         for unit, text in pending.items():
             card = self._cards.get(unit)
             if card is not None:
                 card.entry.setText(text)
         self._refresh_readings(force=True)
 
-    def _add_card(self, meta):
+    def _add_card(self, meta, *, compact=False):
         color = theme.GAS_COLORS.get(meta.gas, theme.TEXT)
         _gas, zone = self.session.selection.get(meta.unit, ('', ''))
         scale = self._scale_for(meta)
@@ -1404,15 +1477,18 @@ class OperationTab(QWidget):
                         declared_scale=self.session.full_scale_for(meta.unit),
                         declared_ramp=self.session.ramp_rate_for(meta.unit),
                         declared_ramp_off=self.session.ramp_disabled_for(
-                            meta.unit))
+                            meta.unit),
+                        declared_max_flow=self.session.max_flow_for(meta.unit),
+                        compact=compact)
         card.setToolTip(f'{meta.label} — unit {meta.unit}')
         card.setpoint_requested.connect(self._on_setpoint)
         card.full_scale_requested.connect(self._on_full_scale)
         card.ramp_rate_requested.connect(self._on_ramp_rate)
+        card.max_flow_requested.connect(self._on_max_flow)
         card.ramp_off_requested.connect(self._on_ramp_off)
-        self._cards_layout.addWidget(card)
         self._cards[meta.unit] = card
         self._card_keys[meta.unit] = meta.key
+        return card
 
     def _scale_for(self, meta):
         """A bar scale from what this rig is being asked for.
@@ -1461,6 +1537,13 @@ class OperationTab(QWidget):
         card = self._cards.get(unit)
         if card is not None:
             card.set_declared_ramp(self.session.ramp_rate_for(unit))
+
+    def _on_max_flow(self, unit, value):
+        """The operator declared this unit's command ceiling, or cleared it."""
+        self.session.set_max_flow(unit, value)
+        card = self._cards.get(unit)
+        if card is not None:
+            card.set_declared_max_flow(self.session.max_flow_for(unit))
 
     def _on_ramp_off(self, unit, off):
         """The operator turned this controller's ramping off, or back on.
@@ -1553,13 +1636,11 @@ class OperationTab(QWidget):
         # The card being uncovered has whatever the other mode last left on
         # it, and the interval must not make it wait to be corrected.
         self._combustion_paused = False
-        # Numbered over the steps this mode actually shows.  ``isVisible`` is
-        # no use here: at construction nothing has been shown yet, so the
-        # mode itself is what decides.
-        for step, card in enumerate([card for card, shown in (
-                (self._autocalc_card, staged), (self._sequence_card, True))
-                if shown], start=1):
-            card.set_index(step)
+        # Auto-calculate remains the staged setup step. Sequences are a named
+        # workspace rather than the next numbered instruction, so its title
+        # deliberately has no badge in either operating mode.
+        self._autocalc_card.set_index(1 if staged else None)
+        self._sequence_card.set_index(None)
         self._rebuild_cards()
 
     def _on_connection(self, connected):

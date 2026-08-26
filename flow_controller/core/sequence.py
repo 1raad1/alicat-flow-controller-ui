@@ -98,13 +98,37 @@ SETTLE_MAX_HOLD_S = 30.0
 
 
 def _clean(value):
-    """A finite, non-negative float.  Flows below zero are not commandable."""
+    """A finite, non-negative float for interactive editing.
+
+    Existing editing gestures use this forgiving helper to keep a half-typed
+    field from corrupting the in-memory curve.  File loading is deliberately
+    stricter; see :func:`_read_nonnegative`.
+    """
     try:
         number = float(value)
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(number) or number < 0.0:
         return 0.0
+    return number
+
+
+def _read_nonnegative(value, field):
+    """Read one persisted non-negative finite number, or raise clearly.
+
+    A sequence file is an operator-reviewable record.  Rewriting ``NaN`` or a
+    negative flow to zero while it is opened makes the reviewed curve differ
+    from the authored curve, so persistence must fail closed rather than use
+    the interactive editor's forgiving ``_clean`` behaviour.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite non-negative number.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite non-negative number.") from exc
+    if not math.isfinite(number) or number < 0.0:
+        raise ValueError(f"{field} must be a finite non-negative number.")
     return number
 
 
@@ -122,11 +146,17 @@ class Keyframe:
 
     @classmethod
     def from_dict(cls, raw):
+        if not isinstance(raw, dict):
+            raise ValueError("A sequence keyframe must be an object.")
+        if 't' not in raw or 'v' not in raw:
+            raise ValueError("A sequence keyframe needs both 't' and 'v'.")
         interp = raw.get('i', HOLD)
-        return cls(t=max(0.0, float(raw.get('t', 0.0))),
-                   value=_clean(raw.get('v', 0.0)),
-                   interp=(interp if interp in (HOLD, LINEAR, SMOOTH)
-                           else HOLD))
+        if interp not in (HOLD, LINEAR, SMOOTH):
+            raise ValueError(
+                "Keyframe interpolation must be hold, linear, or smooth.")
+        return cls(t=_read_nonnegative(raw['t'], "Keyframe time"),
+                   value=_read_nonnegative(raw['v'], "Keyframe value"),
+                   interp=interp)
 
 
 @dataclass
@@ -345,12 +375,26 @@ class Track:
 
     @classmethod
     def from_dict(cls, raw):
+        if not isinstance(raw, dict):
+            raise ValueError("A sequence track must be an object.")
+        if 'key' not in raw:
+            raise ValueError("A sequence track needs a role key.")
+        frames = raw.get('keyframes', ())
+        if not isinstance(frames, list):
+            raise ValueError("A sequence track's keyframes must be a list.")
+        parsed_frames = [Keyframe.from_dict(frame) for frame in frames]
+        times = [frame.t for frame in parsed_frames]
+        if len(times) != len(set(times)):
+            raise ValueError("A sequence track cannot contain duplicate keyframe times.")
         track = cls(key=str(raw['key']),
                     label=str(raw.get('label', raw['key'])),
                     gas=str(raw.get('gas', '')), unit=raw.get('unit'),
-                    keyframes=[Keyframe.from_dict(frame)
-                               for frame in raw.get('keyframes', ())])
-        track.set_ramp_rate(raw.get('ramp'))
+                    keyframes=parsed_frames)
+        if 'ramp' in raw:
+            ramp = _read_nonnegative(raw['ramp'], "Track ramp rate")
+            if ramp <= 0.0:
+                raise ValueError("Track ramp rate must be greater than zero.")
+            track.set_ramp_rate(ramp)
         return track
 
 
@@ -453,19 +497,28 @@ class Sequence:
 
     @classmethod
     def from_dict(cls, raw, path=None):
+        if not isinstance(raw, dict):
+            raise ValueError("A sequence file must contain an object.")
         if raw.get('format') != FILE_FORMAT:
             raise ValueError("Not a flow-controller sequence file.")
         if int(raw.get('version', 0)) > FILE_VERSION:
             raise ValueError(
                 f"Sequence file version {raw.get('version')} is newer than "
                 f"this application understands (v{FILE_VERSION}).")
+        tracks = raw.get('tracks', ())
+        markers = raw.get('markers', ())
+        if not isinstance(tracks, list):
+            raise ValueError("A sequence file's tracks must be a list.")
+        if not isinstance(markers, list):
+            raise ValueError("A sequence file's markers must be a list.")
         return cls(
             name=str(raw.get('name', 'sequence')),
             mode=str(raw.get('mode', 'staged')),
             created=str(raw.get('created', '')),
             notes=str(raw.get('notes', '')),
-            tracks=[Track.from_dict(track) for track in raw.get('tracks', ())],
-            markers=[float(marker) for marker in raw.get('markers', ())],
+            tracks=[Track.from_dict(track) for track in tracks],
+            markers=[_read_nonnegative(marker, "Sequence marker")
+                     for marker in markers],
             path=Path(path) if path else None)
 
     def save(self, path):

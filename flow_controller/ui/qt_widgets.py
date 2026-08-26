@@ -587,20 +587,25 @@ class UnitCard(QFrame):
     full_scale_requested = Signal(object, float)
     #: Unit and the ramp rate the operator typed in SLPM/s, ``0.0`` for none.
     ramp_rate_requested = Signal(object, float)
+    #: Unit and the largest setpoint this application may command, ``0.0`` for none.
+    max_flow_requested = Signal(object, float)
     #: Unit and whether the operator has turned this line's ramping off.
     ramp_off_requested = Signal(object, bool)
 
     def __init__(self, unit, gas_name, color, full_scale, caption=None,
                  declared_scale=None, declared_ramp=None,
-                 declared_ramp_off=False, parent=None):
+                 declared_ramp_off=False, declared_max_flow=None,
+                 compact=False, parent=None):
         super().__init__(parent)
         self._unit = unit
+        self._compact = bool(compact)
         self._full_scale = full_scale
         #: The operator's own figure for this meter, or ``None`` to keep
         #: scaling the bar from what the run has asked for.
         self._declared_scale = declared_scale
         self._scale_guard = False
         self._ramp_guard = False
+        self._max_flow_guard = False
         self._accent = QColor(color)
         self._hover = False
         self.setObjectName('UnitCard')
@@ -614,13 +619,12 @@ class UnitCard(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Fixed)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, theme.PAD_MD, 0)
-        row.setSpacing(0)
-
         identity = QVBoxLayout()
-        identity.setContentsMargins(theme.PAD_MD + 2, theme.PAD_MD,
-                                    theme.PAD_MD, theme.PAD_MD)
+        identity.setContentsMargins(
+            0 if self._compact else theme.PAD_MD + 2,
+            0 if self._compact else theme.PAD_MD,
+            0 if self._compact else theme.PAD_MD,
+            0 if self._compact else theme.PAD_MD)
         identity.setSpacing(2)
         identity.addWidget(label(gas_name, color=color, size=10, bold=True))
         self._caption = label(
@@ -629,12 +633,14 @@ class UnitCard(QFrame):
         identity.addWidget(self._caption)
         identity_holder = QWidget()
         identity_holder.setLayout(identity)
-        identity_holder.setFixedWidth(theme.scale(150))
-        row.addWidget(identity_holder)
+        if not self._compact:
+            identity_holder.setFixedWidth(theme.scale(150))
 
         # Flow: the number the operator actually watches.
         flow_block = QVBoxLayout()
-        flow_block.setContentsMargins(0, theme.PAD_MD, 0, theme.PAD_MD)
+        flow_block.setContentsMargins(
+            0, theme.PAD_XS if self._compact else theme.PAD_MD,
+            0, theme.PAD_XS if self._compact else theme.PAD_MD)
         flow_block.setSpacing(theme.PAD_XS + 1)
         flow_row = QHBoxLayout()
         flow_row.setSpacing(5)
@@ -689,8 +695,10 @@ class UnitCard(QFrame):
         # The gap that separates the two settings.  A spacer column would have
         # to be given a minimum width, and a fixed column in this grid is what
         # widened every card the last time this block was laid out.
-        ramp_caption.setContentsMargins(theme.PAD_MD, 0, 0, 0)
-        prefs_grid.addWidget(ramp_caption, 0, 3)
+        if not self._compact:
+            ramp_caption.setContentsMargins(theme.PAD_MD, 0, 0, 0)
+        ramp_row, ramp_column = ((2, 0) if self._compact else (0, 3))
+        prefs_grid.addWidget(ramp_caption, ramp_row, ramp_column)
         self.ramp_spin = QDoubleSpinBox()
         self.ramp_spin.setRange(0.0, unit_prefs.MAX_RAMP_RATE)
         self.ramp_spin.setDecimals(2)
@@ -707,9 +715,26 @@ class UnitCard(QFrame):
             "recording. 'step' writes the setpoint in one go and lets the "
             "controller travel at its own pace.")
         self.ramp_spin.valueChanged.connect(self._emit_ramp_rate)
-        prefs_grid.addWidget(self.ramp_spin, 0, 4)
+        prefs_grid.addWidget(self.ramp_spin, ramp_row, ramp_column + 1)
         prefs_grid.addWidget(label('SLPM/s', color=theme.TEXT_DIM, size=7),
-                             0, 5)
+                             ramp_row, ramp_column + 2)
+
+        prefs_grid.addWidget(label('MAX FLOW', color=theme.TEXT_DIM, size=7),
+                             1, 0)
+        self.max_flow_spin = QDoubleSpinBox()
+        self.max_flow_spin.setRange(0.0, unit_prefs.MAX_COMMAND_FLOW)
+        self.max_flow_spin.setDecimals(1)
+        self.max_flow_spin.setSingleStep(1.0)
+        self.max_flow_spin.setSpecialValueText('none')
+        self.max_flow_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.max_flow_spin.setValue(float(declared_max_flow or 0.0))
+        self.max_flow_spin.setToolTip(
+            "Largest setpoint this application may command to this controller, "
+            "in SLPM. This is a safety limit for every control path and is "
+            "separate from FULL SCALE, which only sets the bar display.")
+        self.max_flow_spin.valueChanged.connect(self._emit_max_flow)
+        prefs_grid.addWidget(self.max_flow_spin, 1, 1)
+        prefs_grid.addWidget(label('SLPM', color=theme.TEXT_DIM, size=7), 1, 2)
 
         # Ramping off outright, which is not the same as no rate: with no rate
         # this application still walks the pilot and the two air lines over a
@@ -727,7 +752,7 @@ class UnitCard(QFrame):
             "including on the pilot and the two air lines, which are never "
             "otherwise stepped. Remembered between runs.")
         self.ramp_off_btn.toggled.connect(self._on_ramp_off_toggled)
-        prefs_grid.addWidget(self.ramp_off_btn, 0, 6)
+        prefs_grid.addWidget(self.ramp_off_btn, ramp_row, ramp_column + 3)
         self.set_ramp_disabled(declared_ramp_off)
 
         # Left to their own hints the two boxes are wide enough to push the
@@ -735,24 +760,27 @@ class UnitCard(QFrame):
         # column scrolls sideways.  A minimum they may shrink to, a maximum
         # they may not grow past, and the stretch beyond the last column, so
         # spare width goes to the empty space rather than into the controls.
-        for spin in (self.scale_spin, self.ramp_spin):
+        for spin in (self.scale_spin, self.ramp_spin, self.max_flow_spin):
             spin.setMinimumWidth(theme.scale(66))
             spin.setMaximumWidth(theme.scale(84))
-        prefs_grid.setColumnStretch(7, 1)
+        prefs_grid.setColumnStretch(4 if self._compact else 7, 1)
         flow_block.addLayout(prefs_grid)
 
         flow_holder = QWidget()
         flow_holder.setLayout(flow_block)
         flow_holder.setMinimumWidth(theme.scale(150))
-        row.addWidget(flow_holder, 1)
 
         self._readings = {}
+        reading_holders = []
         for key, caption, suffix in (('setpoint', 'SP', 'SLPM'),
                                      ('pressure', 'PRESS', 'psia'),
                                      ('temp', 'TEMP', '°C')):
             block = QVBoxLayout()
-            block.setContentsMargins(theme.PAD_LG, theme.PAD_MD + 2,
-                                     0, theme.PAD_MD + 2)
+            block.setContentsMargins(
+                theme.PAD_XS if self._compact else theme.PAD_LG,
+                theme.PAD_XS if self._compact else theme.PAD_MD + 2,
+                0,
+                theme.PAD_XS if self._compact else theme.PAD_MD + 2)
             block.setSpacing(3)
             block.addWidget(label(caption, color=theme.TEXT_DIM, size=7))
             value_row = QHBoxLayout()
@@ -766,13 +794,17 @@ class UnitCard(QFrame):
             block.addLayout(value_row)
             holder = QWidget()
             holder.setLayout(block)
-            holder.setFixedWidth(theme.scale(102))
-            row.addWidget(holder)
+            if not self._compact:
+                holder.setFixedWidth(theme.scale(102))
+            reading_holders.append(holder)
             self._readings[key] = value
 
         entry_block = QVBoxLayout()
-        entry_block.setContentsMargins(theme.PAD_LG + 4, theme.PAD_MD,
-                                       0, theme.PAD_MD)
+        entry_block.setContentsMargins(
+            theme.PAD_SM if self._compact else theme.PAD_LG + 4,
+            theme.PAD_XS if self._compact else theme.PAD_MD,
+            0,
+            theme.PAD_XS if self._compact else theme.PAD_MD)
         entry_block.setSpacing(theme.PAD_XS + 1)
         entry_block.addWidget(label('SETPOINT', color=theme.AMBER, size=7,
                                     bold=True))
@@ -801,11 +833,44 @@ class UnitCard(QFrame):
         entry_block.addLayout(entry_row)
         entry_holder = QWidget()
         entry_holder.setLayout(entry_block)
-        row.addWidget(entry_holder)
 
         self._dot = StatusDot(theme.TEXT_DIM)
-        row.addSpacing(theme.PAD_SM)
-        row.addWidget(self._dot)
+        if self._compact:
+            # Grid cards trade the single wide instrument row for three short
+            # bands.  Every reading and every manual control remains visible;
+            # only their direction changes so two cards can fit side by side.
+            card_layout = QVBoxLayout(self)
+            card_layout.setContentsMargins(theme.PAD_MD, theme.PAD_MD,
+                                           theme.PAD_MD, theme.PAD_MD)
+            card_layout.setSpacing(theme.PAD_XS)
+            heading = QHBoxLayout()
+            heading.setContentsMargins(0, 0, 0, 0)
+            heading.addWidget(identity_holder)
+            heading.addStretch(1)
+            heading.addWidget(self._dot)
+            card_layout.addLayout(heading)
+            card_layout.addWidget(flow_holder)
+            metrics = QGridLayout()
+            metrics.setContentsMargins(0, 0, 0, 0)
+            metrics.setHorizontalSpacing(theme.PAD_XS)
+            metrics.setVerticalSpacing(0)
+            for index, holder in enumerate(reading_holders):
+                metrics.addWidget(holder, index // 2, index % 2)
+            metrics.addWidget(entry_holder, 1, 1)
+            metrics.setColumnStretch(0, 1)
+            metrics.setColumnStretch(1, 1)
+            card_layout.addLayout(metrics)
+        else:
+            row = QHBoxLayout(self)
+            row.setContentsMargins(0, 0, theme.PAD_MD, 0)
+            row.setSpacing(0)
+            row.addWidget(identity_holder)
+            row.addWidget(flow_holder, 1)
+            for holder in reading_holders:
+                row.addWidget(holder)
+            row.addWidget(entry_holder)
+            row.addSpacing(theme.PAD_SM)
+            row.addWidget(self._dot)
 
     # -- painting -------------------------------------------------------
     def enterEvent(self, event):
@@ -845,6 +910,11 @@ class UnitCard(QFrame):
             return
         self.ramp_rate_requested.emit(self._unit, float(value))
 
+    def _emit_max_flow(self, value):
+        if self._max_flow_guard:
+            return
+        self.max_flow_requested.emit(self._unit, float(value))
+
     def _on_ramp_off_toggled(self, checked):
         self._apply_ramp_off(bool(checked))
         if self._ramp_guard:
@@ -883,6 +953,14 @@ class UnitCard(QFrame):
             self.ramp_spin.setValue(float(rate or 0.0))
         finally:
             self._ramp_guard = False
+
+    def set_declared_max_flow(self, maximum):
+        """Show a command ceiling set elsewhere, without re-announcing it."""
+        self._max_flow_guard = True
+        try:
+            self.max_flow_spin.setValue(float(maximum or 0.0))
+        finally:
+            self._max_flow_guard = False
 
     def set_ramp_disabled(self, off):
         """Show a ramp-off state set elsewhere, without re-announcing it."""

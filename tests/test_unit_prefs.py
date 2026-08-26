@@ -77,6 +77,13 @@ class CleanFieldTests(unittest.TestCase):
     def test_a_ramp_below_its_ceiling_is_kept_as_typed(self):
         self.assertEqual(unit_prefs.clean_field('ramp', 2.5), 2.5)
 
+    def test_a_command_ceiling_is_cleaned_independently(self):
+        self.assertEqual(unit_prefs.clean_field('max_flow', 12.5), 12.5)
+        self.assertEqual(
+            unit_prefs.clean_field('max_flow',
+                                   unit_prefs.MAX_COMMAND_FLOW * 2),
+            unit_prefs.MAX_COMMAND_FLOW)
+
     def test_a_field_nobody_declares_is_not_stored(self):
         self.assertIsNone(unit_prefs.clean_field('colour', 1.0))
 
@@ -91,8 +98,9 @@ class CleanRecordTests(unittest.TestCase):
 
     def test_a_record_with_both_fields_keeps_both(self):
         self.assertEqual(
-            unit_prefs.clean_record({'full_scale': 50, 'ramp': 2.5}),
-            {'full_scale': 50.0, 'ramp': 2.5})
+            unit_prefs.clean_record({'full_scale': 50, 'ramp': 2.5,
+                                     'max_flow': 40}),
+            {'full_scale': 50.0, 'ramp': 2.5, 'max_flow': 40.0})
 
     def test_a_field_that_does_not_clean_is_dropped_without_the_other(self):
         self.assertEqual(
@@ -143,10 +151,12 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(unit_prefs.load(store_path=self.store), {})
 
     def test_a_well_formed_file_loads_as_records_of_floats(self):
-        self.write(json.dumps({'A': {'full_scale': 50, 'ramp': '2.5'},
+        self.write(json.dumps({'A': {'full_scale': 50, 'ramp': '2.5',
+                                     'max_flow': 40},
                                'B': {'ramp': 1}}))
         prefs = unit_prefs.load(store_path=self.store)
-        self.assertEqual(prefs, {'A': {'full_scale': 50.0, 'ramp': 2.5},
+        self.assertEqual(prefs, {'A': {'full_scale': 50.0, 'ramp': 2.5,
+                                       'max_flow': 40.0},
                                  'B': {'ramp': 1.0}})
         for record in prefs.values():
             for value in record.values():
@@ -172,10 +182,12 @@ class LoadTests(unittest.TestCase):
 
     def test_values_above_their_ceilings_come_back_clamped(self):
         self.write(json.dumps({'A': {'full_scale': unit_prefs.MAX_FULL_SCALE + 500,
-                                     'ramp': unit_prefs.MAX_RAMP_RATE + 500}}))
+                                     'ramp': unit_prefs.MAX_RAMP_RATE + 500,
+                                     'max_flow': unit_prefs.MAX_COMMAND_FLOW + 500}}))
         self.assertEqual(unit_prefs.load(store_path=self.store)['A'],
                          {'full_scale': unit_prefs.MAX_FULL_SCALE,
-                          'ramp': unit_prefs.MAX_RAMP_RATE})
+                          'ramp': unit_prefs.MAX_RAMP_RATE,
+                          'max_flow': unit_prefs.MAX_COMMAND_FLOW})
 
 
 class SaveTests(unittest.TestCase):
@@ -187,19 +199,22 @@ class SaveTests(unittest.TestCase):
         self.store = Path(self.tmpdir.name) / 'unit_prefs.json'
 
     def test_a_successful_save_round_trips_through_load(self):
-        prefs = {'A': {'full_scale': 50.0, 'ramp': 2.5},
+        prefs = {'A': {'full_scale': 50.0, 'ramp': 2.5, 'max_flow': 40.0},
                  'B': {'full_scale': 2.5}}
         self.assertIsNone(unit_prefs.save(prefs, store_path=self.store))
         self.assertEqual(unit_prefs.load(store_path=self.store), prefs)
 
     def test_values_are_rounded_to_four_decimal_places(self):
-        unit_prefs.save({'A': {'full_scale': 12.3456789, 'ramp': 0.123456}},
+        unit_prefs.save({'A': {'full_scale': 12.3456789, 'ramp': 0.123456,
+                               'max_flow': 9.876543}},
                         store_path=self.store)
         self.assertEqual(unit_prefs.load(store_path=self.store)['A'],
-                         {'full_scale': 12.3457, 'ramp': 0.1235})
+                         {'full_scale': 12.3457, 'ramp': 0.1235,
+                          'max_flow': 9.8765})
 
     def test_entries_that_do_not_clean_are_omitted_from_the_file(self):
-        unit_prefs.save({'A': {'full_scale': 50.0, 'ramp': 0.0},
+        unit_prefs.save({'A': {'full_scale': 50.0, 'ramp': 0.0,
+                               'max_flow': -1.0},
                          'B': {'full_scale': -3.0}, 'C': {}, 'D': None},
                         store_path=self.store)
         raw = json.loads(self.store.read_text(encoding='utf-8'))

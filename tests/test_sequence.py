@@ -51,20 +51,18 @@ class TrackValueTests(unittest.TestCase):
         self.assertAlmostEqual(line.value_at(5.0), 5.0)
         self.assertAlmostEqual(line.value_at(10.0), 10.0)
 
-    def test_a_negative_value_from_a_file_is_clamped(self):
-        line = Track.from_dict({'key': 'nh3_rich', 'label': 'NH3',
-                                'keyframes': [{'t': 0.0, 'v': -3.0}]})
-        self.assertEqual(line.value_at(0.0), 0.0)
+    def test_an_invalid_value_from_a_file_is_rejected_not_rewritten(self):
+        for value in (-3.0, float('nan'), float('inf'), 'not a flow'):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'finite non-negative'):
+                    Track.from_dict({
+                        'key': 'nh3_rich', 'label': 'NH3',
+                        'keyframes': [{'t': 0.0, 'v': value}]})
 
     def test_a_negative_value_from_an_edit_is_clamped(self):
         line = track(frames=[(0.0, 1.0, HOLD)])
         line.add(2.0, -5.0)
         self.assertEqual(line.value_at(2.0), 0.0)
-
-    def test_a_non_finite_value_from_a_file_is_clamped(self):
-        line = Track.from_dict({'key': 'nh3_rich', 'label': 'NH3',
-                                'keyframes': [{'t': 0.0, 'v': float('nan')}]})
-        self.assertEqual(line.value_at(0.0), 0.0)
 
     def test_span_and_duration_come_from_the_keyframes(self):
         line = track(frames=[(0.0, 1.0, HOLD), (7.0, 9.0, HOLD)])
@@ -132,6 +130,39 @@ class SequenceRoundTripTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'newer'):
             Sequence.from_dict({'format': 'flow-controller-sequence',
                                 'version': 99})
+
+    def test_invalid_times_and_markers_are_rejected_not_coerced(self):
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        data['tracks'][0]['keyframes'][0]['t'] = -1.0
+        with self.assertRaisesRegex(ValueError, 'finite non-negative'):
+            Sequence.from_dict(data)
+
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        data['markers'] = ['not a time']
+        with self.assertRaisesRegex(ValueError, 'finite non-negative'):
+            Sequence.from_dict(data)
+
+    def test_a_keyframe_missing_a_value_is_rejected(self):
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        del data['tracks'][0]['keyframes'][0]['v']
+        with self.assertRaisesRegex(ValueError, "needs both 't' and 'v'"):
+            Sequence.from_dict(data)
+
+    def test_invalid_transition_duplicate_time_and_ramp_fail_closed(self):
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        data['tracks'][0]['keyframes'][0]['i'] = 'teleport'
+        with self.assertRaisesRegex(ValueError, 'interpolation'):
+            Sequence.from_dict(data)
+
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        data['tracks'][0]['keyframes'].append({'t': 0.0, 'v': 2.0, 'i': HOLD})
+        with self.assertRaisesRegex(ValueError, 'duplicate keyframe'):
+            Sequence.from_dict(data)
+
+        data = Sequence(tracks=[track(frames=[(0.0, 1.0, HOLD)])]).to_dict()
+        data['tracks'][0]['ramp'] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'finite non-negative'):
+            Sequence.from_dict(data)
 
     def test_bind_reports_roles_that_are_not_assigned(self):
         sequence = Sequence(tracks=[track(key='nh3_rich'),

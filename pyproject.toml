@@ -13,6 +13,9 @@ dependencies = [
     "numpy>=2.0,<3",
     "PySide6>=6.7,<7",
     "pyqtgraph>=0.13,<1",
+    "mcp>=2,<3",
+    "pyte>=0.8,<1",
+    "pywinpty>=3,<4; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
@@ -24,3 +27,6 @@ flow-controller-v3 = "flow_controller.ui.qt_main_window:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["flow_controller*"]
+
+[tool.setuptools.package-data]
+"flow_controller.ui" = ["assets/*.svg"]

@@ -1,0 +1,47 @@
+{
+  "format": "flow-controller-experiment-plan",
+  "version": 1,
+  "name": "Attended two-condition example",
+  "notes": "Illustrative values only. Confirm assignments and MAX FLOW declarations before use.",
+  "abort": {
+    "action": "zero_all"
+  },
+  "stages": [
+    {
+      "name": "Establish condition 1",
+      "setpoints": {
+        "nh3_rich": 0.5
+      },
+      "condition": {
+        "type": "all_within",
+        "metric": "flow",
+        "targets": {
+          "nh3_rich": 0.5
+        },
+        "tolerance": 0.05,
+        "stable_s": 5.0
+      },
+      "min_dwell_s": 5.0,
+      "timeout_s": 60.0,
+      "on_timeout": "abort"
+    },
+    {
+      "name": "Return line to zero",
+      "setpoints": {
+        "nh3_rich": 0.0
+      },
+      "condition": {
+        "type": "all_within",
+        "metric": "flow",
+        "targets": {
+          "nh3_rich": 0.0
+        },
+        "tolerance": 0.05,
+        "stable_s": 5.0
+      },
+      "min_dwell_s": 5.0,
+      "timeout_s": 60.0,
+      "on_timeout": "abort"
+    }
+  ]
+}
