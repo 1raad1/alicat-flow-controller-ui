@@ -230,6 +230,10 @@ class FlowSession(QObject):
         self.custom_assignments = {}
         self.autocalc_available = True
         self.autocalc_config = None
+        # The last complete condition used by Auto-Calculate. Keeping the
+        # inputs beside the targets lets an agent change one field (for
+        # example phi_stage1) without guessing the remaining condition.
+        self.autocalc_request = None
 
         # -- monitoring state --
         self.is_monitoring = False
@@ -582,8 +586,8 @@ class FlowSession(QObject):
         return cleaned
 
     def ramp_disabled_for(self, unit):
-        """True when the operator has turned ramping off on this controller."""
-        return bool(self.pref_for(unit, 'ramp_off'))
+        """Whether application ramping is off; new controllers default off."""
+        return bool(self.unit_prefs.get(unit, {}).get('ramp_off', True))
 
     def set_ramp_disabled(self, unit, off):
         """Turn this controller's ramping off outright, or back on.
@@ -1440,11 +1444,16 @@ class FlowSession(QObject):
         nh3_r, h2_r = flow('nh3_rich'), flow('h2_rich')
         nh3_l, h2_l = flow('nh3_lean'), flow('h2_lean')
         air_r, air_l = flow('rich_air'), flow('lean_air')
-        ch4 = flow('ch4_pilot')
+        ch4_pilot = flow('ch4_pilot')
+        ch4_stage1 = flow('ch4_stage1')
+        ch4_stage2 = flow('ch4_stage2')
         return (
-            self.calc.phi(nh3_r, h2_r, air_r, ch4),
-            self.calc.phi(nh3_l, h2_l, air_l),
-            self.calc.phi(nh3_r + nh3_l, h2_r + h2_l, air_r + air_l, ch4),
+            self.calc.phi(
+                nh3_r, h2_r, air_r, ch4_stage1 + ch4_pilot),
+            self.calc.phi(nh3_l, h2_l, air_l, ch4_stage2),
+            self.calc.phi(
+                nh3_r + nh3_l, h2_r + h2_l, air_r + air_l,
+                ch4_stage1 + ch4_stage2 + ch4_pilot),
         )
 
     # ------------------------------------------------------------------ #
@@ -1452,13 +1461,20 @@ class FlowSession(QObject):
     # ------------------------------------------------------------------ #
 
     #: Which roles feed each staged scope.  The pilot's methane is counted into
-    #: stage 1, exactly as :meth:`phi_values` counts it: it burns in the rich
-    #: zone, and a phi on this card that disagreed with the phi two tiles above
-    #: it would be worse than no phi at all.
+    #: stage 1, exactly as :meth:`phi_values` counts it. A phi on this card
+    #: that disagreed with the phi two tiles above it would be worse than no
+    #: phi at all.
     STAGE_ROLES = {
-        SCOPE_STAGE1: ({'NH3': 'nh3_rich', 'H2': 'h2_rich',
-                        'CH4': 'ch4_pilot'}, ('rich_air',)),
-        SCOPE_STAGE2: ({'NH3': 'nh3_lean', 'H2': 'h2_lean'}, ('lean_air',)),
+        SCOPE_STAGE1: ({
+            'NH3': ('nh3_rich',),
+            'H2': ('h2_rich',),
+            'CH4': ('ch4_stage1', 'ch4_pilot'),
+        }, ('rich_air',)),
+        SCOPE_STAGE2: ({
+            'NH3': ('nh3_lean',),
+            'H2': ('h2_lean',),
+            'CH4': ('ch4_stage2',),
+        }, ('lean_air',)),
     }
 
     def gas_flows(self, samples=None):
@@ -1501,8 +1517,10 @@ class FlowSession(QObject):
                         if gas != 'Air' and gas not in combustion.FUELS)
             return fuels, totals.get('Air', 0.0), inert
         fuel_roles, air_roles = mapping
-        fuels = {fuel: self.flow_for_role(key, samples)
-                 for fuel, key in fuel_roles.items()}
+        fuels = {
+            fuel: sum(self.flow_for_role(key, samples) for key in keys)
+            for fuel, keys in fuel_roles.items()
+        }
         air = sum(self.flow_for_role(key, samples) for key in air_roles)
         # The RQL roles are fuel and air and nothing else, so a staged scope
         # has no third flow to carry.
@@ -1525,6 +1543,22 @@ class FlowSession(QObject):
         field = combustion_prefs.DIAMETER_FIELDS.get(scope)
         return self.combustion_prefs.get(field) if field else None
 
+    def combustion_geometry(self, scope=SCOPE_ALL):
+        """Whether this inlet is entered as ``diameter`` or ``area``."""
+        field = combustion_prefs.GEOMETRY_FIELDS.get(scope)
+        return combustion_prefs.clean_geometry(
+            self.combustion_prefs.get(field) if field else None)
+
+    def combustion_area(self, scope=SCOPE_ALL):
+        """The selected per-inlet cross-sectional area in mm²."""
+        if self.combustion_geometry(scope) == combustion_prefs.GEOMETRY_AREA:
+            field = combustion_prefs.AREA_FIELDS.get(scope)
+            return self.combustion_prefs.get(field) if field else None
+        diameter = self.combustion_diameter(scope)
+        if diameter is None:
+            return None
+        return math.pi * (float(diameter) / 2.0) ** 2
+
     def combustion_inlets(self, scope=SCOPE_ALL):
         """Parallel inlet count for a scope; only Stage 2 may exceed one."""
         if scope != SCOPE_STAGE2:
@@ -1540,10 +1574,11 @@ class FlowSession(QObject):
         Passing that to the existing velocity calculation is exactly the same
         as dividing total flow by ``count × area_per_inlet``.
         """
-        diameter = self.combustion_diameter(scope)
-        if diameter is None:
+        area = self.combustion_area(scope)
+        if area is None:
             return None
-        return diameter * math.sqrt(self.combustion_inlets(scope))
+        total_area = float(area) * self.combustion_inlets(scope)
+        return math.sqrt(4.0 * total_area / math.pi)
 
     def set_combustion_diameter(self, scope, millimetres):
         """Declare -- or with ``None``/0 withdraw -- one inlet bore, in mm.
@@ -1565,6 +1600,49 @@ class FlowSession(QObject):
         else:
             self._log(f"Combustion: {scope} inlet diameter → "
                       f"{cleaned:.2f} mm")
+        self._save_combustion_prefs()
+        return cleaned
+
+    def set_combustion_area(self, scope, square_millimetres):
+        """Declare one inlet's cross-sectional area in square millimetres."""
+        field = combustion_prefs.AREA_FIELDS.get(scope)
+        if field is None:
+            return None
+        cleaned = combustion_prefs.clean_area(square_millimetres)
+        if self.combustion_prefs.get(field) == cleaned:
+            return cleaned
+        self.combustion_prefs[field] = cleaned
+        if cleaned is None:
+            self._log(f'Combustion: {scope} inlet area cleared '
+                      '(bulk velocity not shown)')
+        else:
+            self._log(f'Combustion: {scope} inlet area → '
+                      f'{cleaned:.2f} mm²')
+        self._save_combustion_prefs()
+        return cleaned
+
+    def set_combustion_geometry(self, scope, mode):
+        """Choose the inlet input representation without changing its area."""
+        field = combustion_prefs.GEOMETRY_FIELDS.get(scope)
+        if field is None:
+            return combustion_prefs.GEOMETRY_DIAMETER
+        cleaned = combustion_prefs.clean_geometry(mode)
+        if self.combustion_geometry(scope) == cleaned:
+            return cleaned
+
+        # Carry the current cross-section across the representation switch so
+        # changing the editor does not make a live estimate jump or disappear.
+        current_area = self.combustion_area(scope)
+        self.combustion_prefs[field] = cleaned
+        if current_area is not None:
+            if cleaned == combustion_prefs.GEOMETRY_AREA:
+                area_field = combustion_prefs.AREA_FIELDS[scope]
+                self.combustion_prefs[area_field] = current_area
+            else:
+                diameter_field = combustion_prefs.DIAMETER_FIELDS[scope]
+                self.combustion_prefs[diameter_field] = math.sqrt(
+                    4.0 * current_area / math.pi)
+        self._log(f'Combustion: {scope} inlet input → {cleaned}')
         self._save_combustion_prefs()
         return cleaned
 
@@ -1985,6 +2063,11 @@ class FlowSession(QObject):
         }
         self.targets_changed.emit(dict(self.target_flows))
         return self.target_flows
+
+    def set_autocalc_request(self, request):
+        """Remember the complete input condition behind calculated targets."""
+        self.autocalc_request = request
+        return request
 
     def _set_ignition_state(self, state):
         if state != self.ignition_state:

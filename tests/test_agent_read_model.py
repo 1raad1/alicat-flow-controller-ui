@@ -10,6 +10,7 @@ from flow_controller.core.agent_read_model import (
 )
 from flow_controller.core.graph_history import GraphHistory
 from flow_controller.core.session import FlowSession
+from flow_controller.domain.rql import AutoCalcRequest, FULL_RQL
 
 
 def sample(flow, sp, *, press=14.7, temp=20.0):
@@ -77,6 +78,27 @@ class SnapshotTests(unittest.TestCase):
         snapshot = build_snapshot(session)
         self.assertIsNone(snapshot['telemetry']['A']['flow'])
         self.assertIsNone(snapshot['telemetry']['A']['setpoint'])
+
+    def test_snapshot_includes_last_combustion_condition_and_targets(self):
+        request = AutoCalcRequest(
+            power_kw=12.0, h2_fraction=0.4, phi_stage1=0.8,
+            phi_global=0.6, split_rich=0.75)
+        session = SimpleNamespace(
+            _live_samples={}, assignments={}, custom_assignments={},
+            selection={}, unit_prefs={}, controllers_connected=True,
+            is_connecting=False, is_monitoring=True, port='COM1',
+            baudrate=57600, poll_interval_s=0.1, _latest_timestamp=None,
+            autocalc_request=request, autocalc_available=True,
+            autocalc_config=FULL_RQL,
+            target_flows={'rich_air': 4.5}, operating_mode='staged',
+            phi_values=lambda: (0.79, 0.41, 0.59),
+        )
+
+        combustion = build_snapshot(session)['combustion']
+
+        self.assertEqual(combustion['last_condition']['phi_stage1'], 0.8)
+        self.assertEqual(combustion['prepared_targets'], {'rich_air': 4.5})
+        self.assertEqual(combustion['live_phi']['stage2'], 0.41)
 
 
 class HistoryAndDerivedStateTests(unittest.TestCase):

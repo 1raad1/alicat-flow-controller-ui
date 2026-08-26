@@ -9,11 +9,9 @@ session:
   to every setpoint the application writes to it.
 * ``max_flow`` -- the largest setpoint the application may command, in SLPM.
   Unlike ``full_scale`` this is a control limit, not a presentation setting.
-* ``ramp_off`` -- ramping turned off outright.  Not the same thing as an absent
-  ``ramp``: no rate only means none was typed, and the application still holds
-  the pilot and air lines to a minimum move time of its own.  This flag is the
-  operator saying that this controller takes its setpoints exactly as written,
-  and it is deliberately a separate field so that saying it has to be an act.
+* ``ramp_off`` -- whether ramping is disabled outright. New controllers default
+  to ``True`` (step changes); an explicit ``False`` is retained when an operator
+  enables application pacing for that meter.
 
 Unit ``C`` is the same 50 SLPM meter tomorrow morning as it was last night, and
 the line it feeds takes the same time to settle, so both are declared once and
@@ -52,15 +50,15 @@ MAX_COMMAND_FLOW = 10000.0
 CEILINGS = {'full_scale': MAX_FULL_SCALE, 'ramp': MAX_RAMP_RATE,
             'max_flow': MAX_COMMAND_FLOW}
 
-#: The fields that are a declaration rather than a figure.  Only ``True`` is
-#: ever stored -- "not turned off" is the absence of the field -- so a record
-#: that has never been touched stays absent from the file entirely.
+#: The fields that are a state rather than a figure. Both booleans are stored:
+#: absence means the new default (ramping off), while ``False`` records the
+#: operator explicitly enabling ramping for that controller.
 FLAGS = ('ramp_off',)
 
-#: What counts as a yes when the file has been edited by hand.  Anything else
-#: -- ``false``, ``0``, a typo -- reads as not declared, which is the state that
-#: keeps the application's own pacing in force.
+#: Obvious boolean spellings accepted when the file is edited by hand. Typos
+#: read as absent, which means the default no-ramp state.
 TRUTHS = frozenset({'1', 'true', 'yes', 'on'})
+FALSES = frozenset({'0', 'false', 'no', 'off'})
 
 
 def path():
@@ -89,16 +87,21 @@ def clean(value, ceiling=MAX_FULL_SCALE):
 
 
 def clean_flag(value):
-    """One declaration: ``True``, or ``None`` for "not declared".
-
-    ``False`` and ``None`` come back the same way on purpose.  A flag that is
-    not set is a flag that is not in the file, so turning one back off through
-    :meth:`~flow_controller.core.session.FlowSession._set_pref` removes it
-    rather than writing a ``false`` that would have to be read again later.
-    """
+    """One explicit boolean state, or ``None`` when it is unreadable."""
     if isinstance(value, str):
-        return True if value.strip().lower() in TRUTHS else None
-    return True if value else None
+        word = value.strip().lower()
+        if word in TRUTHS:
+            return True
+        if word in FALSES:
+            return False
+        return None
+    if isinstance(value, bool):
+        return value
+    if value == 1:
+        return True
+    if value == 0:
+        return False
+    return None
 
 
 def clean_field(field, value):
@@ -126,8 +129,10 @@ def clean_record(raw):
         if number is not None:
             record[field] = number
     for field in FLAGS:
-        if clean_flag(raw.get(field)):
-            record[field] = True
+        if field in raw:
+            flag = clean_flag(raw.get(field))
+            if flag is not None:
+                record[field] = flag
     return record
 
 

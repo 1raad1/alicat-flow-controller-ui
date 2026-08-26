@@ -124,6 +124,29 @@ def build_snapshot(session):
         'poll_interval_s': _finite_or_none(getattr(session, 'poll_interval_s', None)),
         'latest_sample_at': _timestamp(getattr(session, '_latest_timestamp', None)),
     }
+    request = getattr(session, 'autocalc_request', None)
+    condition = None
+    if request is not None:
+        condition = {
+            'power_kw': _finite_or_none(getattr(request, 'power_kw', None)),
+            'h2_fraction': _finite_or_none(
+                getattr(request, 'h2_fraction', None)),
+            'phi_stage1': _finite_or_none(
+                getattr(request, 'phi_stage1', None)),
+            'phi_global': _finite_or_none(
+                getattr(request, 'phi_global', None)),
+            'stage1_split': _finite_or_none(
+                getattr(request, 'split_rich', None)),
+        }
+    try:
+        phi_stage1, phi_stage2, phi_global = session.phi_values()
+        live_phi = {
+            'stage1': _finite_or_none(phi_stage1),
+            'stage2': _finite_or_none(phi_stage2),
+            'global': _finite_or_none(phi_global),
+        }
+    except (AttributeError, TypeError, ValueError):
+        live_phi = {'stage1': None, 'stage2': None, 'global': None}
     return {
         'captured_at': connection['latest_sample_at'],
         'connection': connection,
@@ -135,6 +158,19 @@ def build_snapshot(session):
         'declared_limits': {
             unit: record['command_max_flow'] for unit, record in unit_records.items()
             if record['command_max_flow'] is not None
+        },
+        'combustion': {
+            'operating_mode': getattr(session, 'operating_mode', None),
+            'autocalc_available': bool(
+                getattr(session, 'autocalc_available', False)),
+            'autocalc_config': getattr(session, 'autocalc_config', None),
+            'last_condition': condition,
+            'prepared_targets': {
+                str(role): _finite_or_none(value)
+                for role, value in dict(
+                    getattr(session, 'target_flows', {}) or {}).items()
+            },
+            'live_phi': live_phi,
         },
     }
 

@@ -10,8 +10,10 @@ from __future__ import annotations
 ROLES = (
     ('nh3_rich', 'NH3 Stage 1'),
     ('h2_rich', 'H2 Stage 1'),
+    ('ch4_stage1', 'CH4 Stage 1'),
     ('nh3_lean', 'NH3 Stage 2'),
     ('h2_lean', 'H2 Stage 2'),
+    ('ch4_stage2', 'CH4 Stage 2'),
     ('ch4_pilot', 'CH4 Pilot'),
     ('rich_air', 'Air Stage 1'),
     ('lean_air', 'Air Stage 2'),
@@ -22,12 +24,15 @@ ROLE_LABELS = dict(ROLES)
 #: Stage grouping used by the live cards, so a reading sits next to the other
 #: readings it has to be judged against rather than next to its own gas.
 STAGES = (
-    ('Stage 1', ('nh3_rich', 'h2_rich', 'rich_air')),
-    ('Stage 2', ('nh3_lean', 'h2_lean', 'lean_air')),
+    ('Stage 1', ('nh3_rich', 'h2_rich', 'ch4_stage1', 'rich_air')),
+    ('Stage 2', ('nh3_lean', 'h2_lean', 'ch4_stage2', 'lean_air')),
     ('Pilot', ('ch4_pilot',)),
 )
 
-FUEL_KEYS = frozenset({'nh3_rich', 'h2_rich', 'nh3_lean', 'h2_lean', 'ch4_pilot'})
+FUEL_KEYS = frozenset({
+    'nh3_rich', 'h2_rich', 'ch4_stage1',
+    'nh3_lean', 'h2_lean', 'ch4_stage2', 'ch4_pilot',
+})
 AIR_KEYS = frozenset({'rich_air', 'lean_air'})
 
 #: Roles whose setpoint is always approached as a ramp rather than a step.
@@ -46,9 +51,11 @@ ZONE_OPTIONS = (UNASSIGNED_ZONE, 'Zone 1', 'Zone 2', 'Pilot', 'General')
 ROLE_MAP = {
     ('NH3', 'Zone 1'): 'nh3_rich',
     ('H2', 'Zone 1'): 'h2_rich',
+    ('CH4', 'Zone 1'): 'ch4_stage1',
     ('Air', 'Zone 1'): 'rich_air',
     ('NH3', 'Zone 2'): 'nh3_lean',
     ('H2', 'Zone 2'): 'h2_lean',
+    ('CH4', 'Zone 2'): 'ch4_stage2',
     ('Air', 'Zone 2'): 'lean_air',
     ('CH4', 'Pilot'): 'ch4_pilot',
 }

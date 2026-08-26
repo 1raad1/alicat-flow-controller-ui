@@ -36,7 +36,8 @@ class AgentAuthorityTests(unittest.TestCase):
         self.session.assignments["nh3_rich"] = "A"
         self.session.selection = {"A": ("NH3", "Rich")}
         self.session.unit_prefs = {
-            "A": {"max_flow": 10.0, "ramp": 2.0}}
+            "A": {"max_flow": 10.0, "ramp": 2.0,
+                  "ramp_off": False}}
         self.session.controllers_connected = True
         self.session.is_monitoring = True
         self.authority = AgentAuthority(self.session, self.session)
@@ -109,8 +110,6 @@ class AgentAuthorityTests(unittest.TestCase):
             (self.session.assignments_changed, ({},), "assignments changed"),
             (self.session.max_flow_changed, ("A", 9.0), "maximum flow changed"),
             (self.session.unit_ramp_changed, ("A", 1.0), "ramp settings changed"),
-            (self.session.experiment_plans.plan_changed,
-             (self.plan(),), "loaded plan changed"),
             (self.session.connection_changed, (False,), "controllers disconnected"),
             (self.session.monitoring_changed, (False,), "monitoring stopped"),
             (self.session.communication_fault, ("read timeout on Unit A",),
@@ -170,7 +169,8 @@ class AgentAuthorityTests(unittest.TestCase):
             self.authority.enable(plan)
 
         self.session.assignments["air_stage1"] = "B"
-        self.session.unit_prefs["B"] = {"max_flow": 20.0, "ramp": 4.0}
+        self.session.unit_prefs["B"] = {
+            "max_flow": 20.0, "ramp": 4.0, "ramp_off": False}
         envelope = self.authority.enable(plan)
         self.assertEqual(
             envelope["plan"]["command_roles"],

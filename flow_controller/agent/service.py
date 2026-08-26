@@ -3,30 +3,38 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
 import uuid
 
 from .authority import AgentAuthority, AuthorityError
-from ..core.experiment_plan import ExperimentPlan
-from ..core.sequence import Sequence
+from ..core.sequence import Sequence, opening_mismatches
+from ..domain import rql
 
 
 DEFAULT_AUDIT_PATH = (
     Path.home() / "Documents" / "Flow Controller" / "agent_audit.jsonl")
-READ_METHODS = frozenset(("read_snapshot", "read_history", "read_derived_state"))
-DRAFT_METHODS = frozenset(("submit_sequence_draft", "submit_plan_draft"))
-LIVE_METHODS = frozenset(("set_role_setpoint", "start_armed_plan"))
+READ_METHODS = frozenset((
+    "read_snapshot", "read_history", "read_derived_state",
+    "list_saved_sequences", "read_sequence",
+))
+DRAFT_METHODS = frozenset((
+    "submit_sequence_draft", "create_sequence_variant",
+    "prepare_combustion_condition",
+))
+LIVE_METHODS = frozenset(("set_role_setpoint", "run_saved_sequence"))
 ALLOWED_METHODS = READ_METHODS | DRAFT_METHODS | LIVE_METHODS
 MIN_READ_INTERVAL_S = 0.1
-MAX_AGENT_PLAN_STAGES = 100
-MAX_AGENT_PLAN_SEQUENCES = 25
 MAX_AGENT_SEQUENCE_BYTES = 1_000_000
 MAX_AGENT_DRAFT_BYTES = 1_000_000
 MAX_AGENT_SEQUENCE_TRACKS = 32
 MAX_AGENT_SEQUENCE_KEYFRAMES = 5_000
+MAX_LISTED_SEQUENCES = 100
+SEQUENCE_SUFFIX = ".fcseq.json"
 
 
 class AgentRequestError(ValueError):
@@ -45,24 +53,17 @@ class AgentAuditLog:
 
 
 class AgentDraftService:
-    """Qt-thread service for read, draft, supervised, and armed operations."""
+    """Qt-thread service for read, draft, and toggle-authorized operations."""
 
-    def __init__(self, session, *, audit=None, authority=None,
-                 approve_action=None):
+    def __init__(self, session, *, audit=None, authority=None):
         self.session = session
         self.audit = audit or AgentAuditLog()
         self.authority = authority or AgentAuthority(session)
-        self._approve_action = approve_action
         self._last_read_at = {}
         self.authority.changed.connect(self._on_authority_changed)
 
-    def set_approval_handler(self, callback):
-        """Install the UI callback used for every supervised setpoint."""
-        self._approve_action = callback
-
     def preview_live_authority(self):
-        return self.authority.preview(
-            plan=self.session.experiment_plans.plan)
+        return self.authority.preview()
 
     def set_live_enabled(self, enabled, *,
                          reason="operator changed live-control toggle",
@@ -112,7 +113,6 @@ class AgentDraftService:
                 f"Audit log unavailable; authority was not changed: {exc}") from exc
         try:
             result = self.authority.enable(
-                plan=self.session.experiment_plans.plan,
                 expected_envelope=expected_envelope)
             record.update(
                 phase="completed", result="accepted", new=result,
@@ -178,41 +178,6 @@ class AgentDraftService:
                 f"{method} is limited to {1.0 / MIN_READ_INTERVAL_S:g} calls/s.")
         self._last_read_at[key] = now
 
-    def _validate_agent_plan_references(self, plan):
-        """Keep draft validation away from remote and unbounded file inputs."""
-        if len(plan.stages) > MAX_AGENT_PLAN_STAGES:
-            raise AgentRequestError(
-                f"Agent plan drafts may contain at most {MAX_AGENT_PLAN_STAGES} stages.")
-        references = {
-            str(stage.sequence) for stage in plan.stages if stage.sequence}
-        if len(references) > MAX_AGENT_PLAN_SEQUENCES:
-            raise AgentRequestError(
-                "Agent plan drafts may reference at most "
-                f"{MAX_AGENT_PLAN_SEQUENCES} sequences.")
-        base = Path(self.session.sequence_dir).resolve()
-        for raw in references:
-            if len(raw) > 240 or raw.startswith(("\\\\", "//")):
-                raise AgentRequestError(
-                    "Agent plan sequence references must be short local paths "
-                    "inside the app sequence directory.")
-            path = Path(raw)
-            candidate = (path if path.is_absolute() else base / path).resolve()
-            try:
-                candidate.relative_to(base)
-            except ValueError as exc:
-                raise AgentRequestError(
-                    "Agent plan sequences must be inside the app sequence "
-                    f"directory: {base}") from exc
-            try:
-                size = candidate.stat().st_size
-            except OSError as exc:
-                raise AgentRequestError(
-                    f"Could not inspect local sequence '{raw}': {exc}") from exc
-            if size > MAX_AGENT_SEQUENCE_BYTES:
-                raise AgentRequestError(
-                    f"Sequence '{raw}' exceeds the {MAX_AGENT_SEQUENCE_BYTES} "
-                    "byte agent-draft limit.")
-
     @staticmethod
     def _draft_size(raw, label):
         try:
@@ -249,16 +214,303 @@ class AgentDraftService:
                     f"{MAX_AGENT_SEQUENCE_KEYFRAMES} total keyframes.")
         self._draft_size(raw, "Sequence draft")
 
-    def _validate_agent_plan_payload(self, raw):
-        if not isinstance(raw, dict):
-            raise AgentRequestError("Plan draft must be an object.")
-        stages = raw.get("stages", ())
-        if not isinstance(stages, list):
-            raise AgentRequestError("Plan draft stages must be a list.")
-        if len(stages) > MAX_AGENT_PLAN_STAGES:
+    def _saved_sequence_path(self, name):
+        raw_name = str(name or "").strip()
+        if (not raw_name or len(raw_name) > 200
+                or "/" in raw_name or "\\" in raw_name):
             raise AgentRequestError(
-                f"Agent plan drafts may contain at most {MAX_AGENT_PLAN_STAGES} stages.")
-        self._draft_size(raw, "Plan draft")
+                "Choose a saved sequence by its local name, without a path.")
+        filename = (raw_name if raw_name.endswith(SEQUENCE_SUFFIX)
+                    else raw_name + SEQUENCE_SUFFIX)
+        base = Path(self.session.sequence_dir).resolve()
+        candidate = (base / filename).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError as exc:
+            raise AgentRequestError(
+                "Saved sequences must be inside the app sequence directory.") from exc
+        if not candidate.is_file():
+            raise AgentRequestError(f"Saved sequence not found: {raw_name}")
+        try:
+            size = candidate.stat().st_size
+        except OSError as exc:
+            raise AgentRequestError(
+                f"Could not inspect saved sequence '{raw_name}': {exc}") from exc
+        if size > MAX_AGENT_SEQUENCE_BYTES:
+            raise AgentRequestError(
+                f"Saved sequence '{raw_name}' exceeds the "
+                f"{MAX_AGENT_SEQUENCE_BYTES} byte limit.")
+        return candidate
+
+    def _load_saved_sequence(self, name, *, validate_for_rig=True):
+        path = self._saved_sequence_path(name)
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            self._validate_agent_sequence_payload(raw)
+            sequence = Sequence.from_dict(raw, path=path)
+        except (OSError, TypeError, ValueError) as exc:
+            raise AgentRequestError(
+                f"Could not load saved sequence '{path.name}': {exc}") from exc
+        errors = (self.session.sequence_validation_errors(sequence)
+                  if validate_for_rig else [])
+        if errors:
+            raise AgentRequestError("\n".join(errors))
+        canonical = json.dumps(
+            raw, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return path, sequence, raw, fingerprint
+
+    @staticmethod
+    def _sequence_fingerprint(raw):
+        canonical = json.dumps(
+            raw, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _read_sequence(self, name=None):
+        if name is not None and str(name).strip():
+            path, sequence, raw, fingerprint = self._load_saved_sequence(
+                name, validate_for_rig=False)
+            source = path.name
+        else:
+            sequence = self.session.sequence
+            if sequence is None:
+                raise AgentRequestError(
+                    "No sequence is selected in the app. Choose a saved "
+                    "sequence name or load one in the Sequences card.")
+            raw = sequence.to_dict()
+            # ``to_dict`` supplies the current time when an unsaved draft has
+            # no creation time. Keep that generated display value out of the
+            # source identity so a draft does not become stale merely because
+            # the next MCP call lands in a later second.
+            if not sequence.created:
+                raw["created"] = ""
+            self._validate_agent_sequence_payload(raw)
+            fingerprint = self._sequence_fingerprint(raw)
+            source = sequence.path.name if sequence.path else None
+        errors = self.session.sequence_validation_errors(sequence)
+        return {
+            "source": source,
+            "name": sequence.name,
+            "duration_s": sequence.duration,
+            "roles": sorted(str(track.key) for track in sequence.tracks),
+            "fingerprint": fingerprint,
+            "valid_for_current_rig": not errors,
+            "errors": list(errors),
+            "sequence": raw,
+        }
+
+    def _new_saved_sequence_path(self, name):
+        raw_name = str(name or "").strip()
+        if raw_name.endswith(SEQUENCE_SUFFIX):
+            raw_name = raw_name[:-len(SEQUENCE_SUFFIX)]
+        if (not raw_name or raw_name in (".", "..") or len(raw_name) > 160
+                or any(char in raw_name for char in '<>:"/\\|?*')):
+            raise AgentRequestError(
+                "The new sequence name must be a plain local filename.")
+        base = Path(self.session.sequence_dir).resolve()
+        candidate = (base / (raw_name + SEQUENCE_SUFFIX)).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError as exc:
+            raise AgentRequestError(
+                "The new sequence must stay inside the app sequence directory.") from exc
+        if candidate.exists():
+            raise AgentRequestError(
+                f"A saved sequence named '{raw_name}' already exists; choose "
+                "a new variant name.")
+        return candidate, raw_name
+
+    def _create_sequence_variant(self, arguments):
+        if self.session.sequence_state != "idle":
+            raise AgentRequestError(
+                "Finish the recording or replay before creating a variant.")
+        source_name = arguments.get("source_name")
+        expected_fingerprint = str(
+            arguments.get("source_fingerprint") or "").strip()
+        if not expected_fingerprint:
+            raise AgentRequestError(
+                "Read the source sequence first and provide its fingerprint.")
+        source = self._read_sequence(source_name)
+        if source["fingerprint"] != expected_fingerprint:
+            raise AgentRequestError(
+                "The source sequence changed after it was read; read it again.")
+
+        target, clean_name = self._new_saved_sequence_path(
+            arguments.get("new_name"))
+        raw = arguments.get("sequence")
+        self._validate_agent_sequence_payload(raw)
+        raw = dict(raw)
+        raw["name"] = clean_name
+        raw["created"] = datetime.now().isoformat(timespec="seconds")
+        sequence = Sequence.from_dict(raw, path=target)
+        errors = self.session.sequence_validation_errors(sequence)
+        if errors:
+            raise AgentRequestError("\n".join(errors))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with target.open("x", encoding="utf-8") as handle:
+                json.dump(sequence.to_dict(), handle, indent=2, allow_nan=False)
+        except FileExistsError as exc:
+            raise AgentRequestError(
+                f"A saved sequence named '{clean_name}' already exists.") from exc
+        except OSError as exc:
+            raise AgentRequestError(
+                f"Could not save sequence variant '{clean_name}': {exc}") from exc
+        loaded = self.session.set_sequence(sequence)
+        return {
+            "accepted": True,
+            "status": "saved_and_loaded" if loaded else "saved",
+            "loaded_in_editor": bool(loaded),
+            "name": clean_name,
+            "file": target.name,
+            "source_fingerprint": expected_fingerprint,
+            "fingerprint": self._sequence_fingerprint(sequence.to_dict()),
+            "duration_s": sequence.duration,
+            "tracks": len(sequence.tracks),
+        }
+
+    def _prepare_combustion_condition(self, arguments):
+        current = self.session.autocalc_request
+        fields = {
+            "power_kw": getattr(current, "power_kw", None),
+            "h2_fraction": getattr(current, "h2_fraction", None),
+            "phi_stage1": getattr(current, "phi_stage1", None),
+            "phi_global": getattr(current, "phi_global", None),
+            "stage1_split": getattr(current, "split_rich", None),
+        }
+        for key in fields:
+            if arguments.get(key) is not None:
+                fields[key] = arguments[key]
+        missing = [key for key, value in fields.items() if value is None]
+        if missing:
+            raise AgentRequestError(
+                "No complete previous combustion condition is available. "
+                "Provide: " + ", ".join(missing) + ".")
+        config = self.session.autocalc_config
+        if not self.session.autocalc_available or config is None:
+            config, problems = self.session.check_autocalc()
+            if problems or config is None:
+                raise AgentRequestError(
+                    "The current assignments cannot auto-calculate a combustion "
+                    "condition: " + "; ".join(problems))
+
+        def finite_number(key):
+            value = fields[key]
+            if isinstance(value, bool):
+                raise AgentRequestError(f"{key} must be a finite number.")
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise AgentRequestError(
+                    f"{key} must be a finite number.") from exc
+            if not math.isfinite(value):
+                raise AgentRequestError(f"{key} must be a finite number.")
+            return value
+
+        request = rql.AutoCalcRequest(
+            power_kw=finite_number("power_kw"),
+            h2_fraction=finite_number("h2_fraction"),
+            phi_stage1=finite_number("phi_stage1"),
+            phi_global=finite_number("phi_global"),
+            split_rich=finite_number("stage1_split"),
+        )
+        try:
+            targets = rql.auto_calc(
+                request, config=config, calculator=self.session.calc)
+        except (TypeError, ValueError) as exc:
+            raise AgentRequestError(str(exc)) from exc
+        self.session.set_autocalc_request(request)
+        stored = self.session.set_targets(targets)
+        condition = {
+            "power_kw": request.power_kw,
+            "h2_fraction": request.h2_fraction,
+            "phi_stage1": request.phi_stage1,
+            "phi_global": request.phi_global,
+            "stage1_split": request.split_rich,
+        }
+        return {
+            "accepted": True,
+            "status": "targets_prepared_no_flows_sent",
+            "condition": condition,
+            "targets": dict(stored),
+            "apply": (
+                "If the user asked to change the live rig, apply every target "
+                "with set_role_setpoint while live control is enabled."),
+        }
+
+    @staticmethod
+    def _sequence_summary(path, sequence, fingerprint):
+        return {
+            "name": path.name[:-len(SEQUENCE_SUFFIX)],
+            "file": path.name,
+            "sequence_name": sequence.name,
+            "duration_s": sequence.duration,
+            "roles": sorted(str(track.key) for track in sequence.tracks),
+            "fingerprint": fingerprint,
+        }
+
+    def _list_saved_sequences(self):
+        base = Path(self.session.sequence_dir)
+        try:
+            paths = sorted(
+                base.glob(f"*{SEQUENCE_SUFFIX}"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True)[:MAX_LISTED_SEQUENCES]
+        except OSError as exc:
+            raise AgentRequestError(
+                f"Could not list the saved sequence directory: {exc}") from exc
+        entries = []
+        for path in paths:
+            try:
+                loaded_path, sequence, _raw, fingerprint = (
+                    self._load_saved_sequence(path.name, validate_for_rig=False))
+                entry = self._sequence_summary(
+                    loaded_path, sequence, fingerprint)
+                errors = self.session.sequence_validation_errors(sequence)
+                entry.update(runnable=not errors, errors=list(errors))
+            except AgentRequestError as exc:
+                entry = {
+                    "name": path.name[:-len(SEQUENCE_SUFFIX)],
+                    "file": path.name,
+                    "runnable": False,
+                    "errors": [str(exc)],
+                }
+            entries.append(entry)
+        return {"sequences": entries, "count": len(entries)}
+
+    def _check_sequence_authority(self, sequence):
+        if sequence.duration <= 0.0:
+            raise AgentRequestError("The saved sequence has no replay duration.")
+        for track in sequence.tracks:
+            for frame in track.keyframes:
+                self.authority.check_role(track.key, frame.value)
+
+    def _opening_mismatches(self, sequence):
+        timestamp = self.session._latest_timestamp
+        if timestamp is None:
+            raise AgentRequestError(
+                "No measured telemetry is available for the sequence opening.")
+        now = (datetime.now(timestamp.tzinfo)
+               if timestamp.tzinfo is not None else datetime.now())
+        age = max(0.0, (now - timestamp).total_seconds())
+        freshness_s = max(
+            1.0, 3.0 * max(0.1, self.session.poll_interval_s))
+        if age > freshness_s:
+            raise AgentRequestError(
+                "Measured telemetry is stale; wait for a fresh monitoring pass.")
+        samples = self.session.latest_samples()
+        flows = {}
+        for track in sequence.tracks:
+            unit = self.session.unit_for_role(track.key)
+            flows[track.key] = (samples.get(unit, {}) or {}).get("flow")
+        return opening_mismatches(sequence, flows)
+
+    @staticmethod
+    def _format_opening_mismatches(mismatches):
+        return "; ".join(
+            f"{track.key}: needs {wanted:g} SLPM, measured {actual:g} SLPM"
+            for track, wanted, actual in mismatches)
 
     def handle(self, agent_id, method, arguments=None):
         agent_id = str(agent_id or "unknown-agent")
@@ -302,6 +554,10 @@ class AgentDraftService:
                 result = self.session.read_derived_state(
                     duration_s=arguments.get("duration_s", 5.0),
                     tolerance=arguments.get("tolerance", 0.05))
+            elif method == "list_saved_sequences":
+                result = self._list_saved_sequences()
+            elif method == "read_sequence":
+                result = self._read_sequence(arguments.get("name"))
             elif method == "submit_sequence_draft":
                 record["previous"] = (
                     self.session.sequence.name if self.session.sequence else None)
@@ -320,23 +576,17 @@ class AgentDraftService:
                     "name": sequence.name,
                     "tracks": len(sequence.tracks),
                 }
-            elif method == "submit_plan_draft":
+            elif method == "create_sequence_variant":
+                record["previous"] = arguments.get("source_name") or (
+                    self.session.sequence.name if self.session.sequence else None)
+                result = self._create_sequence_variant(arguments)
+                record["new"] = result["file"]
+            elif method == "prepare_combustion_condition":
+                previous = self.session.autocalc_request
                 record["previous"] = (
-                    self.session.experiment_plans.plan.name
-                    if self.session.experiment_plans.plan else None)
-                raw_plan = arguments.get("plan")
-                self._validate_agent_plan_payload(raw_plan)
-                plan = ExperimentPlan.from_dict(raw_plan)
-                self._validate_agent_plan_references(plan)
-                if not self.session.experiment_plans.set_plan(plan):
-                    raise AgentRequestError("The application refused the plan draft.")
-                record["new"] = plan.name
-                result = {
-                    "accepted": True,
-                    "status": "pending_operator_review",
-                    "name": plan.name,
-                    "stages": len(plan.stages),
-                }
+                    previous.__dict__ if previous is not None else None)
+                result = self._prepare_combustion_condition(arguments)
+                record["new"] = result["condition"]
             elif method == "set_role_setpoint":
                 role = str(arguments.get("role", "")).strip()
                 value = arguments.get("value")
@@ -349,34 +599,16 @@ class AgentDraftService:
                     "role": role, "unit": unit, "setpoint": previous}
                 record["new"] = {
                     "role": role, "unit": unit, "setpoint": float(value)}
-                record["approval"] = "required"
-                if self._approve_action is None:
-                    raise AgentRequestError(
-                        "No operator approval UI is available for live control.")
-                approved = bool(self._approve_action({
-                    "agent": agent_id,
-                    "role": role,
-                    "unit": unit,
-                    "previous": previous,
-                    "value": float(value),
-                    "envelope": dict(role_envelope),
-                }))
-                if not approved:
-                    record["approval"] = "rejected"
-                    raise AgentRequestError("Operator rejected the setpoint request.")
-                record["approval"] = "approved"
-                # The dialog may have remained open while the rig changed, so
-                # validate the full envelope again.
-                self.authority.check_role(role, value)
+                record["approval"] = "live_toggle"
                 self._audit_before_live_execution(
-                    record, "approved_for_execution")
+                    record, "armed_for_execution")
                 # Audit I/O may block on a synced filesystem. Expiry and all
                 # live rig invariants therefore get one final check at the
                 # session boundary, after the durable record exists.
                 self.authority.check_role(role, value)
                 if not self.session.set_role_setpoint(role, value):
                     raise AgentRequestError(
-                        "The session refused the approved setpoint.")
+                        "The session refused the setpoint.")
                 result = {
                     "accepted": True,
                     "status": "queued",
@@ -384,31 +616,54 @@ class AgentDraftService:
                     "unit": unit,
                     "setpoint": float(value),
                 }
-            else:
-                plan = self.session.experiment_plans.plan
-                metadata = self.authority.check_armed_plan(plan)
+            else:  # run_saved_sequence
+                if self.session.sequence_state != "idle":
+                    raise AgentRequestError(
+                        "A sequence is already recording or replaying.")
+                path, sequence, raw_sequence, fingerprint = (
+                    self._load_saved_sequence(arguments.get("name")))
+                self._check_sequence_authority(sequence)
+                mismatches = self._opening_mismatches(sequence)
+                if mismatches:
+                    raise AgentRequestError(
+                        "The rig does not match the sequence opening: "
+                        + self._format_opening_mismatches(mismatches))
+                metadata = self._sequence_summary(path, sequence, fingerprint)
                 record["previous"] = {
-                    "plan": metadata["name"],
-                    "state": self.session.experiment_plans.state,
+                    "sequence": (self.session.sequence.name
+                                 if self.session.sequence else None),
+                    "state": self.session.sequence_state,
                 }
-                record["new"] = {"state": "running"}
+                record["new"] = {
+                    "state": "replaying",
+                    "metadata": metadata,
+                    "sequence": raw_sequence,
+                }
                 record["approval"] = "armed_envelope"
                 self._audit_before_live_execution(
                     record, "armed_for_execution")
-                # Consume before dispatch: one operator arming authorises one
-                # start attempt, not repeated retries if the session refuses.
-                metadata, frozen_plan, frozen_sequences = (
-                    self.authority.consume_plan_bundle(plan))
-                if not self.session.experiment_plans.start(
-                        frozen_plan=frozen_plan,
-                        frozen_sequences=frozen_sequences,
-                        agent_started=True):
-                    raise AgentRequestError("The application refused to start the armed plan.")
+                # Re-read after durable audit I/O, then re-check authority and
+                # the measured opening so neither a file edit nor a rig change
+                # can slip between validation and dispatch.
+                _path, sequence, _raw, current_fingerprint = (
+                    self._load_saved_sequence(path.name))
+                if current_fingerprint != fingerprint:
+                    raise AgentRequestError(
+                        "The saved sequence changed before it could start.")
+                self._check_sequence_authority(sequence)
+                mismatches = self._opening_mismatches(sequence)
+                if mismatches:
+                    raise AgentRequestError(
+                        "The rig moved away from the sequence opening before "
+                        "start: " + self._format_opening_mismatches(mismatches))
+                if not self.session.start_replay(sequence, repeats=1):
+                    raise AgentRequestError(
+                        "The application refused to start the saved sequence.")
                 result = {
                     "accepted": True,
                     "status": "running",
                     "name": metadata["name"],
-                    "fingerprint": metadata["fingerprint"],
+                    "fingerprint": fingerprint,
                 }
             record["result"] = "accepted"
             return result

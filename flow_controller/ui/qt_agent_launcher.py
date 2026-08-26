@@ -20,10 +20,12 @@ import threading
 import uuid
 from typing import Callable
 
-from PySide6.QtCore import QObject, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QObject, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
+    QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QPlainTextEdit,
+    QPushButton,
 )
 
 import pyte
@@ -36,6 +38,21 @@ POLL_INTERVAL_MS = 500
 TERMINAL_FLUSH_INTERVAL_MS = 33
 TERMINAL_MAX_PENDING_CHARS = 256 * 1024
 TERMINAL_MAX_FLUSH_CHARS = 32 * 1024
+
+
+def _provider_icon(key, side):
+    """Render bundled SVGs without depending on Qt's optional icon plugin."""
+    renderer = QSvgRenderer(str(
+        Path(__file__).with_name('assets') / f'{key}.svg'))
+    if not renderer.isValid():
+        return QIcon()
+    pixels = max(1, int(side))
+    pixmap = QPixmap(pixels, pixels)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class _WinPtyProcess:
@@ -222,7 +239,7 @@ AGENT_PROFILES = {
         arguments=('--setting-sources', '', '--disable-slash-commands',
                    '--permission-mode', 'default', '--tools', 'Read'),
         description=('Claude Code: no user/project settings or slash commands; '
-                     'only Read and the allowlisted rig MCP tools are offered; '
+                     'only Read and pre-authorized rig MCP tools are offered; '
                      'live rig authority remains default-off in the app.'),
     ),
     'codex': AgentProfile(
@@ -232,10 +249,27 @@ AGENT_PROFILES = {
         arguments=('--sandbox', 'read-only', '--ask-for-approval', 'on-request'),
         description=('Codex: read-only sandbox and approval requests. The Codex '
                      'CLI has no public flag that makes this pane a hard '
-                     'shell-denial boundary; live MCP actions still require '
-                     'the app toggle and operator approval.'),
+                     'shell-denial boundary; allowlisted rig MCP tools are '
+                     'pre-authorized only while the app toggle permits them.'),
     ),
 }
+
+AUTH_COMMANDS = {
+    'claude': ('auth', 'login'),
+    'codex': ('login',),
+}
+
+SETUP_GUIDES = {
+    'claude': 'https://docs.anthropic.com/en/docs/claude-code/getting-started',
+    'codex': 'https://learn.chatgpt.com/docs/codex/cli',
+}
+
+
+def authentication_command(agent: str, executable: str):
+    """Build the provider-owned interactive login command."""
+    if agent not in AUTH_COMMANDS:
+        raise ValueError(f'Unknown agent launcher: {agent}')
+    return [str(executable), *AUTH_COMMANDS[agent]]
 
 
 def _bundled_codex_path(local_appdata=None):
@@ -287,41 +321,10 @@ def discover_agents(which: Callable[[str], str | None] | None = None, *,
 
 MCP_TOOL_NAMES = (
     'read_snapshot', 'read_history', 'read_derived_state',
-    'submit_sequence_draft', 'submit_plan_draft',
-    'set_role_setpoint', 'start_armed_plan',
+    'list_saved_sequences', 'read_sequence', 'submit_sequence_draft',
+    'create_sequence_variant', 'prepare_combustion_condition',
+    'set_role_setpoint', 'run_saved_sequence',
 )
-
-
-def format_plan_authority_review(plan):
-    """Render every executable plan decision for the arming confirmation."""
-    if plan is None:
-        return ""
-    lines = [f"Abort procedure: {plan.abort.action}"]
-    for index, stage in enumerate(plan.stages, 1):
-        if stage.setpoints:
-            command = ", ".join(
-                f"{role}={value:g} SLPM"
-                for role, value in sorted(stage.setpoints.items()))
-        else:
-            command = f"sequence {stage.sequence}"
-        lines.append(f"Stage {index}: {stage.name}")
-        lines.append(f"  Command: {command}")
-        lines.append(
-            f"  Minimum dwell: {stage.min_dwell_s:g} s; timeout: "
-            f"{stage.timeout_s:g} s → {stage.on_timeout}")
-        if stage.condition is not None:
-            targets = ", ".join(
-                f"{role}={value:g}"
-                for role, value in sorted(stage.condition.targets.items()))
-            lines.append(
-                f"  Advance when {stage.condition.metric} [{targets}] is within "
-                f"±{stage.condition.tolerance:g} for "
-                f"{stage.condition.stable_s:g} s")
-        else:
-            lines.append("  Advance after the minimum dwell/sequence completes")
-        if stage.next_stage:
-            lines.append(f"  Next stage override: {stage.next_stage}")
-    return "\n".join(lines)
 
 
 def _toml_string(value):
@@ -360,7 +363,10 @@ def launch_command(agent: str, executable: str, project_dir: Path, *,
             }
             arguments.extend((
                 '--strict-mcp-config', '--mcp-config',
-                json.dumps(config, separators=(',', ':'))))
+                json.dumps(config, separators=(',', ':')),
+                '--allowedTools', ','.join(
+                    f'mcp__flow_controller__{name}'
+                    for name in MCP_TOOL_NAMES)))
         else:
             environment_table = '{' + ','.join(
                 f'{key}={_toml_string(value)}'
@@ -368,7 +374,8 @@ def launch_command(agent: str, executable: str, project_dir: Path, *,
             server_table = (
                 '{command=' + _toml_string(python_executable)
                 + ',args=' + json.dumps(server_args)
-                + ',env=' + environment_table + '}')
+                + ',env=' + environment_table
+                + ',default_tools_approval_mode="approve"}')
             arguments.extend((
                 # Replace the whole configured MCP table: user-configured
                 # external tools must not leak into this restricted session.
@@ -403,6 +410,7 @@ class AgentProcessManager(QObject):
         self._process = None
         self._reader_thread = None
         self._agent = None
+        self._session_kind = None
         self._stopping = False
         self._terminal_lock = threading.Lock()
         self._terminal_pending = ''
@@ -439,7 +447,8 @@ class AgentProcessManager(QObject):
 
     def live_authority_available(self):
         """A running supported profile may be explicitly armed in the app."""
-        return self.is_running() and self._agent in AGENT_PROFILES
+        return (self.is_running() and self._session_kind == 'agent'
+                and self._agent in AGENT_PROFILES)
 
     def start(self, agent: str):
         """Launch *agent* in the card's Windows ConPTY terminal."""
@@ -464,6 +473,45 @@ class AgentProcessManager(QObject):
             agent, executable, self.project_dir, mcp=mcp,
             python_executable=self._python_executable,
             agent_id=f'{agent}-{uuid.uuid4()}')
+        return self._spawn(
+            agent, command, session_kind='agent',
+            status=(f'{AGENT_PROFILES[agent].label} running in the embedded '
+                    'terminal'))
+
+    def start_auth(self, agent: str):
+        """Run the provider's sign-in flow in the embedded terminal.
+
+        Authentication is deliberately a separate session kind: no MCP
+        gateway is started and the live-control toggle cannot be armed. The
+        provider CLI owns the credentials; this application never reads or
+        stores them.
+        """
+        if agent not in AGENT_PROFILES:
+            raise ValueError(f'Unknown agent launcher: {agent}')
+        self.refresh_available_agents()
+        if self._process is not None and self._process.poll() is not None:
+            self._clear_finished()
+        if self.is_running():
+            self._set_status(
+                'busy', 'A terminal session is already running. Stop it before '
+                'starting sign-in.')
+            return False
+        executable = self._available.get(agent)
+        if not executable:
+            self._set_status(
+                'error', f'{AGENT_PROFILES[agent].label} is not installed. '
+                'Use Agent setup to open its installation guide.')
+            return False
+        self._revoke_live('agent sign-in started')
+        if self._gateway is not None:
+            self._gateway.shutdown()
+        return self._spawn(
+            agent, authentication_command(agent, executable),
+            session_kind='auth',
+            status=f'Signing in to {AGENT_PROFILES[agent].label}')
+
+    def _spawn(self, agent, command, *, session_kind, status):
+        """Start one owned terminal process from an argument list."""
         try:
             if self._process_factory is None:
                 if self._platform != 'nt':
@@ -476,13 +524,14 @@ class AgentProcessManager(QObject):
                     command, cwd=str(self.project_dir), shell=False)
         except (ImportError, OSError, RuntimeError) as exc:
             self._process = None
-            self._revoke_live("agent launch failed")
+            self._revoke_live('terminal launch failed')
             if self._gateway is not None:
                 self._gateway.shutdown()
-            self._set_status('error', f'Could not launch {AGENT_PROFILES[agent].label}: {exc}')
+            self._set_status('error', f'Could not launch terminal: {exc}')
             return False
 
         self._agent = agent
+        self._session_kind = session_kind
         self._stopping = False
         self._discard_terminal_output()
         self.terminal_cleared.emit()
@@ -491,10 +540,8 @@ class AgentProcessManager(QObject):
         self._poll_timer.start()
         self._terminal_timer.start()
         self._set_status(
-            'running',
-            f'{AGENT_PROFILES[agent].label} running in the embedded terminal '
-            f'(PID {getattr(self._process, "pid", "?")}).',
-        )
+            'running', f'{status} '
+            f'(PID {getattr(self._process, "pid", "?")}).')
         return True
 
     def stop(self):
@@ -638,9 +685,11 @@ class AgentProcessManager(QObject):
     def _clear_finished(self):
         process = self._process
         agent = self._agent
+        session_kind = self._session_kind
         stopping = self._stopping
         self._process = None
         self._agent = None
+        self._session_kind = None
         self._stopping = False
         self._poll_timer.stop()
         self._flush_terminal_output()
@@ -653,7 +702,13 @@ class AgentProcessManager(QObject):
         if stopping:
             self._set_status('idle', 'Agent stopped — controller setpoints are unchanged.')
         elif code in (0, None):
-            self._set_status('idle', f'{AGENT_PROFILES[agent].label} exited normally.')
+            if session_kind == 'auth':
+                self._set_status(
+                    'idle', f'{AGENT_PROFILES[agent].label} sign-in finished. '
+                    'You can now launch the agent.')
+            else:
+                self._set_status(
+                    'idle', f'{AGENT_PROFILES[agent].label} exited normally.')
         else:
             self._set_status('error', f'{AGENT_PROFILES[agent].label} exited with code {code}.')
 
@@ -721,9 +776,8 @@ class AgentLauncherPane(Card):
         self.live_toggle.setProperty('variant', 'quiet')
         self.live_toggle.setProperty('density', 'compact')
         self._live_tooltip = (
-            'Default off. When enabled, each individual setpoint still needs '
-            'operator confirmation; the currently loaded plan may be armed '
-            'inside its exact frozen envelope.')
+            'Default off. One warning enables automatic setpoint changes and '
+            'saved-sequence starts within the frozen envelope until revoked.')
         self.live_toggle.setToolTip(self._live_tooltip)
         self.live_toggle.toggled.connect(self._on_live_toggled)
         authority_row.addWidget(self.live_toggle)
@@ -743,8 +797,7 @@ class AgentLauncherPane(Card):
             button.setProperty('variant', 'quiet')
             side = theme.scale(36)
             button.setFixedSize(side, side)
-            button.setIcon(QIcon(str(
-                Path(__file__).with_name('assets') / f'{key}.svg')))
+            button.setIcon(_provider_icon(key, theme.scale(22)))
             button.setIconSize(QSize(theme.scale(22), theme.scale(22)))
             button.setAccessibleName(f'Launch {profile.label}')
             button.setEnabled(key in manager.available_agents)
@@ -754,6 +807,27 @@ class AgentLauncherPane(Card):
             row.addWidget(button)
             self.buttons[key] = button
         row.addStretch(1)
+        self.setup_button = QPushButton('Agent setup')
+        self.setup_button.setProperty('variant', 'quiet')
+        self.setup_button.setProperty('density', 'compact')
+        self.setup_button.setToolTip(
+            'Install, sign in, or refresh detection for Codex and Claude Code.')
+        setup_menu = QMenu(self.setup_button)
+        self.sign_in_actions = {}
+        for key, profile in AGENT_PROFILES.items():
+            action = setup_menu.addAction(
+                f'Sign in to {profile.label}',
+                lambda _checked=False, name=key: self._start_sign_in(name))
+            self.sign_in_actions[key] = action
+        setup_menu.addSeparator()
+        for key, profile in AGENT_PROFILES.items():
+            setup_menu.addAction(
+                f'{profile.label} installation guide…',
+                lambda _checked=False, name=key: self._open_setup_guide(name))
+        setup_menu.addSeparator()
+        setup_menu.addAction('Refresh agent detection', self._refresh_agents)
+        self.setup_button.setMenu(setup_menu)
+        row.addWidget(self.setup_button)
         self.stop_button = QPushButton('Stop agent')
         self.stop_button.setProperty('variant', 'danger')
         self.stop_button.setProperty('density', 'compact')
@@ -789,7 +863,6 @@ class AgentLauncherPane(Card):
         manager.terminal_output.connect(self._on_terminal_output)
         manager.terminal_cleared.connect(self._clear_terminal)
         if self.service is not None:
-            self.service.set_approval_handler(self._confirm_setpoint)
             self.service.authority.changed.connect(self._on_authority_changed)
         self._on_status_changed('running' if manager.is_running() else 'idle',
                                 manager.status)
@@ -816,11 +889,36 @@ class AgentLauncherPane(Card):
             Qt.FocusPolicy.StrongFocus if active else Qt.FocusPolicy.NoFocus)
         for key, button in self.buttons.items():
             button.setEnabled(not active and key in self.manager.available_agents)
+        self.setup_button.setEnabled(not active)
         live_available = (
             active and self.service is not None
             and self.manager.live_authority_available())
         self.live_toggle.setEnabled(live_available)
         self.live_toggle.setToolTip(self._live_tooltip)
+
+    def _start_sign_in(self, agent):
+        if agent not in self.manager.available_agents:
+            answer = QMessageBox.information(
+                self, f'Install {AGENT_PROFILES[agent].label}',
+                f'{AGENT_PROFILES[agent].label} was not found on this computer. '
+                'Open the official installation guide?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._open_setup_guide(agent)
+            return
+        self.manager.start_auth(agent)
+
+    def _open_setup_guide(self, agent):
+        QDesktopServices.openUrl(QUrl(SETUP_GUIDES[agent]))
+
+    def _refresh_agents(self):
+        available = self.manager.refresh_available_agents()
+        for key, button in self.buttons.items():
+            button.setEnabled(not self.manager.is_running() and key in available)
+        found = ', '.join(AGENT_PROFILES[key].label for key in available)
+        self.manager._set_status(
+            'idle', f'Agent detection refreshed: {found or "none installed"}.')
 
     def _clear_terminal(self):
         self._terminal_screen.reset()
@@ -885,11 +983,13 @@ class AgentLauncherPane(Card):
     def _on_live_toggled(self, checked):
         if self._live_guard:
             return
-        if self.service is None or not self.manager.is_running():
+        if (self.service is None
+                or not self.manager.live_authority_available()):
             self._set_live_checked(False)
             QMessageBox.warning(
                 self, 'Live agent control',
-                'Launch an agent before enabling live authority.')
+                'Launch an agent session before enabling live authority. '
+                'Setup and sign-in sessions cannot control the rig.')
             return
         if not checked:
             try:
@@ -911,18 +1011,11 @@ class AgentLauncherPane(Card):
             f"  {role} → Unit {policy['unit']}: max {policy['max_flow']:g} "
             f"SLPM, ramp {policy['ramp_rate']:g} SLPM/s"
             for role, policy in sorted(roles.items()))
-        plan = envelope.get('plan')
-        plan_line = (f"Armed plan: {plan['name']} (one start only)\n"
-                     f"SHA-256: {plan['fingerprint']}"
-                     if plan else 'Armed plan: none')
-        loaded_plan = None
-        session = getattr(self.service, 'session', None)
-        if session is not None:
-            loaded_plan = getattr(
-                getattr(session, 'experiment_plans', None), 'plan', None)
-        plan_review = format_plan_authority_review(loaded_plan)
-        if plan_review:
-            plan_line += "\n\nExecutable plan review:\n" + plan_review
+        sequence_authority = (
+            "Saved sequences: while this toggle is on, the agent may select "
+            "any valid .fcseq.json file in the app's sequence folder. Every "
+            "track and setpoint must fit the limits below. A sequence runs "
+            "once and is refused unless measured flows match its opening.")
         profile_warning = ""
         if self.manager.active_agent == 'codex':
             profile_warning = (
@@ -933,13 +1026,14 @@ class AgentLauncherPane(Card):
             self, 'Enable live agent control?',
             "Live control stays enabled until you switch it off or the app "
             "revokes it after a safety-relevant change.\n\n"
-            "Every individual setpoint still opens a separate operator "
-            "confirmation. The agent cannot exceed these snapshotted limits:\n"
-            f"{role_lines}\n\n{plan_line}\n\n"
+            "THIS IS THE ONLY CONTROL WARNING. After you enable it, the agent "
+            "may change setpoints automatically without asking again. It "
+            "cannot exceed these snapshotted limits:\n"
+            f"{role_lines}\n\n{sequence_authority}\n\n"
             "Disconnection, communication fault, monitoring stop, "
             "assignment/limit/ramp changes, "
-            "or agent termination revoke authority. A plan already running "
-            "continues to its declared end or abort procedure."
+            "or agent termination revoke authority. A sequence already "
+            "running continues through the existing replay controls."
             f"{profile_warning}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -954,36 +1048,29 @@ class AgentLauncherPane(Card):
             QMessageBox.critical(self, 'Cannot enable live control', str(exc))
         self._sync_authority()
 
-    def _confirm_setpoint(self, action):
-        previous = action.get('previous')
-        previous_text = 'unknown' if previous is None else f'{float(previous):g}'
-        answer = QMessageBox.warning(
-            self, 'Approve agent setpoint?',
-            f"Agent: {action['agent']}\n"
-            f"Role: {action['role']} (Unit {action['unit']})\n"
-            f"Previous command: {previous_text} SLPM\n"
-            f"Requested command: {action['value']:g} SLPM\n\n"
-            "Approve this one action? The request will be revalidated against "
-            "the live assignment, MAX FLOW, ramp ceiling, and toggle state before "
-            "it is queued.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        return answer == QMessageBox.StandardButton.Yes
-
     def _show_help(self):
         QMessageBox.information(
             self, 'Agent launcher',
             'This pane starts an interactive agent in its embedded terminal at '
-            'the project directory. Claude Code is launched with Read plus the '
+            'the project directory. Agent setup runs the provider-owned sign-in '
+            'flow in this same terminal; the app never reads or stores account '
+            'credentials. Claude Code is launched with Read plus the '
             'allowlisted rig tools; Codex is launched in its read-only sandbox '
-            'and asks for approval. Codex still retains shell access, so its '
+            'and may still ask for approval for shell operations. Codex retains '
+            'shell access, so its '
             'live-control confirmation includes an additional warning: the '
             'sandbox is not a hard COM-port security boundary.\n\n'
             'The flow-controller MCP server exposes telemetry/configuration reads '
-            'and draft submission. Live tools are default-off. The operator '
-            'must enable the red toggle; every setpoint then needs '
-            'a separate confirmation, and only the exact armed plan can be '
-            'started once. Stopping an agent '
+            'and sequence draft submission. Its instructions tell the agent to '
+            'use MCP for every rig read and command, so normal prompts do not '
+            'need to repeat that. Live tools are default-off. The '
+            'operator accepts one warning by enabling the red toggle. The agent '
+            'may then change setpoints automatically and list or run '
+            'saved sequences once per request when every command fits the armed '
+            'limits and the measured flows match the sequence opening. The '
+            'launcher is more than a generic terminal because '
+            'it binds temporary MCP credentials and the live toggle to this exact '
+            'child process, then revokes them when that process ends. Stopping an agent '
             'ends that process; it never zeroes controllers or changes their '
             'setpoints. These profiles are not a hard security boundary for '
             'the computer or the rig. Keep independent physical interlocks in use.',

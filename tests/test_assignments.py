@@ -5,6 +5,7 @@ from flow_controller.domain.assignments import (
     RICH_QUENCH,
     assess_autocalc,
 )
+from flow_controller.domain import roles
 
 
 class AssignmentTests(unittest.TestCase):
@@ -33,7 +34,18 @@ class AssignmentTests(unittest.TestCase):
         self.assertIsNone(mode)
         self.assertEqual(problems, ["Missing for Rich + quench-air: CH4/Pilot"])
 
+    def test_methane_can_be_assigned_to_both_stages_and_the_pilot(self):
+        assignments, custom = roles.build_assignments({
+            'A': ('CH4', 'Zone 1'),
+            'B': ('CH4', 'Zone 2'),
+            'C': ('CH4', 'Pilot'),
+        })
+
+        self.assertEqual(assignments['ch4_stage1'], 'A')
+        self.assertEqual(assignments['ch4_stage2'], 'B')
+        self.assertEqual(assignments['ch4_pilot'], 'C')
+        self.assertEqual(custom, {})
+
 
 if __name__ == "__main__":
     unittest.main()
-

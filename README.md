@@ -39,7 +39,7 @@ RQL assignment does not switch modes automatically.
 | Mode | Use it for | Calculations |
 | --- | --- | --- |
 | **Standard** | General multi-channel control | Totals all assigned controllers by gas |
-| **Staged (RQL)** | Rich, quench, lean, and pilot operation | Uses each controller's gas and stage role |
+| **Staged (RQL)** | Stage 1, Stage 2, and pilot operation | Uses each controller's gas and stage role |
 
 ### Standard
 
@@ -58,17 +58,21 @@ left out of stage-aware calculations.
 
 ### Staged (RQL)
 
-Staged mode models these seven possible process lines:
+Staged mode groups controllers by stage:
 
-| Zone | Required roles |
+| Zone | Supported gases |
 | --- | --- |
-| Stage 1 (rich) | NH3, H2, Air |
-| Stage 2 (lean) | NH3, H2, Air |
+| Stage 1 | NH3, H2, CH4, Air |
+| Stage 2 | NH3, H2, CH4, Air |
 | Pilot | CH4 |
+
+CH4 assigned directly to Stage 1 or Stage 2 is included in that stage's live
+combustion estimate. The CH4 pilot is also included in Stage 1. Automatic RQL
+target calculation still uses its established seven required lines:
 
 Auto-calculation is enabled for either of these assignments:
 
-- **Full RQL:** all seven roles.
+- **Full RQL:** NH3, H2, and Air in both stages, plus the CH4 pilot.
 - **Rich + quench-air:** Stage 1 fuels and air, Stage 2 air, and the CH4 pilot.
 
 The calculator accepts firing rate, hydrogen fraction by volume, Stage 1 fuel
@@ -126,20 +130,20 @@ port as unresponsive and restarts monitoring. **Reconnect** closes and reopens
 the connections while preserving assignments, history, and confirmed
 setpoints.
 
-### Full scale and ramp rate
+### Controller settings
 
-Each controller card remembers three settings:
+Open the hamburger menu on a live controller card to edit these settings:
 
 | Setting | Effect |
 | --- | --- |
 | **FULL SCALE** | Sets the SLPM span of the card's bar. It is a display setting, not a hardware limit. Enter the value printed on the meter, or use `auto` or `0` for an automatic span. |
 | **MAX FLOW** | Declares the largest setpoint this application may command to the controller. It applies at enqueue and again immediately before hardware writes/restores. Lowering it below a live last-commanded value requests verified zero for that controller. `none` removes the declaration. |
 | **RAMP** | Limits command changes in SLPM/s. It applies to typed, batch, calculated, and replayed setpoints. |
-| **OFF** | Disables application-side ramping for that controller, including the built-in minimum move time for air and pilot lines. |
+| **OFF** | Disables application-side ramping for that controller, including the built-in minimum move time for air and pilot lines. New controllers start in this state. |
 
-When no explicit rate is declared, CH4 pilot and air lines are still spread
-over a minimum ten-second move. Turning **OFF** on for one of these lines removes
-that protection and is shown as a persistent red latch.
+Ramping defaults to **OFF**, so setpoints are written as steps. To use a ramp,
+clear the red **OFF** latch and enter a rate. With ramping enabled but no rate
+declared, CH4 pilot and air lines still use the built-in minimum ten-second move.
 
 ## Sequences
 
@@ -190,7 +194,7 @@ During replay:
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
-## Agent launcher and automated test sequences
+## Agent launcher and saved sequences
 
 The collapsible **Agent launcher** in the Operation sidebar opens Claude Code
 or Codex in an embedded Windows terminal and connects a local, authenticated
@@ -199,55 +203,63 @@ directly to the running agent without a separate message field. The terminal
 tracks the visible sidebar width and resizes its PTY columns so output wraps at
 the card edge. Claude and Codex are launched from their compact provider icons;
 hover either icon for its restricted-profile details.
+On a new PC, open **Agent setup** to sign in, refresh CLI detection, or open the
+official installation guide. Sign-in runs in the same embedded terminal through
+the provider CLI. The app does not read or store the account credentials.
 Claude is given an explicit Read-plus-allowlisted-MCP tool profile. Codex runs
 in its read-only sandbox but retains shell access, so its live-control arming
 dialog carries an additional warning. Live authority is always off when either
-agent starts. Both agents can:
+agent starts. The launcher injects the MCP server and its rig-only instructions,
+so prompts do not need to say "use MCP." Tool selection remains model-driven;
+Codex users can enter `/mcp` to verify that `flow_controller` is connected.
+Both agents can:
 
 - read copied assignments, Alicat telemetry, recent history, derived state,
-  ramp policies, and declared command ceilings;
-- submit a sequence draft to the existing sequence editor; or
-- submit an automated test-sequence draft for operator review;
-- request a supervised role setpoint, which always opens a previous/new
-  confirmation in the application; or
-- start the one exact loaded plan that the operator armed, once.
+  ramp policies, declared command ceilings, and the last calculated combustion
+  condition;
+- list saved sequences and see whether the current rig can run each one;
+- read every keyframe in the selected or a named saved sequence;
+- submit a sequence draft to the existing sequence editor, or save a validated
+  non-overwriting variant of a sequence it just read;
+- recalculate targets after changing any combination of power, hydrogen
+  fraction, Stage 1 equivalence ratio, global equivalence ratio, and Stage 1
+  fuel split, filling omitted values from the last complete calculation;
+- change role setpoints automatically while live control is enabled; or
+- run a saved sequence once per request while live control is enabled.
+
+The prompt carries the operator's intent; the launcher does not try to parse a
+fixed list of commands. The agent fetches structured context through MCP when it
+needs it. It can therefore make other sequence variations—not only a faster
+transition or a different equivalence ratio—while the app continues to validate
+the resulting file and refuses to overwrite an existing sequence. Preparing a
+combustion condition only updates the calculated targets. If the prompt asks to
+apply it to the live rig, the agent must send every returned target through the
+same toggle-authorized setpoint boundary.
 
 The red **LIVE CONTROL** toggle is default-off and is enabled while either
-supported agent is running. Enabling it shows the captured
-role-to-unit mapping, MAX FLOW, ramp ceilings, exact loaded-plan
-fingerprint, every plan stage and command, timing/condition rules, and abort
-procedure before confirmation.
+supported agent is running. Enabling it shows the captured role-to-unit
+mapping, MAX FLOW, and ramp ceilings. It also explains that the agent may
+set values without further confirmation and select any valid `.fcseq.json`
+file in the app's sequence folder. This is the only control warning.
 Only roles with both a positive MAX FLOW and positive enabled ramp rate enter
 the envelope. Authority remains enabled until the toggle is switched off, and
 is also revoked by stopping the agent, a communication fault, disconnecting,
-stopping monitoring, or
-changing assignments, limits, ramps, or the loaded plan. Turning it off prevents new agent actions; it does
-not silently stop or zero a plan already running, which continues to its
-declared end or abort procedure. An agent-started plan is aborted through that
-procedure if a ramp or MAX FLOW setting later changes, so future stages cannot
-escape the approved envelope. There is no agent zero-flow tool. Agent read calls
+stopping monitoring, or changing assignments, limits, or ramps. Turning it off
+prevents new agent actions. It does not silently stop or zero a sequence that
+is already replaying; use the existing replay controls for that run. There is
+no agent zero-flow tool. Agent read calls
 are rate-limited to 10 calls/s per method and agent before audit I/O (throttled
-calls are not logged individually), and agent plan drafts may reference only
-bounded local sequence files in the app's sequence directory. The phased
-agent and authority audit includes a durable pre-execution record for live
-actions and is written to
+calls are not logged individually). Saved-sequence names cannot contain paths,
+files are size-bounded, and each file is re-read after the durable
+pre-execution audit. Every track and keyframe must remain inside the frozen
+authority envelope. Replay is refused if another sequence is active or the
+measured flows do not match its opening. The audit is written to
 `Documents\Flow Controller\agent_audit.jsonl`.
 
-Open **Sequences → Automated Test Sequence** on the Operation tab to load a
-`.fcplan.json` file. This is part of the existing Sequences card, not a separate
-card. Starting always presents the labelled stages, their timeout policy, and
-the required abort procedure for explicit approval. Tests use fresh Alicat
-telemetry and stop advancing if readings become stale. A timeout aborts through
-the declared verified `zero_all` or `zero_fuel` procedure unless that stage
-explicitly requests a hold or operator decision. Default abort deadlines also
-have an independent watchdog that queues priority zero on the serial monitor
-even if the Qt event loop is stalled.
-
-An example plan is provided at `docs/example-experiment.fcplan.json`. Its role
-names and setpoints are illustrative; edit them for the current assignments and
-declare **MAX FLOW** for every controlled line before testing. Test plans first
-with the simulated rig and then in an attended, non-combusting commissioning
-run.
+There is no separate automated-test editor in the Sequences card. Build and
+save ordinary flow sequences, then ask the agent to choose and run them in the
+order required by the test. This keeps one sequence format and one replay path
+for manual and agent-driven operation.
 
 ### Sequencing in operation
 
@@ -370,11 +382,12 @@ The card reports:
 
 - equivalence ratio, `phi`;
 - fuel firing rate from lower heating value; and
-- cold-flow inlet bulk velocity when an inlet diameter has been declared.
+- cold-flow inlet bulk velocity when an inlet diameter or area has been declared.
 
 In Staged mode the pilot CH4 contributes to Stage 1 and the global result. In
-Standard mode all assigned controllers are aggregated by gas. Use the menu on
-the combustion card to set inlet diameters, the number of Stage 2 inlets, and
+In Standard mode, all assigned controllers are aggregated by gas. Use the menu on
+the combustion card to enter a circular inlet diameter or the actual inlet area
+for square and other shapes. The same menu sets the number of Stage 2 inlets and
 the display refresh interval. Pausing the card affects display only; logging
 continues to calculate its equivalence-ratio columns.
 
@@ -405,10 +418,13 @@ Firing rate is the sum over all fuel streams:
 power [kW] = sum(flow_fuel * LHV_fuel * molar_mass_fuel / (24.465 * 60))
 ```
 
-For a circular inlet with diameter `d` in millimetres:
+For a circular inlet with diameter `d` in millimetres, the app calculates its
+area. For a non-circular inlet, enter area `A` directly in square millimetres.
 
 ```text
-velocity [m/s] = (total_flow / 60000) / (pi * (d/1000)^2 / 4)
+A [m2] = pi * (d/1000)^2 / 4       # circular diameter input
+A [m2] = entered_area_mm2 / 1000000 # direct area input
+velocity [m/s] = (total_flow / 60000) / A
 ```
 
 The total flow used for velocity includes non-reacting gases because they still

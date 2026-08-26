@@ -18,11 +18,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from flow_controller.ui import qt_theme as theme
 from flow_controller.ui.qt_agent_launcher import (
     AGENT_PROFILES, AgentLauncherPane, AgentProcessManager,
-    _WinPtyProcess, discover_agents, format_plan_authority_review,
-    launch_command,
+    _WinPtyProcess, discover_agents, authentication_command, launch_command,
 )
-from flow_controller.core.experiment_plan import (
-    AbortProcedure, ExperimentPlan, PlanStage, StabilityCondition)
 
 
 class FakeProcess:
@@ -79,10 +76,6 @@ class FakeAuthority(QObject):
 class FakeAuthorityService:
     def __init__(self):
         self.authority = FakeAuthority()
-        self.approval_handler = None
-
-    def set_approval_handler(self, callback):
-        self.approval_handler = callback
 
     def preview_live_authority(self):
         return self.authority.envelope
@@ -132,6 +125,37 @@ class AgentLauncherTests(unittest.TestCase):
         ])
         self.assertEqual(command[-2:], ['--cd', 'C:\\project'])
 
+    def test_provider_login_commands_are_explicit_argument_lists(self):
+        self.assertEqual(
+            authentication_command('codex', 'codex.exe'),
+            ['codex.exe', 'login'])
+        self.assertEqual(
+            authentication_command('claude', 'claude.exe'),
+            ['claude.exe', 'auth', 'login'])
+
+    def test_sign_in_uses_terminal_without_starting_mcp_or_live_authority(self):
+        process = FakeProcess()
+        gateway = Mock()
+        service = FakeAuthorityService()
+        popen = Mock(return_value=process)
+        manager = AgentProcessManager(
+            Path('C:/flow-controller-project'),
+            which={'codex': 'C:/agents/codex.exe'}.get,
+            process_factory=popen, platform='nt', gateway=gateway,
+            authority_service=service)
+        self.addCleanup(manager.shutdown)
+        pane = AgentLauncherPane(manager, collapsed=False)
+        self.addCleanup(pane.close)
+
+        self.assertTrue(manager.start_auth('codex'))
+
+        self.assertEqual(
+            popen.call_args.args[0], ['C:/agents/codex.exe', 'login'])
+        gateway.start.assert_not_called()
+        self.assertFalse(manager.live_authority_available())
+        self.assertFalse(pane.live_toggle.isEnabled())
+        self.assertFalse(service.authority.enabled)
+
     def test_default_launcher_uses_embedded_conpty_backend(self):
         process = FakeProcess()
         manager = AgentProcessManager(
@@ -168,9 +192,17 @@ class AgentLauncherTests(unittest.TestCase):
             python_executable="python.exe", agent_id="test-agent")
         tools = claude[claude.index("--tools") + 1]
         self.assertIn("mcp__flow_controller__read_snapshot", tools)
-        self.assertIn("mcp__flow_controller__submit_plan_draft", tools)
+        self.assertIn("mcp__flow_controller__list_saved_sequences", tools)
+        self.assertIn("mcp__flow_controller__read_sequence", tools)
+        self.assertIn("mcp__flow_controller__submit_sequence_draft", tools)
+        self.assertIn("mcp__flow_controller__create_sequence_variant", tools)
+        self.assertIn(
+            "mcp__flow_controller__prepare_combustion_condition", tools)
         self.assertIn("mcp__flow_controller__set_role_setpoint", tools)
-        self.assertIn("mcp__flow_controller__start_armed_plan", tools)
+        self.assertIn("mcp__flow_controller__run_saved_sequence", tools)
+        allowed = claude[claude.index("--allowedTools") + 1]
+        self.assertIn("mcp__flow_controller__set_role_setpoint", allowed)
+        self.assertIn("mcp__flow_controller__run_saved_sequence", allowed)
         config = json.loads(claude[claude.index("--mcp-config") + 1])
         server = config["mcpServers"]["flow_controller"]
         self.assertEqual(server["command"], "python.exe")
@@ -182,7 +214,7 @@ class AgentLauncherTests(unittest.TestCase):
         mcp_override = next(item for item in codex
                             if item.startswith("mcp_servers={"))
         self.assertIn("flow_controller={command=", mcp_override)
-        self.assertIn("flow_controller={command=", mcp_override)
+        self.assertIn('default_tools_approval_mode="approve"', mcp_override)
 
     def test_stop_is_nonblocking_and_explicitly_does_not_change_setpoints(self):
         process = FakeProcess()
@@ -367,6 +399,8 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertEqual(
             pane.buttons['claude'].iconSize().width(), theme.scale(22))
         self.assertFalse(pane.stop_button.isEnabled())
+        self.assertTrue(pane.setup_button.isEnabled())
+        self.assertEqual(set(pane.sign_in_actions), {'claude', 'codex'})
         pane.set_collapsed(False, animate=False)
         self.assertFalse(pane.is_collapsed())
         self.assertIn('not a security boundary', pane._warning.text())
@@ -460,6 +494,7 @@ class AgentLauncherTests(unittest.TestCase):
                 return_value=QMessageBox.StandardButton.Yes) as confirm:
             pane.live_toggle.click()
         self.assertTrue(confirm.called)
+        self.assertIn('ONLY CONTROL WARNING', confirm.call_args.args[2])
         self.assertTrue(service.authority.enabled)
         self.assertEqual(pane.live_toggle.text(), 'LIVE CONTROL ON')
 
@@ -488,29 +523,6 @@ class AgentLauncherTests(unittest.TestCase):
             pane.live_toggle.click()
         self.assertTrue(service.authority.enabled)
         self.assertIn('Codex retains shell access', confirm.call_args.args[2])
-
-    def test_plan_confirmation_summary_includes_all_executable_decisions(self):
-        plan = ExperimentPlan(
-            'review me', AbortProcedure('zero_fuel'), (
-                PlanStage(
-                    'stabilise', {'nh3_rich': 2.0}, min_dwell_s=3,
-                    timeout_s=20, on_timeout='hold',
-                    condition=StabilityCondition(
-                        targets={'nh3_rich': 2.0}, tolerance=0.1,
-                        stable_s=4)),
-                PlanStage(
-                    'replay', sequence='profile.fcseq.json', timeout_s=30,
-                    on_timeout='abort'),
-            ))
-
-        summary = format_plan_authority_review(plan)
-
-        self.assertIn('Abort procedure: zero_fuel', summary)
-        self.assertIn('nh3_rich=2 SLPM', summary)
-        self.assertIn('timeout: 20 s → hold', summary)
-        self.assertIn('within ±0.1 for 4 s', summary)
-        self.assertIn('sequence profile.fcseq.json', summary)
-
 
 if __name__ == '__main__':
     unittest.main()

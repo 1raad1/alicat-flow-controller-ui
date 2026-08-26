@@ -4,7 +4,7 @@ Status: Steps 1–7 implemented and covered by automated tests. Live agent
 authority is a visible, explicitly armed, default-off toggle.
 Scope: launch AI coding agents (Claude Code / Codex) that can author sequences
 and condition-based test sequences and, under explicit toggle authority,
-request supervised control of the rig. Codex retains shell access, so its arming
+control the rig automatically. Codex retains shell access, so its arming
 dialog warns that its sandbox is not a hard COM-port boundary. All exposed MCP
 hardware authority stays inside the application and its validated interfaces.
 
@@ -69,7 +69,7 @@ three layers:
    shell, so its explicit arming confirmation carries an additional attended-run
    warning. Enforcement lives in the harness, not in the model's goodwill.
 2. **In-app validation.** Everything in this document: envelopes, fail-closed
-   loading, approval gates, arming, audit.
+   loading, the live-control toggle, and audit.
 3. **Physical interlocks.** The real safety layer, as the README already insists.
    Nothing in this plan reduces the need for independent hardware interlocks.
 
@@ -78,23 +78,21 @@ raise the bar; layer 3 is what actually protects the rig.
 
 ### 3.2 Authority levels
 
-Three visibly distinct modes, in the order they will be implemented:
+Two visibly distinct modes:
 
-- **Draft** — read telemetry and configuration; create sequence/plan drafts.
+- **Draft** — read telemetry and configuration; create sequence drafts.
   Cannot move hardware.
-- **Supervised** — proposes individual actions; each requires operator
-  confirmation before execution.
-- **Armed plan** — may execute one approved plan while the live toggle is on,
-  inside a declared control envelope. Arming is revoked by
-  disconnects, assignment changes, communication faults, or agent termination.
+- **Live control** — after one explicit warning, the agent may set values and
+  run saved sequences inside the frozen envelope. No per-setpoint dialog is
+  shown. Authority is revoked by disconnects, assignment changes,
+  communication faults, or agent termination.
 
 ### 3.3 Arming vs. abort semantics
 
-Killing an agent revokes its authority to issue anything **new**. A plan already
-running continues to its defined end state or runs its defined abort procedure —
-chosen at approval time. An agent crash mid-transition must never leave the rig
-wherever the last partial command put it. This is the core reason the plan runner
-is deterministic and lives in the app, not the agent.
+Killing an agent revokes its authority to issue anything **new**. A saved
+sequence already replaying stays under the app's existing replay and stop
+controls. The app, not the agent process, owns the replay clock and command
+queue.
 
 ### 3.4 Timeout defaults
 
@@ -106,7 +104,7 @@ procedure is a **required** field of any armed plan, validated at approval time.
 ### 3.5 Audit
 
 Every admitted agent request (read or write) is logged with agent identity,
-timestamp, previous/new values, approval decision, and result. Repeated reads of
+timestamp, previous/new values, authority source, and result. Repeated reads of
 the same method above 10 calls/s are rejected by in-memory backpressure before
 audit I/O and are not logged individually; this prevents polling from turning the
 synchronous audit path into a GUI-availability problem. Stopping an agent is a
@@ -195,8 +193,17 @@ Requirements:
 
 - Local MCP server over authenticated IPC exposing:
   - all Step 1 reads (snapshot, history, derived state, limits);
-  - `submit_sequence_draft` and `submit_plan_draft`, which validate fail-closed
-    and land in the editor for operator preview/approval.
+  - `list_saved_sequences`, `read_sequence`, and `submit_sequence_draft`, which
+    use bounded local files and the existing sequence editor;
+  - `create_sequence_variant`, which accepts a general sequence transformation,
+    validates it against the current rig, checks that the source has not changed,
+    and saves it under a new name without overwriting;
+  - `prepare_combustion_condition`, which changes any supplied calculation
+    inputs, fills the rest from the last complete condition, and prepares all
+    resulting targets without moving hardware.
+- Natural-language requests remain agent reasoning rather than app-side command
+  parsing. The agent reads structured context when needed, so the interface is
+  not limited to named examples such as changing speed or equivalence ratio.
 - No CLI (`flowctl`): one surface to secure, validate, and test. Claude Code and
   Codex both speak MCP natively.
 - MCP live calls never import the Alicat library, touch serial objects, or reach
@@ -204,15 +211,16 @@ Requirements:
   session boundary. Codex retains shell access outside that route, which is why
   its arming confirmation explicitly requires an attended, interlocked run.
 
-### Step 7 — Supervised, then armed execution
+### Step 7 — Toggle-authorized execution
 
-- **Supervised:** agent proposes individual `set_role_setpoint`-level actions;
-  each rendered for confirmation with previous/new values; full audit trail.
-- **Armed plan:** operator approves one specific plan with a declared envelope
-  (permitted roles, max flows, ramp ceilings). It remains armed while the toggle
-  is on and is revoked per §3.2; abort semantics per §3.3. The confirmation expands every
-  stage, command, timing rule, condition, and abort action. Referenced sequences
-  are frozen into the approved bundle before the start boundary.
+- **Automatic setpoints:** one operator warning enables
+  `set_role_setpoint` calls inside the frozen envelope. Each call is audited but
+  does not open another dialog.
+- **Saved-sequence execution:** while the operator's live-control toggle is on,
+  an agent may call `run_saved_sequence` for a local sequence. Every track and
+  keyframe must fit the frozen role, max-flow, and ramp envelope. The file is
+  fingerprinted and re-read after pre-execution audit, and replay is refused
+  unless measured flows match its opening. Each request starts one pass.
 - Only after the runner (Step 5) has been exercised against the simulated rig and
   in attended human-authored runs.
 
@@ -231,9 +239,9 @@ Requirements:
   Windows (and an authenticated local socket on other platforms).
 - Telemetry adapter design for non-Alicat conditions (emissions, flame detection) —
   needed before plans can gate on them; not needed for Steps 1–7.
-- Supervised mode is retained: every individual setpoint displays previous/new
-  values and requires operator approval. Armed-plan mode separately permits one
-  exact, fingerprinted plan start.
+- One visible live-control warning authorizes automatic setpoints and saved
+  sequences inside the frozen envelope until the toggle is switched off or
+  authority is revoked.
 
 ## 7. Implemented milestone (2026-08-26)
 
@@ -244,28 +252,29 @@ Requirements:
   below the current last command invokes verified zero on that controller.
 - Embedded ConPTY Claude/Codex terminal in the Operation sidebar. Both profiles
   can be explicitly armed; Codex displays an additional warning because it
-  retains shell access.
-- Human-approved condition-plan runner with stable windows, fresh-telemetry
-  checks, explicit timeouts, required verified-zero abort action, and an
-  independent priority-zero watchdog for safe-abort deadlines during UI stalls.
+  retains shell access. The Agent setup menu runs Codex or Claude sign-in in
+  the same terminal, links to each official installation guide, and can refresh
+  CLI detection after installation. Authentication sessions never start the MCP
+  gateway or expose live authority, and the app does not store provider credentials.
 - Authenticated MCP server connected to the running Qt application through a
-  per-session local pipe. Credentials rotate when the agent is stopped. Five
+  per-session local pipe. Credentials rotate when the agent is stopped. Eight
   read/draft tools are always available; two live tools are default-off and
-  gated by the operator's visible authority envelope.
+  gated by the operator's visible authority envelope. Read/draft authority now
+  includes full sequence reads, non-overwriting sequence variants, and generic
+  combustion-condition recalculation from the last complete condition.
 - Phased JSONL request audit including identity, timestamp, previous/new values,
   approval state, and outcome. An unwritable audit refuses a draft before it
   mutates state and refuses a live action before it executes.
 - Default-off persistent **LIVE CONTROL** toggle. Its confirmation
   shows the frozen permitted roles, role-to-unit mapping, MAX FLOW and ramp
-  ceilings, plus the exact armed plan identity and full executable stage review.
-- `set_role_setpoint` MCP requests require a separate operator confirmation and
-  are revalidated after the dialog before entering the existing ramped session
-  boundary. `start_armed_plan` consumes a one-shot permission for the exact
-  plan and referenced sequence contents approved by the operator.
+  ceilings, plus the rules for agent-selected saved sequences.
+- `set_role_setpoint` MCP requests are authorized by the live-control toggle,
+  durably audited, and revalidated immediately before entering the existing
+  ramped session boundary. `run_saved_sequence` starts one saved sequence pass
+  after bounded file loading, validation, fingerprint recheck, authority
+  checks, and opening flow matching.
 - Live authority is revoked by switching the toggle off, communication fault, disconnect,
-  monitoring stop, assignment, limit/ramp/plan change, or agent termination.
-  Revocation prevents new actions; an already-running plan retains its
-  deterministic end/abort semantics, except that an agent-started plan aborts
-  through its declared verified-zero procedure if its captured ramp/limit policy
-  changes. Agent draft references are limited to bounded local sequence files,
-  and repeated read calls are rate-limited before synchronous audit I/O.
+  monitoring stop, assignment, limit/ramp change, or agent termination.
+  Revocation prevents new actions; an already-running sequence remains under
+  the existing replay controls. Saved files are limited to the app sequence
+  directory, and repeated read calls are rate-limited before synchronous audit I/O.

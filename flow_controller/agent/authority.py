@@ -47,8 +47,6 @@ class AgentAuthority(QObject):
         session.communication_fault.connect(
             lambda detail: self._revoke_if_enabled(
                 f"communication fault: {detail}"))
-        session.experiment_plans.plan_changed.connect(
-            lambda _plan: self._revoke_if_enabled("loaded plan changed"))
 
     # -- operator-facing lifecycle ------------------------------------- #
 
