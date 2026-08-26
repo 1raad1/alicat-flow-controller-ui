@@ -194,7 +194,7 @@ During replay:
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
-## Agent launcher and automated test sequences
+## Agent launcher and saved sequences
 
 The collapsible **Agent launcher** in the Operation sidebar opens Claude Code
 or Codex in an embedded Windows terminal and connects a local, authenticated
@@ -213,48 +213,35 @@ agent starts. Both agents can:
 
 - read copied assignments, Alicat telemetry, recent history, derived state,
   ramp policies, and declared command ceilings;
-- submit a sequence draft to the existing sequence editor; or
-- submit an automated test-sequence draft for operator review;
+- list saved sequences and see whether the current rig can run each one;
+- submit a sequence draft to the existing sequence editor;
 - request a supervised role setpoint, which always opens a previous/new
   confirmation in the application; or
-- start the one exact loaded plan that the operator armed, once.
+- run a saved sequence once per request while live control is enabled.
 
 The red **LIVE CONTROL** toggle is default-off and is enabled while either
-supported agent is running. Enabling it shows the captured
-role-to-unit mapping, MAX FLOW, ramp ceilings, exact loaded-plan
-fingerprint, every plan stage and command, timing/condition rules, and abort
-procedure before confirmation.
+supported agent is running. Enabling it shows the captured role-to-unit
+mapping, MAX FLOW, and ramp ceilings. It also explains that the agent may
+select any valid `.fcseq.json` file in the app's sequence folder.
 Only roles with both a positive MAX FLOW and positive enabled ramp rate enter
 the envelope. Authority remains enabled until the toggle is switched off, and
 is also revoked by stopping the agent, a communication fault, disconnecting,
-stopping monitoring, or
-changing assignments, limits, ramps, or the loaded plan. Turning it off prevents new agent actions; it does
-not silently stop or zero a plan already running, which continues to its
-declared end or abort procedure. An agent-started plan is aborted through that
-procedure if a ramp or MAX FLOW setting later changes, so future stages cannot
-escape the approved envelope. There is no agent zero-flow tool. Agent read calls
+stopping monitoring, or changing assignments, limits, or ramps. Turning it off
+prevents new agent actions. It does not silently stop or zero a sequence that
+is already replaying; use the existing replay controls for that run. There is
+no agent zero-flow tool. Agent read calls
 are rate-limited to 10 calls/s per method and agent before audit I/O (throttled
-calls are not logged individually), and agent plan drafts may reference only
-bounded local sequence files in the app's sequence directory. The phased
-agent and authority audit includes a durable pre-execution record for live
-actions and is written to
+calls are not logged individually). Saved-sequence names cannot contain paths,
+files are size-bounded, and each file is re-read after the durable
+pre-execution audit. Every track and keyframe must remain inside the frozen
+authority envelope. Replay is refused if another sequence is active or the
+measured flows do not match its opening. The audit is written to
 `Documents\Flow Controller\agent_audit.jsonl`.
 
-Open **Sequences → Automated Test Sequence** on the Operation tab to load a
-`.fcplan.json` file. This is part of the existing Sequences card, not a separate
-card. Starting always presents the labelled stages, their timeout policy, and
-the required abort procedure for explicit approval. Tests use fresh Alicat
-telemetry and stop advancing if readings become stale. A timeout aborts through
-the declared verified `zero_all` or `zero_fuel` procedure unless that stage
-explicitly requests a hold or operator decision. Default abort deadlines also
-have an independent watchdog that queues priority zero on the serial monitor
-even if the Qt event loop is stalled.
-
-An example plan is provided at `docs/example-experiment.fcplan.json`. Its role
-names and setpoints are illustrative; edit them for the current assignments and
-declare **MAX FLOW** for every controlled line before testing. Test plans first
-with the simulated rig and then in an attended, non-combusting commissioning
-run.
+There is no separate automated-test editor in the Sequences card. Build and
+save ordinary flow sequences, then ask the agent to choose and run them in the
+order required by the test. This keeps one sequence format and one replay path
+for manual and agent-driven operation.
 
 ### Sequencing in operation
 

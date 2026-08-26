@@ -110,8 +110,6 @@ class AgentAuthorityTests(unittest.TestCase):
             (self.session.assignments_changed, ({},), "assignments changed"),
             (self.session.max_flow_changed, ("A", 9.0), "maximum flow changed"),
             (self.session.unit_ramp_changed, ("A", 1.0), "ramp settings changed"),
-            (self.session.experiment_plans.plan_changed,
-             (self.plan(),), "loaded plan changed"),
             (self.session.connection_changed, (False,), "controllers disconnected"),
             (self.session.monitoring_changed, (False,), "monitoring stopped"),
             (self.session.communication_fault, ("read timeout on Unit A",),

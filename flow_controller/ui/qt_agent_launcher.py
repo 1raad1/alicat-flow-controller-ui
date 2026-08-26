@@ -305,41 +305,9 @@ def discover_agents(which: Callable[[str], str | None] | None = None, *,
 
 MCP_TOOL_NAMES = (
     'read_snapshot', 'read_history', 'read_derived_state',
-    'submit_sequence_draft', 'submit_plan_draft',
-    'set_role_setpoint', 'start_armed_plan',
+    'list_saved_sequences', 'submit_sequence_draft',
+    'set_role_setpoint', 'run_saved_sequence',
 )
-
-
-def format_plan_authority_review(plan):
-    """Render every executable plan decision for the arming confirmation."""
-    if plan is None:
-        return ""
-    lines = [f"Abort procedure: {plan.abort.action}"]
-    for index, stage in enumerate(plan.stages, 1):
-        if stage.setpoints:
-            command = ", ".join(
-                f"{role}={value:g} SLPM"
-                for role, value in sorted(stage.setpoints.items()))
-        else:
-            command = f"sequence {stage.sequence}"
-        lines.append(f"Stage {index}: {stage.name}")
-        lines.append(f"  Command: {command}")
-        lines.append(
-            f"  Minimum dwell: {stage.min_dwell_s:g} s; timeout: "
-            f"{stage.timeout_s:g} s → {stage.on_timeout}")
-        if stage.condition is not None:
-            targets = ", ".join(
-                f"{role}={value:g}"
-                for role, value in sorted(stage.condition.targets.items()))
-            lines.append(
-                f"  Advance when {stage.condition.metric} [{targets}] is within "
-                f"±{stage.condition.tolerance:g} for "
-                f"{stage.condition.stable_s:g} s")
-        else:
-            lines.append("  Advance after the minimum dwell/sequence completes")
-        if stage.next_stage:
-            lines.append(f"  Next stage override: {stage.next_stage}")
-    return "\n".join(lines)
 
 
 def _toml_string(value):
@@ -788,8 +756,8 @@ class AgentLauncherPane(Card):
         self.live_toggle.setProperty('density', 'compact')
         self._live_tooltip = (
             'Default off. When enabled, each individual setpoint still needs '
-            'operator confirmation; the currently loaded plan may be armed '
-            'inside its exact frozen envelope.')
+            'operator confirmation; saved sequences may run once per request '
+            'when every command fits the frozen envelope.')
         self.live_toggle.setToolTip(self._live_tooltip)
         self.live_toggle.toggled.connect(self._on_live_toggled)
         authority_row.addWidget(self.live_toggle)
@@ -1025,18 +993,11 @@ class AgentLauncherPane(Card):
             f"  {role} → Unit {policy['unit']}: max {policy['max_flow']:g} "
             f"SLPM, ramp {policy['ramp_rate']:g} SLPM/s"
             for role, policy in sorted(roles.items()))
-        plan = envelope.get('plan')
-        plan_line = (f"Armed plan: {plan['name']} (one start only)\n"
-                     f"SHA-256: {plan['fingerprint']}"
-                     if plan else 'Armed plan: none')
-        loaded_plan = None
-        session = getattr(self.service, 'session', None)
-        if session is not None:
-            loaded_plan = getattr(
-                getattr(session, 'experiment_plans', None), 'plan', None)
-        plan_review = format_plan_authority_review(loaded_plan)
-        if plan_review:
-            plan_line += "\n\nExecutable plan review:\n" + plan_review
+        sequence_authority = (
+            "Saved sequences: while this toggle is on, the agent may select "
+            "any valid .fcseq.json file in the app's sequence folder. Every "
+            "track and setpoint must fit the limits below. A sequence runs "
+            "once and is refused unless measured flows match its opening.")
         profile_warning = ""
         if self.manager.active_agent == 'codex':
             profile_warning = (
@@ -1049,11 +1010,11 @@ class AgentLauncherPane(Card):
             "revokes it after a safety-relevant change.\n\n"
             "Every individual setpoint still opens a separate operator "
             "confirmation. The agent cannot exceed these snapshotted limits:\n"
-            f"{role_lines}\n\n{plan_line}\n\n"
+            f"{role_lines}\n\n{sequence_authority}\n\n"
             "Disconnection, communication fault, monitoring stop, "
             "assignment/limit/ramp changes, "
-            "or agent termination revoke authority. A plan already running "
-            "continues to its declared end or abort procedure."
+            "or agent termination revoke authority. A sequence already "
+            "running continues through the existing replay controls."
             f"{profile_warning}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -1096,10 +1057,12 @@ class AgentLauncherPane(Card):
             'live-control confirmation includes an additional warning: the '
             'sandbox is not a hard COM-port security boundary.\n\n'
             'The flow-controller MCP server exposes telemetry/configuration reads '
-            'and draft submission. Live tools are default-off. The operator '
-            'must enable the red toggle; every setpoint then needs '
-            'a separate confirmation, and only the exact armed plan can be '
-            'started once. The launcher is more than a generic terminal because '
+            'and sequence draft submission. Live tools are default-off. The '
+            'operator must enable the red toggle; every individual setpoint then '
+            'needs a separate confirmation. The agent may also list and run '
+            'saved sequences once per request when every command fits the armed '
+            'limits and the measured flows match the sequence opening. The '
+            'launcher is more than a generic terminal because '
             'it binds temporary MCP credentials and the live toggle to this exact '
             'child process, then revokes them when that process ends. Stopping an agent '
             'ends that process; it never zeroes controllers or changes their '

@@ -42,7 +42,6 @@ from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
 from .qt_agent_launcher import AgentLauncherPane
 from .qt_sequence_panel import SequencePanel
-from .qt_experiment_plan import ExperimentPlanPane
 from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
 
@@ -63,6 +62,10 @@ SHORT_LABELS = {
 COMBUSTION_RATES = (('every pass', 1), ('every 2nd pass', 2),
                     ('every 5th pass', 5), ('every 10th pass', 10),
                     ('every 25th pass', 25), ('every 50th pass', 50))
+
+OPERATION_LEFT_START_WIDTH = 640
+OPERATION_RIGHT_START_WIDTH = 920
+
 
 def _fmt(value, decimals=2, dash='--'):
     """A derived number for a tile, or a dash where there is no answer.
@@ -424,12 +427,16 @@ class OperationTab(QWidget):
     # ------------------------------------------------------------------ #
     def _build_columns(self):
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._columns_splitter = splitter
         splitter.setHandleWidth(4)
         splitter.addWidget(self._build_left_column())
         splitter.addWidget(self._build_right_column())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([520, 1040])
+        splitter.setSizes([
+            theme.scale(OPERATION_LEFT_START_WIDTH),
+            theme.scale(OPERATION_RIGHT_START_WIDTH),
+        ])
         return splitter
 
     @staticmethod
@@ -668,8 +675,6 @@ class OperationTab(QWidget):
             'Sequences', index=None,
             help_text=('Record every commanded setpoint while monitoring, '
                        'edit the resulting curve, then replay or repeat it. '
-                       'Automated test sequences use the same section but '
-                       'advance through labelled stages from live meter conditions. '
                        'Clicking a saved name loads it into the panel and '
                        'nothing moves. ▶ loads and runs it once, with no '
                        'repeats, and only if the rig is already standing at '
@@ -703,11 +708,6 @@ class OperationTab(QWidget):
         self.saved_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.saved_list.itemClicked.connect(self._on_saved_clicked)
         card.add(self.saved_list)
-
-        card.add(divider())
-        self._experiment_plan_card = ExperimentPlanPane(
-            self.session.experiment_plans)
-        card.add(self._experiment_plan_card)
 
         self._refresh_saved()
         return card

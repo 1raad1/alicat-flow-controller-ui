@@ -114,8 +114,7 @@ class AgentIpcServer:
                 done.set()
 
         self.session._post(invoke)
-        interactive = request.get("method") in (
-            "set_role_setpoint", "start_armed_plan")
+        interactive = request.get("method") == "set_role_setpoint"
         timeout = None if interactive else CLIENT_REQUEST_TIMEOUT_S
         waited = 0.0
         while not done.wait(CLIENT_POLL_S):

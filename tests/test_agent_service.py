@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from multiprocessing.connection import Client
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +20,6 @@ from PySide6.QtWidgets import QApplication
 from flow_controller.agent.ipc import AgentIpcServer, call_agent_ipc
 from flow_controller.agent.service import (
     AgentAuditLog, AgentDraftService, AgentRequestError)
-from flow_controller.core.experiment_plan import (
-    AbortProcedure, ExperimentPlan, PlanStage)
 from flow_controller.core.sequence import HOLD, Keyframe, Sequence, Track
 from flow_controller.core.session import FlowSession
 
@@ -42,6 +40,8 @@ class AgentDraftServiceTests(unittest.TestCase):
         self.session._latest_samples = {
             "A": {"flow": 1.0, "sp": 1.0, "press": 14.7, "temp": 20.0}}
         self.session._latest_timestamp = datetime.now()
+        self.session.sequence_dir = Path(self.tmp.name) / "sequences"
+        self.session.sequence_dir.mkdir()
         self.service = AgentDraftService(
             self.session,
             audit=AgentAuditLog(Path(self.tmp.name) / "audit.jsonl"))
@@ -61,7 +61,7 @@ class AgentDraftServiceTests(unittest.TestCase):
         self.assertEqual(row["approval"], "not_required")
         self.assertEqual(row["result"], "accepted")
 
-    def test_sequence_and_plan_drafts_land_in_existing_editors(self):
+    def test_sequence_draft_lands_in_existing_editor(self):
         sequence = Sequence(name="agent sequence", tracks=[Track(
             "nh3_rich", "NH3", keyframes=[
                 Keyframe(0, 0, HOLD), Keyframe(2, 1, HOLD)])])
@@ -70,33 +70,13 @@ class AgentDraftServiceTests(unittest.TestCase):
             {"sequence": sequence.to_dict()})
         self.assertEqual(answer["status"], "pending_operator_review")
         self.assertEqual(self.session.sequence.name, "agent sequence")
+        self.assertEqual(
+            self.audit_rows()[0]["approval"], "pending_operator_review")
 
-        plan = ExperimentPlan(
-            "agent plan", AbortProcedure("zero_all"),
-            (PlanStage("one", {"nh3_rich": 1}),))
-        answer = self.service.handle(
-            "agent-1", "submit_plan_draft", {"plan": plan.to_dict()})
-        self.assertEqual(answer["status"], "pending_operator_review")
-        self.assertEqual(self.session.experiment_plans.plan.name, "agent plan")
-        self.assertEqual([row["approval"] for row in self.audit_rows()],
-                         ["pending_operator_review", "pending_operator_review"])
-
-    def test_agent_plan_draft_rejects_sequence_outside_local_sequence_dir(self):
-        allowed = Path(self.tmp.name) / "allowed"
-        allowed.mkdir()
-        self.session.sequence_dir = allowed
-        outside = Path(self.tmp.name) / "outside.fcseq.json"
-        Sequence(name="outside", tracks=[Track(
-            "nh3_rich", "NH3", keyframes=[
-                Keyframe(0, 0, HOLD), Keyframe(1, 1, HOLD)])]).save(outside)
-        plan = ExperimentPlan(
-            "unsafe reference", AbortProcedure("zero_all"),
-            (PlanStage("replay", sequence=str(outside)),))
-
-        with self.assertRaisesRegex(AgentRequestError, "sequence directory"):
+    def test_saved_sequence_name_rejects_paths(self):
+        with self.assertRaisesRegex(AgentRequestError, "without a path"):
             self.service.handle(
-                "agent-1", "submit_plan_draft", {"plan": plan.to_dict()})
-        self.assertIsNone(self.session.experiment_plans.plan)
+                "agent-1", "run_saved_sequence", {"name": "../outside"})
 
     def test_repeated_agent_reads_are_rate_limited_before_more_audit_io(self):
         self.service.handle("poller", "read_snapshot")
@@ -266,56 +246,75 @@ class AgentDraftServiceTests(unittest.TestCase):
         abort.assert_not_called()
         self.assertFalse(self.service.authority.status()["enabled"])
 
-    def test_exact_armed_plan_can_be_started_only_once(self):
-        self._make_live_ready()
-        plan = ExperimentPlan(
-            "armed plan", AbortProcedure("zero_all"),
-            (PlanStage("one", {"nh3_rich": 1.0}),))
-        self.assertTrue(self.session.experiment_plans.set_plan(plan))
-        self.service.set_live_enabled(True)
-        original_start = self.session.experiment_plans.start
-        self.session.experiment_plans.start = lambda **_kwargs: True
-        self.addCleanup(setattr, self.session.experiment_plans, "start", original_start)
-
-        answer = self.service.handle("agent-1", "start_armed_plan")
-        self.assertEqual(answer["status"], "running")
-        with self.assertRaisesRegex(AgentRequestError, "already"):
-            self.service.handle("agent-1", "start_armed_plan")
-
-    def test_armed_sequence_snapshot_crosses_start_boundary_without_reread(self):
-        self._make_live_ready()
-        sequence_path = Path(self.tmp.name) / "armed.fcseq.json"
-        Sequence(name="original", tracks=[Track(
+    def _save_sequence(self, filename="agent-run", *, opening=1.0, peak=2.0):
+        path = self.session.sequence_dir / f"{filename}.fcseq.json"
+        Sequence(name=filename, tracks=[Track(
             "nh3_rich", "NH3", keyframes=[
-                Keyframe(0, 0, HOLD), Keyframe(1, 1, HOLD)])]).save(sequence_path)
-        plan = ExperimentPlan(
-            "armed sequence plan", AbortProcedure("zero_all"),
-            (PlanStage("replay", sequence=str(sequence_path)),))
-        self.assertTrue(self.session.experiment_plans.set_plan(plan))
+                Keyframe(0, opening, HOLD),
+                Keyframe(1, peak, HOLD)])]).save(path)
+        return path
+
+    def test_agent_lists_and_runs_a_saved_sequence_once_per_request(self):
+        self._make_live_ready()
+        self._save_sequence()
+        listed = self.service.handle("agent-1", "list_saved_sequences")
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["sequences"][0]["name"], "agent-run")
+        self.assertTrue(listed["sequences"][0]["runnable"])
         self.service.set_live_enabled(True)
-        original_consume = self.service.authority.consume_plan_bundle
-
-        def consume_then_mutate(loaded_plan):
-            result = original_consume(loaded_plan)
-            Sequence(name="changed", tracks=[Track(
-                "nh3_rich", "NH3", keyframes=[
-                    Keyframe(0, 0, HOLD), Keyframe(1, 4, HOLD)])]).save(
-                        sequence_path)
-            return result
-
-        captured = {}
-        with patch.object(
-                self.service.authority, "consume_plan_bundle",
-                side_effect=consume_then_mutate), patch.object(
-                    self.session.experiment_plans, "start",
-                    side_effect=lambda **kwargs: captured.update(kwargs) or True):
-            answer = self.service.handle("agent-1", "start_armed_plan")
-
+        with patch.object(self.session, "start_replay", return_value=True) as start:
+            answer = self.service.handle(
+                "agent-1", "run_saved_sequence", {"name": "agent-run"})
         self.assertEqual(answer["status"], "running")
-        self.assertTrue(captured["agent_started"])
-        self.assertEqual(captured["frozen_plan"], plan.to_dict())
-        frozen = captured["frozen_sequences"][str(sequence_path)]
-        self.assertEqual(frozen["tracks"][0]["keyframes"][-1]["v"], 1.0)
+        start.assert_called_once()
+        self.assertEqual(start.call_args.kwargs["repeats"], 1)
+
+    def test_saved_sequence_is_reread_after_preexecution_audit(self):
+        self._make_live_ready()
+        sequence_path = self._save_sequence()
+        self.service.set_live_enabled(True)
+
+        class MutatesOnExecutionAudit:
+            def __init__(inner_self):
+                inner_self.calls = 0
+
+            def write(inner_self, _record):
+                inner_self.calls += 1
+                if inner_self.calls == 2:
+                    Sequence(name="changed", tracks=[Track(
+                        "nh3_rich", "NH3", keyframes=[
+                            Keyframe(0, 1, HOLD),
+                            Keyframe(1, 4, HOLD)])]).save(sequence_path)
+
+        service = AgentDraftService(
+            self.session, authority=self.service.authority,
+            audit=MutatesOnExecutionAudit())
+        with patch.object(self.session, "start_replay") as start:
+            with self.assertRaisesRegex(AgentRequestError, "changed"):
+                service.handle(
+                    "agent-1", "run_saved_sequence", {"name": "agent-run"})
+        start.assert_not_called()
+
+    def test_saved_sequence_refuses_an_opening_flow_mismatch(self):
+        self._make_live_ready()
+        self._save_sequence(opening=0.0)
+        self.service.set_live_enabled(True)
+        with patch.object(self.session, "start_replay") as start:
+            with self.assertRaisesRegex(AgentRequestError, "does not match"):
+                self.service.handle(
+                    "agent-1", "run_saved_sequence", {"name": "agent-run"})
+        start.assert_not_called()
+
+    def test_saved_sequence_refuses_stale_opening_telemetry(self):
+        self._make_live_ready()
+        self._save_sequence()
+        self.session._latest_timestamp = datetime.now() - timedelta(seconds=30)
+        self.service.set_live_enabled(True)
+        with patch.object(self.session, "start_replay") as start:
+            with self.assertRaisesRegex(AgentRequestError, "stale"):
+                self.service.handle(
+                    "agent-1", "run_saved_sequence", {"name": "agent-run"})
+        start.assert_not_called()
 
     def test_malformed_arguments_are_refused_and_audited(self):
         with self.assertRaises(AgentRequestError):
@@ -433,14 +432,17 @@ class AgentDraftServiceTests(unittest.TestCase):
         queued.pop()()
         self.assertFalse(audit_path.exists())
 
-    def test_armed_plan_request_does_not_time_out_while_waiting_for_qt(self):
+    def test_supervised_setpoint_does_not_time_out_while_waiting_for_qt(self):
+        self._make_live_ready()
+        self.service.set_approval_handler(lambda _action: True)
+        self.service.set_live_enabled(True)
         queued = []
         self.session._post = lambda function, *args: queued.append(
             lambda: function(*args))
         server = AgentIpcServer(self.session, self.service)
         request = {
-            "agent_id": "plan-agent", "method": "start_armed_plan",
-            "arguments": {},
+            "agent_id": "setpoint-agent", "method": "set_role_setpoint",
+            "arguments": {"role": "nh3_rich", "value": 2.0},
         }
         with patch("flow_controller.agent.ipc.CLIENT_REQUEST_TIMEOUT_S", 0.05):
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -449,8 +451,8 @@ class AgentDraftServiceTests(unittest.TestCase):
                 self.assertFalse(future.done())
                 queued.pop()()
                 answer = future.result(timeout=1)
-        self.assertFalse(answer["ok"])
-        self.assertIn("disabled", answer["error"])
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["result"]["status"], "queued")
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"),
                          "the optional MCP dependency is not installed")

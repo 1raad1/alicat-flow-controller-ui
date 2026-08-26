@@ -131,9 +131,11 @@ class QtUiTests(unittest.TestCase):
         tab = OperationTab(session)
         self.assertFalse(hasattr(tab, '_ignition_card'))
         self.assertIsInstance(tab._sequence_card, Card)
-        self.assertNotIsInstance(tab._experiment_plan_card, Card)
+        self.assertFalse(hasattr(tab, '_experiment_plan_card'))
         self.assertEqual(tab._sequence_card._title_label.text(), 'Sequences')
         self.assertEqual(tab._sequence_card._badge.text(), '')
+        sizes = tab._columns_splitter.sizes()
+        self.assertGreaterEqual(sizes[0] / sum(sizes), 0.39)
 
         groups = tab._combustion_card.findChildren(
             QWidget, 'CombustionStageCard')

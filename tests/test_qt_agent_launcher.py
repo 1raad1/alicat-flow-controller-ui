@@ -18,11 +18,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from flow_controller.ui import qt_theme as theme
 from flow_controller.ui.qt_agent_launcher import (
     AGENT_PROFILES, AgentLauncherPane, AgentProcessManager,
-    _WinPtyProcess, discover_agents, format_plan_authority_review,
-    authentication_command, launch_command,
+    _WinPtyProcess, discover_agents, authentication_command, launch_command,
 )
-from flow_controller.core.experiment_plan import (
-    AbortProcedure, ExperimentPlan, PlanStage, StabilityCondition)
 
 
 class FakeProcess:
@@ -199,9 +196,10 @@ class AgentLauncherTests(unittest.TestCase):
             python_executable="python.exe", agent_id="test-agent")
         tools = claude[claude.index("--tools") + 1]
         self.assertIn("mcp__flow_controller__read_snapshot", tools)
-        self.assertIn("mcp__flow_controller__submit_plan_draft", tools)
+        self.assertIn("mcp__flow_controller__list_saved_sequences", tools)
+        self.assertIn("mcp__flow_controller__submit_sequence_draft", tools)
         self.assertIn("mcp__flow_controller__set_role_setpoint", tools)
-        self.assertIn("mcp__flow_controller__start_armed_plan", tools)
+        self.assertIn("mcp__flow_controller__run_saved_sequence", tools)
         config = json.loads(claude[claude.index("--mcp-config") + 1])
         server = config["mcpServers"]["flow_controller"]
         self.assertEqual(server["command"], "python.exe")
@@ -521,29 +519,6 @@ class AgentLauncherTests(unittest.TestCase):
             pane.live_toggle.click()
         self.assertTrue(service.authority.enabled)
         self.assertIn('Codex retains shell access', confirm.call_args.args[2])
-
-    def test_plan_confirmation_summary_includes_all_executable_decisions(self):
-        plan = ExperimentPlan(
-            'review me', AbortProcedure('zero_fuel'), (
-                PlanStage(
-                    'stabilise', {'nh3_rich': 2.0}, min_dwell_s=3,
-                    timeout_s=20, on_timeout='hold',
-                    condition=StabilityCondition(
-                        targets={'nh3_rich': 2.0}, tolerance=0.1,
-                        stable_s=4)),
-                PlanStage(
-                    'replay', sequence='profile.fcseq.json', timeout_s=30,
-                    on_timeout='abort'),
-            ))
-
-        summary = format_plan_authority_review(plan)
-
-        self.assertIn('Abort procedure: zero_fuel', summary)
-        self.assertIn('nh3_rich=2 SLPM', summary)
-        self.assertIn('timeout: 20 s → hold', summary)
-        self.assertIn('within ±0.1 for 4 s', summary)
-        self.assertIn('sequence profile.fcseq.json', summary)
-
 
 if __name__ == '__main__':
     unittest.main()
