@@ -623,6 +623,7 @@ class OperationTab(QWidget):
             self.calc_status.setText(str(exc))
             self.calc_status.setStyleSheet(f'color: {theme.DANGER_HOVER};')
             return
+        self.session.set_autocalc_request(request)
         self.calc_status.setStyleSheet('')
         stored = self.session.set_targets(targets)
         dropped = len(targets) - len(stored)

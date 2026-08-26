@@ -37,7 +37,10 @@ def build_server():
             "Live authority is default-off and controlled by one operator "
             "warning and toggle in the app. While enabled, setpoints may be "
             "changed automatically within the armed limits, and saved "
-            "sequences may be started when measured flows match their opening."))
+            "sequences may be started when measured flows match their opening. "
+            "For sequence edits, read the source then create a named variant. "
+            "For combustion-condition changes, prepare targets and, only when "
+            "the user asked for live changes, apply every returned target."))
 
     @server.tool()
     def read_snapshot() -> dict:
@@ -65,9 +68,45 @@ def build_server():
         return _call("list_saved_sequences")
 
     @server.tool()
+    def read_sequence(name: str | None = None) -> dict:
+        """Read full keyframes for a named or currently selected sequence."""
+        return _call("read_sequence", {"name": name})
+
+    @server.tool()
     def submit_sequence_draft(sequence: dict) -> dict:
         """Validate and place a sequence in the editor for operator review."""
         return _call("submit_sequence_draft", {"sequence": sequence})
+
+    @server.tool()
+    def create_sequence_variant(new_name: str, sequence: dict,
+                                source_fingerprint: str,
+                                source_name: str | None = None) -> dict:
+        """Validate and save a non-overwriting variant of a sequence just read."""
+        return _call("create_sequence_variant", {
+            "new_name": new_name,
+            "sequence": sequence,
+            "source_fingerprint": source_fingerprint,
+            "source_name": source_name,
+        })
+
+    @server.tool()
+    def prepare_combustion_condition(
+            power_kw: float | None = None,
+            h2_fraction: float | None = None,
+            phi_stage1: float | None = None,
+            phi_global: float | None = None,
+            stage1_split: float | None = None) -> dict:
+        """Prepare flow targets, filling omitted fields from the last condition.
+
+        Fractions use 0..1. This stores targets for review but sends no flows.
+        """
+        return _call("prepare_combustion_condition", {
+            "power_kw": power_kw,
+            "h2_fraction": h2_fraction,
+            "phi_stage1": phi_stage1,
+            "phi_global": phi_global,
+            "stage1_split": stage1_split,
+        })
 
     @server.tool()
     def set_role_setpoint(role: str, value: float) -> dict:

@@ -21,7 +21,8 @@ import uuid
 from typing import Callable
 
 from PySide6.QtCore import QObject, QSize, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton,
@@ -37,6 +38,21 @@ POLL_INTERVAL_MS = 500
 TERMINAL_FLUSH_INTERVAL_MS = 33
 TERMINAL_MAX_PENDING_CHARS = 256 * 1024
 TERMINAL_MAX_FLUSH_CHARS = 32 * 1024
+
+
+def _provider_icon(key, side):
+    """Render bundled SVGs without depending on Qt's optional icon plugin."""
+    renderer = QSvgRenderer(str(
+        Path(__file__).with_name('assets') / f'{key}.svg'))
+    if not renderer.isValid():
+        return QIcon()
+    pixels = max(1, int(side))
+    pixmap = QPixmap(pixels, pixels)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class _WinPtyProcess:
@@ -305,7 +321,8 @@ def discover_agents(which: Callable[[str], str | None] | None = None, *,
 
 MCP_TOOL_NAMES = (
     'read_snapshot', 'read_history', 'read_derived_state',
-    'list_saved_sequences', 'submit_sequence_draft',
+    'list_saved_sequences', 'read_sequence', 'submit_sequence_draft',
+    'create_sequence_variant', 'prepare_combustion_condition',
     'set_role_setpoint', 'run_saved_sequence',
 )
 
@@ -780,8 +797,7 @@ class AgentLauncherPane(Card):
             button.setProperty('variant', 'quiet')
             side = theme.scale(36)
             button.setFixedSize(side, side)
-            button.setIcon(QIcon(str(
-                Path(__file__).with_name('assets') / f'{key}.svg')))
+            button.setIcon(_provider_icon(key, theme.scale(22)))
             button.setIconSize(QSize(theme.scale(22), theme.scale(22)))
             button.setAccessibleName(f'Launch {profile.label}')
             button.setEnabled(key in manager.available_agents)

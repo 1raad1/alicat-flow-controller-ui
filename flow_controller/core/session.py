@@ -230,6 +230,10 @@ class FlowSession(QObject):
         self.custom_assignments = {}
         self.autocalc_available = True
         self.autocalc_config = None
+        # The last complete condition used by Auto-Calculate. Keeping the
+        # inputs beside the targets lets an agent change one field (for
+        # example phi_stage1) without guessing the remaining condition.
+        self.autocalc_request = None
 
         # -- monitoring state --
         self.is_monitoring = False
@@ -2059,6 +2063,11 @@ class FlowSession(QObject):
         }
         self.targets_changed.emit(dict(self.target_flows))
         return self.target_flows
+
+    def set_autocalc_request(self, request):
+        """Remember the complete input condition behind calculated targets."""
+        self.autocalc_request = request
+        return request
 
     def _set_ignition_state(self, state):
         if state != self.ignition_state:

@@ -19,7 +19,9 @@ class McpServerTests(unittest.TestCase):
         names = {tool.name for tool in result.tools}
         self.assertEqual(names, {
             "read_snapshot", "read_history", "read_derived_state",
-            "list_saved_sequences", "submit_sequence_draft",
+            "list_saved_sequences", "read_sequence",
+            "submit_sequence_draft", "create_sequence_variant",
+            "prepare_combustion_condition",
             "set_role_setpoint", "run_saved_sequence",
         })
 

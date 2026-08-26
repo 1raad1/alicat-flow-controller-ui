@@ -22,6 +22,7 @@ from flow_controller.agent.service import (
     AgentAuditLog, AgentDraftService, AgentRequestError)
 from flow_controller.core.sequence import HOLD, Keyframe, Sequence, Track
 from flow_controller.core.session import FlowSession
+from flow_controller.domain.rql import AutoCalcRequest, FULL_RQL
 
 
 class AgentDraftServiceTests(unittest.TestCase):
@@ -235,6 +236,99 @@ class AgentDraftServiceTests(unittest.TestCase):
         self.assertEqual(answer["status"], "running")
         start.assert_called_once()
         self.assertEqual(start.call_args.kwargs["repeats"], 1)
+
+    def test_agent_reads_full_sequence_and_saves_generic_variant(self):
+        self._save_sequence("source", opening=1.0, peak=2.0)
+
+        source = self.service.handle(
+            "agent-1", "read_sequence", {"name": "source"})
+        variant = dict(source["sequence"])
+        variant["tracks"] = [dict(variant["tracks"][0])]
+        variant["tracks"][0]["keyframes"] = [
+            dict(frame) for frame in
+            variant["tracks"][0]["keyframes"]]
+        variant["tracks"][0]["keyframes"][-1]["t"] = 0.5
+
+        result = self.service.handle(
+            "agent-1", "create_sequence_variant", {
+                "source_name": "source",
+                "source_fingerprint": source["fingerprint"],
+                "new_name": "source-faster",
+                "sequence": variant,
+            })
+
+        self.assertEqual(result["status"], "saved_and_loaded")
+        self.assertEqual(self.session.sequence.name, "source-faster")
+        saved = Sequence.load(
+            self.session.sequence_dir / "source-faster.fcseq.json")
+        self.assertEqual(saved.duration, 0.5)
+
+    def test_unsaved_selected_sequence_has_stable_variant_fingerprint(self):
+        self.session.set_sequence(Sequence(name="selected", tracks=[Track(
+            "nh3_rich", "NH3", keyframes=[
+                Keyframe(0, 1.0, HOLD), Keyframe(1, 2.0, HOLD)])]))
+
+        first = self.service.handle("agent-1", "read_sequence")
+        self.service._last_read_at.clear()
+        second = self.service.handle("agent-1", "read_sequence")
+
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertEqual(first["sequence"]["created"], "")
+
+    def test_sequence_variant_refuses_stale_source_or_overwrite(self):
+        self._save_sequence("source")
+        source = self.service.handle(
+            "agent-1", "read_sequence", {"name": "source"})
+        with self.assertRaisesRegex(AgentRequestError, "changed"):
+            self.service.handle(
+                "agent-1", "create_sequence_variant", {
+                    "source_name": "source",
+                    "source_fingerprint": "0" * 64,
+                    "new_name": "variant",
+                    "sequence": source["sequence"],
+                })
+        self._save_sequence("variant")
+        with self.assertRaisesRegex(AgentRequestError, "already exists"):
+            self.service.handle(
+                "agent-1", "create_sequence_variant", {
+                    "source_name": "source",
+                    "source_fingerprint": source["fingerprint"],
+                    "new_name": "variant",
+                    "sequence": source["sequence"],
+                })
+
+    def test_prepare_combustion_condition_changes_any_subset_without_flows(self):
+        self.session.autocalc_request = AutoCalcRequest(
+            power_kw=10.0, h2_fraction=0.3, phi_stage1=1.1,
+            phi_global=0.6, split_rich=0.8)
+        self.session.autocalc_config = FULL_RQL
+        for role, unit in zip(
+                ("nh3_rich", "h2_rich", "nh3_lean", "h2_lean",
+                 "rich_air", "lean_air"), "ABCDEF"):
+            self.session.assignments[role] = unit
+
+        result = self.service.handle(
+            "agent-1", "prepare_combustion_condition",
+            {"phi_stage1": 0.9})
+
+        self.assertEqual(result["condition"]["phi_stage1"], 0.9)
+        self.assertEqual(result["condition"]["power_kw"], 10.0)
+        self.assertEqual(set(result["targets"]), {
+            "nh3_rich", "h2_rich", "nh3_lean", "h2_lean",
+            "rich_air", "lean_air"})
+        self.assertTrue(self.session.setpoint_queue.empty())
+        self.assertEqual(self.session.autocalc_request.phi_stage1, 0.9)
+
+    def test_prepare_combustion_condition_rejects_non_finite_input(self):
+        self.session.autocalc_request = AutoCalcRequest(
+            power_kw=10.0, h2_fraction=0.3, phi_stage1=1.1,
+            phi_global=0.6, split_rich=0.8)
+        self.session.autocalc_config = FULL_RQL
+
+        with self.assertRaisesRegex(AgentRequestError, "finite number"):
+            self.service.handle(
+                "agent-1", "prepare_combustion_condition",
+                {"power_kw": float("nan")})
 
     def test_saved_sequence_is_reread_after_preexecution_audit(self):
         self._make_live_ready()

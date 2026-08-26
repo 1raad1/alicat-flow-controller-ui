@@ -215,11 +215,26 @@ Codex users can enter `/mcp` to verify that `flow_controller` is connected.
 Both agents can:
 
 - read copied assignments, Alicat telemetry, recent history, derived state,
-  ramp policies, and declared command ceilings;
+  ramp policies, declared command ceilings, and the last calculated combustion
+  condition;
 - list saved sequences and see whether the current rig can run each one;
-- submit a sequence draft to the existing sequence editor;
+- read every keyframe in the selected or a named saved sequence;
+- submit a sequence draft to the existing sequence editor, or save a validated
+  non-overwriting variant of a sequence it just read;
+- recalculate targets after changing any combination of power, hydrogen
+  fraction, Stage 1 equivalence ratio, global equivalence ratio, and Stage 1
+  fuel split, filling omitted values from the last complete calculation;
 - change role setpoints automatically while live control is enabled; or
 - run a saved sequence once per request while live control is enabled.
+
+The prompt carries the operator's intent; the launcher does not try to parse a
+fixed list of commands. The agent fetches structured context through MCP when it
+needs it. It can therefore make other sequence variations—not only a faster
+transition or a different equivalence ratio—while the app continues to validate
+the resulting file and refuses to overwrite an existing sequence. Preparing a
+combustion condition only updates the calculated targets. If the prompt asks to
+apply it to the live rig, the agent must send every returned target through the
+same toggle-authorized setpoint boundary.
 
 The red **LIVE CONTROL** toggle is default-off and is enabled while either
 supported agent is running. Enabling it shows the captured role-to-unit

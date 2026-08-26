@@ -193,8 +193,17 @@ Requirements:
 
 - Local MCP server over authenticated IPC exposing:
   - all Step 1 reads (snapshot, history, derived state, limits);
-  - `list_saved_sequences` and `submit_sequence_draft`, which use bounded local
-    files and the existing sequence editor.
+  - `list_saved_sequences`, `read_sequence`, and `submit_sequence_draft`, which
+    use bounded local files and the existing sequence editor;
+  - `create_sequence_variant`, which accepts a general sequence transformation,
+    validates it against the current rig, checks that the source has not changed,
+    and saves it under a new name without overwriting;
+  - `prepare_combustion_condition`, which changes any supplied calculation
+    inputs, fills the rest from the last complete condition, and prepares all
+    resulting targets without moving hardware.
+- Natural-language requests remain agent reasoning rather than app-side command
+  parsing. The agent reads structured context when needed, so the interface is
+  not limited to named examples such as changing speed or equivalence ratio.
 - No CLI (`flowctl`): one surface to secure, validate, and test. Claude Code and
   Codex both speak MCP natively.
 - MCP live calls never import the Alicat library, touch serial objects, or reach
@@ -248,9 +257,11 @@ Requirements:
   CLI detection after installation. Authentication sessions never start the MCP
   gateway or expose live authority, and the app does not store provider credentials.
 - Authenticated MCP server connected to the running Qt application through a
-  per-session local pipe. Credentials rotate when the agent is stopped. Five
+  per-session local pipe. Credentials rotate when the agent is stopped. Eight
   read/draft tools are always available; two live tools are default-off and
-  gated by the operator's visible authority envelope.
+  gated by the operator's visible authority envelope. Read/draft authority now
+  includes full sequence reads, non-overwriting sequence variants, and generic
+  combustion-condition recalculation from the last complete condition.
 - Phased JSONL request audit including identity, timestamp, previous/new values,
   approval state, and outcome. An unwritable audit refuses a draft before it
   mutates state and refuses a live action before it executes.

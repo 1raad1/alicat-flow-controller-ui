@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -12,15 +13,19 @@ import uuid
 
 from .authority import AgentAuthority, AuthorityError
 from ..core.sequence import Sequence, opening_mismatches
+from ..domain import rql
 
 
 DEFAULT_AUDIT_PATH = (
     Path.home() / "Documents" / "Flow Controller" / "agent_audit.jsonl")
 READ_METHODS = frozenset((
     "read_snapshot", "read_history", "read_derived_state",
-    "list_saved_sequences",
+    "list_saved_sequences", "read_sequence",
 ))
-DRAFT_METHODS = frozenset(("submit_sequence_draft",))
+DRAFT_METHODS = frozenset((
+    "submit_sequence_draft", "create_sequence_variant",
+    "prepare_combustion_condition",
+))
 LIVE_METHODS = frozenset(("set_role_setpoint", "run_saved_sequence"))
 ALLOWED_METHODS = READ_METHODS | DRAFT_METHODS | LIVE_METHODS
 MIN_READ_INTERVAL_S = 0.1
@@ -257,6 +262,184 @@ class AgentDraftService:
         return path, sequence, raw, fingerprint
 
     @staticmethod
+    def _sequence_fingerprint(raw):
+        canonical = json.dumps(
+            raw, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _read_sequence(self, name=None):
+        if name is not None and str(name).strip():
+            path, sequence, raw, fingerprint = self._load_saved_sequence(
+                name, validate_for_rig=False)
+            source = path.name
+        else:
+            sequence = self.session.sequence
+            if sequence is None:
+                raise AgentRequestError(
+                    "No sequence is selected in the app. Choose a saved "
+                    "sequence name or load one in the Sequences card.")
+            raw = sequence.to_dict()
+            # ``to_dict`` supplies the current time when an unsaved draft has
+            # no creation time. Keep that generated display value out of the
+            # source identity so a draft does not become stale merely because
+            # the next MCP call lands in a later second.
+            if not sequence.created:
+                raw["created"] = ""
+            self._validate_agent_sequence_payload(raw)
+            fingerprint = self._sequence_fingerprint(raw)
+            source = sequence.path.name if sequence.path else None
+        errors = self.session.sequence_validation_errors(sequence)
+        return {
+            "source": source,
+            "name": sequence.name,
+            "duration_s": sequence.duration,
+            "roles": sorted(str(track.key) for track in sequence.tracks),
+            "fingerprint": fingerprint,
+            "valid_for_current_rig": not errors,
+            "errors": list(errors),
+            "sequence": raw,
+        }
+
+    def _new_saved_sequence_path(self, name):
+        raw_name = str(name or "").strip()
+        if raw_name.endswith(SEQUENCE_SUFFIX):
+            raw_name = raw_name[:-len(SEQUENCE_SUFFIX)]
+        if (not raw_name or raw_name in (".", "..") or len(raw_name) > 160
+                or any(char in raw_name for char in '<>:"/\\|?*')):
+            raise AgentRequestError(
+                "The new sequence name must be a plain local filename.")
+        base = Path(self.session.sequence_dir).resolve()
+        candidate = (base / (raw_name + SEQUENCE_SUFFIX)).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError as exc:
+            raise AgentRequestError(
+                "The new sequence must stay inside the app sequence directory.") from exc
+        if candidate.exists():
+            raise AgentRequestError(
+                f"A saved sequence named '{raw_name}' already exists; choose "
+                "a new variant name.")
+        return candidate, raw_name
+
+    def _create_sequence_variant(self, arguments):
+        if self.session.sequence_state != "idle":
+            raise AgentRequestError(
+                "Finish the recording or replay before creating a variant.")
+        source_name = arguments.get("source_name")
+        expected_fingerprint = str(
+            arguments.get("source_fingerprint") or "").strip()
+        if not expected_fingerprint:
+            raise AgentRequestError(
+                "Read the source sequence first and provide its fingerprint.")
+        source = self._read_sequence(source_name)
+        if source["fingerprint"] != expected_fingerprint:
+            raise AgentRequestError(
+                "The source sequence changed after it was read; read it again.")
+
+        target, clean_name = self._new_saved_sequence_path(
+            arguments.get("new_name"))
+        raw = arguments.get("sequence")
+        self._validate_agent_sequence_payload(raw)
+        raw = dict(raw)
+        raw["name"] = clean_name
+        raw["created"] = datetime.now().isoformat(timespec="seconds")
+        sequence = Sequence.from_dict(raw, path=target)
+        errors = self.session.sequence_validation_errors(sequence)
+        if errors:
+            raise AgentRequestError("\n".join(errors))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with target.open("x", encoding="utf-8") as handle:
+                json.dump(sequence.to_dict(), handle, indent=2, allow_nan=False)
+        except FileExistsError as exc:
+            raise AgentRequestError(
+                f"A saved sequence named '{clean_name}' already exists.") from exc
+        except OSError as exc:
+            raise AgentRequestError(
+                f"Could not save sequence variant '{clean_name}': {exc}") from exc
+        loaded = self.session.set_sequence(sequence)
+        return {
+            "accepted": True,
+            "status": "saved_and_loaded" if loaded else "saved",
+            "loaded_in_editor": bool(loaded),
+            "name": clean_name,
+            "file": target.name,
+            "source_fingerprint": expected_fingerprint,
+            "fingerprint": self._sequence_fingerprint(sequence.to_dict()),
+            "duration_s": sequence.duration,
+            "tracks": len(sequence.tracks),
+        }
+
+    def _prepare_combustion_condition(self, arguments):
+        current = self.session.autocalc_request
+        fields = {
+            "power_kw": getattr(current, "power_kw", None),
+            "h2_fraction": getattr(current, "h2_fraction", None),
+            "phi_stage1": getattr(current, "phi_stage1", None),
+            "phi_global": getattr(current, "phi_global", None),
+            "stage1_split": getattr(current, "split_rich", None),
+        }
+        for key in fields:
+            if arguments.get(key) is not None:
+                fields[key] = arguments[key]
+        missing = [key for key, value in fields.items() if value is None]
+        if missing:
+            raise AgentRequestError(
+                "No complete previous combustion condition is available. "
+                "Provide: " + ", ".join(missing) + ".")
+        config = self.session.autocalc_config
+        if not self.session.autocalc_available or config is None:
+            config, problems = self.session.check_autocalc()
+            if problems or config is None:
+                raise AgentRequestError(
+                    "The current assignments cannot auto-calculate a combustion "
+                    "condition: " + "; ".join(problems))
+
+        def finite_number(key):
+            value = fields[key]
+            if isinstance(value, bool):
+                raise AgentRequestError(f"{key} must be a finite number.")
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise AgentRequestError(
+                    f"{key} must be a finite number.") from exc
+            if not math.isfinite(value):
+                raise AgentRequestError(f"{key} must be a finite number.")
+            return value
+
+        request = rql.AutoCalcRequest(
+            power_kw=finite_number("power_kw"),
+            h2_fraction=finite_number("h2_fraction"),
+            phi_stage1=finite_number("phi_stage1"),
+            phi_global=finite_number("phi_global"),
+            split_rich=finite_number("stage1_split"),
+        )
+        try:
+            targets = rql.auto_calc(
+                request, config=config, calculator=self.session.calc)
+        except (TypeError, ValueError) as exc:
+            raise AgentRequestError(str(exc)) from exc
+        self.session.set_autocalc_request(request)
+        stored = self.session.set_targets(targets)
+        condition = {
+            "power_kw": request.power_kw,
+            "h2_fraction": request.h2_fraction,
+            "phi_stage1": request.phi_stage1,
+            "phi_global": request.phi_global,
+            "stage1_split": request.split_rich,
+        }
+        return {
+            "accepted": True,
+            "status": "targets_prepared_no_flows_sent",
+            "condition": condition,
+            "targets": dict(stored),
+            "apply": (
+                "If the user asked to change the live rig, apply every target "
+                "with set_role_setpoint while live control is enabled."),
+        }
+
+    @staticmethod
     def _sequence_summary(path, sequence, fingerprint):
         return {
             "name": path.name[:-len(SEQUENCE_SUFFIX)],
@@ -373,6 +556,8 @@ class AgentDraftService:
                     tolerance=arguments.get("tolerance", 0.05))
             elif method == "list_saved_sequences":
                 result = self._list_saved_sequences()
+            elif method == "read_sequence":
+                result = self._read_sequence(arguments.get("name"))
             elif method == "submit_sequence_draft":
                 record["previous"] = (
                     self.session.sequence.name if self.session.sequence else None)
@@ -391,6 +576,17 @@ class AgentDraftService:
                     "name": sequence.name,
                     "tracks": len(sequence.tracks),
                 }
+            elif method == "create_sequence_variant":
+                record["previous"] = arguments.get("source_name") or (
+                    self.session.sequence.name if self.session.sequence else None)
+                result = self._create_sequence_variant(arguments)
+                record["new"] = result["file"]
+            elif method == "prepare_combustion_condition":
+                previous = self.session.autocalc_request
+                record["previous"] = (
+                    previous.__dict__ if previous is not None else None)
+                result = self._prepare_combustion_condition(arguments)
+                record["new"] = result["condition"]
             elif method == "set_role_setpoint":
                 role = str(arguments.get("role", "")).strip()
                 value = arguments.get("value")

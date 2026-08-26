@@ -193,7 +193,11 @@ class AgentLauncherTests(unittest.TestCase):
         tools = claude[claude.index("--tools") + 1]
         self.assertIn("mcp__flow_controller__read_snapshot", tools)
         self.assertIn("mcp__flow_controller__list_saved_sequences", tools)
+        self.assertIn("mcp__flow_controller__read_sequence", tools)
         self.assertIn("mcp__flow_controller__submit_sequence_draft", tools)
+        self.assertIn("mcp__flow_controller__create_sequence_variant", tools)
+        self.assertIn(
+            "mcp__flow_controller__prepare_combustion_condition", tools)
         self.assertIn("mcp__flow_controller__set_role_setpoint", tools)
         self.assertIn("mcp__flow_controller__run_saved_sequence", tools)
         allowed = claude[claude.index("--allowedTools") + 1]
