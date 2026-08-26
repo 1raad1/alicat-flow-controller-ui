@@ -142,6 +142,15 @@ class QtUiTests(unittest.TestCase):
             QWidget, 'CombustionGroupTitle')
         self.assertEqual([title.text() for title in titles[:3]],
                          ['PILOT', 'STAGE 1', 'STAGE 2'])
+        self.assertEqual(
+            tab._combustion_card._title_label.text(), 'Combustion — Staged')
+        subtitles = tab._combustion_card.findChildren(
+            QWidget, 'CombustionGroupSubtitle')
+        subtitle_text = [subtitle.text() for subtitle in subtitles]
+        self.assertEqual(
+            subtitle_text, ['SHARE OF STAGE 1 FUEL', 'PILOT INCLUDED'])
+        self.assertNotIn('RICH', ' '.join(subtitle_text))
+        self.assertNotIn('LEAN', ' '.join(subtitle_text))
         self.assertEqual(set(tab._combustion), {
             'pilot_split', 'phi1', 'vel1', 'power1',
             'phi2', 'vel2', 'power2',
@@ -177,9 +186,10 @@ class QtUiTests(unittest.TestCase):
             session.combustion_effective_diameter(SCOPE_STAGE2),
             math.sqrt(4.0 * 1600.0 / math.pi))
         tab._refresh_combustion_staged({}, flows={
-            'ch4_pilot': 1.0, 'nh3_rich': 7.0, 'h2_rich': 2.0,
+            'ch4_pilot': 1.0, 'ch4_stage1': 2.0,
+            'nh3_rich': 7.0, 'h2_rich': 2.0,
         })
-        self.assertEqual(tab._combustion['pilot_split'].value.text(), '10.0')
+        self.assertEqual(tab._combustion['pilot_split'].value.text(), '8.3')
         self.assertTrue(tab._combustion_card.isHidden())
 
         session.set_operating_mode(MODE_STAGED)

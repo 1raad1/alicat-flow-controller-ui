@@ -1440,11 +1440,16 @@ class FlowSession(QObject):
         nh3_r, h2_r = flow('nh3_rich'), flow('h2_rich')
         nh3_l, h2_l = flow('nh3_lean'), flow('h2_lean')
         air_r, air_l = flow('rich_air'), flow('lean_air')
-        ch4 = flow('ch4_pilot')
+        ch4_pilot = flow('ch4_pilot')
+        ch4_stage1 = flow('ch4_stage1')
+        ch4_stage2 = flow('ch4_stage2')
         return (
-            self.calc.phi(nh3_r, h2_r, air_r, ch4),
-            self.calc.phi(nh3_l, h2_l, air_l),
-            self.calc.phi(nh3_r + nh3_l, h2_r + h2_l, air_r + air_l, ch4),
+            self.calc.phi(
+                nh3_r, h2_r, air_r, ch4_stage1 + ch4_pilot),
+            self.calc.phi(nh3_l, h2_l, air_l, ch4_stage2),
+            self.calc.phi(
+                nh3_r + nh3_l, h2_r + h2_l, air_r + air_l,
+                ch4_stage1 + ch4_stage2 + ch4_pilot),
         )
 
     # ------------------------------------------------------------------ #
@@ -1452,13 +1457,20 @@ class FlowSession(QObject):
     # ------------------------------------------------------------------ #
 
     #: Which roles feed each staged scope.  The pilot's methane is counted into
-    #: stage 1, exactly as :meth:`phi_values` counts it: it burns in the rich
-    #: zone, and a phi on this card that disagreed with the phi two tiles above
-    #: it would be worse than no phi at all.
+    #: stage 1, exactly as :meth:`phi_values` counts it. A phi on this card
+    #: that disagreed with the phi two tiles above it would be worse than no
+    #: phi at all.
     STAGE_ROLES = {
-        SCOPE_STAGE1: ({'NH3': 'nh3_rich', 'H2': 'h2_rich',
-                        'CH4': 'ch4_pilot'}, ('rich_air',)),
-        SCOPE_STAGE2: ({'NH3': 'nh3_lean', 'H2': 'h2_lean'}, ('lean_air',)),
+        SCOPE_STAGE1: ({
+            'NH3': ('nh3_rich',),
+            'H2': ('h2_rich',),
+            'CH4': ('ch4_stage1', 'ch4_pilot'),
+        }, ('rich_air',)),
+        SCOPE_STAGE2: ({
+            'NH3': ('nh3_lean',),
+            'H2': ('h2_lean',),
+            'CH4': ('ch4_stage2',),
+        }, ('lean_air',)),
     }
 
     def gas_flows(self, samples=None):
@@ -1501,8 +1513,10 @@ class FlowSession(QObject):
                         if gas != 'Air' and gas not in combustion.FUELS)
             return fuels, totals.get('Air', 0.0), inert
         fuel_roles, air_roles = mapping
-        fuels = {fuel: self.flow_for_role(key, samples)
-                 for fuel, key in fuel_roles.items()}
+        fuels = {
+            fuel: sum(self.flow_for_role(key, samples) for key in keys)
+            for fuel, keys in fuel_roles.items()
+        }
         air = sum(self.flow_for_role(key, samples) for key in air_roles)
         # The RQL roles are fuel and air and nothing else, so a staged scope
         # has no third flow to carry.

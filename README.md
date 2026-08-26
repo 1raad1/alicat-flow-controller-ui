@@ -39,7 +39,7 @@ RQL assignment does not switch modes automatically.
 | Mode | Use it for | Calculations |
 | --- | --- | --- |
 | **Standard** | General multi-channel control | Totals all assigned controllers by gas |
-| **Staged (RQL)** | Rich, quench, lean, and pilot operation | Uses each controller's gas and stage role |
+| **Staged (RQL)** | Stage 1, Stage 2, and pilot operation | Uses each controller's gas and stage role |
 
 ### Standard
 
@@ -58,17 +58,21 @@ left out of stage-aware calculations.
 
 ### Staged (RQL)
 
-Staged mode models these seven possible process lines:
+Staged mode groups controllers by stage:
 
-| Zone | Required roles |
+| Zone | Supported gases |
 | --- | --- |
-| Stage 1 (rich) | NH3, H2, Air |
-| Stage 2 (lean) | NH3, H2, Air |
+| Stage 1 | NH3, H2, CH4, Air |
+| Stage 2 | NH3, H2, CH4, Air |
 | Pilot | CH4 |
+
+CH4 assigned directly to Stage 1 or Stage 2 is included in that stage's live
+combustion estimate. The CH4 pilot is also included in Stage 1. Automatic RQL
+target calculation still uses its established seven required lines:
 
 Auto-calculation is enabled for either of these assignments:
 
-- **Full RQL:** all seven roles.
+- **Full RQL:** NH3, H2, and Air in both stages, plus the CH4 pilot.
 - **Rich + quench-air:** Stage 1 fuels and air, Stage 2 air, and the CH4 pilot.
 
 The calculator accepts firing rate, hydrogen fraction by volume, Stage 1 fuel

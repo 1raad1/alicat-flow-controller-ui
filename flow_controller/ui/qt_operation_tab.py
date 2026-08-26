@@ -1056,7 +1056,7 @@ class OperationTab(QWidget):
 
     def _build_combustion_staged(self):
         card = Card(
-            'Combustion — Staged (RQL)', collapsible=False,
+            'Combustion — Staged', collapsible=False,
             help_text=('The pilot share of Stage 1 fuel by volume, plus each '
                        "stage's live φ, power, and inlet bulk velocity. Enter "
                        'the two inlet cross-sectional areas to calculate '
@@ -1073,13 +1073,13 @@ class OperationTab(QWidget):
                 ('pilot_split', 'PILOT SPLIT  %', theme.TEXT_BRIGHT),
             )), 2)
         groups.addWidget(self._combustion_group(
-            'STAGE 1', 'RICH · PILOT INCLUDED', (
+            'STAGE 1', 'PILOT INCLUDED', (
                 ('phi1', 'φ', theme.TEXT_BRIGHT),
                 ('vel1', 'INLET VEL  m/s', theme.TEXT_BRIGHT),
                 ('power1', 'POWER  kW', theme.TEXT_BRIGHT),
             )), 3)
         groups.addWidget(self._combustion_group(
-            'STAGE 2', 'LEAN / QUENCH', (
+            'STAGE 2', '', (
                 ('phi2', 'φ', theme.TEXT_BRIGHT),
                 ('vel2', 'INLET VEL  m/s', theme.TEXT_BRIGHT),
                 ('power2', 'POWER  kW', theme.TEXT_BRIGHT),
@@ -1107,8 +1107,10 @@ class OperationTab(QWidget):
         heading.setSpacing(theme.PAD_SM)
         heading.addWidget(label(title, color=theme.TEXT_BRIGHT, size=9, bold=True,
                                 object_name='CombustionGroupTitle'))
-        heading.addWidget(label(subtitle, color=theme.TEXT_MUTED, size=7,
-                                object_name='CombustionGroupSubtitle'))
+        if subtitle:
+            heading.addWidget(label(
+                subtitle, color=theme.TEXT_MUTED, size=7,
+                object_name='CombustionGroupSubtitle'))
         heading.addStretch(1)
         layout.addLayout(heading)
 
@@ -1390,7 +1392,7 @@ class OperationTab(QWidget):
         pilot = max(0.0, flows.get('ch4_pilot', 0.0))
         stage1_fuel = pilot + sum(
             max(0.0, flows.get(key, 0.0))
-            for key in ('nh3_rich', 'h2_rich'))
+            for key in ('nh3_rich', 'h2_rich', 'ch4_stage1'))
         pilot_split = None if stage1_fuel <= 0.0 else pilot / stage1_fuel * 100.0
         self._combustion['pilot_split'].set_value(
             '--' if pilot_split is None else f'{pilot_split:.1f}')
