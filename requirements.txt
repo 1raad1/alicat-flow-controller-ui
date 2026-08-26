@@ -3,6 +3,9 @@ pyserial==3.5
 numpy==2.4.4
 PySide6==6.11.1
 pyqtgraph==0.14.0
+mcp==2.1.1
+pyte==0.8.2
+pywinpty==3.0.5; platform_system == "Windows"
 
 # Optional .xlsx export dependency. CSV export works without it.
 openpyxl==3.1.5

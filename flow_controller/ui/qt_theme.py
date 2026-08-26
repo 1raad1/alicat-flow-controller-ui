@@ -379,6 +379,17 @@ QTabBar::tab:selected {{
     border-color: rgba(255, 255, 255, 44);
 }}
 #CardMenuButton::menu-indicator {{ width: 0; image: none; }}
+#AgentLaunchButton {{
+    min-width: 0;
+    padding: {scale(6)}px;
+    background-color: rgba(255, 255, 255, 10);
+    border: 1px solid rgba(255, 255, 255, 24);
+    border-radius: {RADIUS_CONTROL}px;
+}}
+#AgentLaunchButton:hover {{
+    background-color: rgba(255, 255, 255, 26);
+    border-color: rgba(255, 255, 255, 52);
+}}
 QMenu#CombustionSettingsMenu {{
     background-color: {BG_CARD_ALT};
     border: 1px solid {BORDER};

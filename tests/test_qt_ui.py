@@ -8,11 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QComboBox, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QMessageBox, QWidget
 
 from flow_controller.core.combustion_prefs import SCOPE_STAGE2
 from flow_controller.core.session import (FlowSession, MODE_STAGED,
@@ -24,6 +25,7 @@ from flow_controller.ui.qt_operation_tab import (
     OperationTab, SafetyBar, _area_from_diameter, _sequence_stem,
 )
 from flow_controller.ui.qt_settings import SettingsDialog
+from flow_controller.ui.qt_widgets import Card
 
 
 class _SafetySession(QObject):
@@ -127,6 +129,10 @@ class QtUiTests(unittest.TestCase):
         session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
         tab = OperationTab(session)
         self.assertFalse(hasattr(tab, '_ignition_card'))
+        self.assertIsInstance(tab._sequence_card, Card)
+        self.assertNotIsInstance(tab._experiment_plan_card, Card)
+        self.assertEqual(tab._sequence_card._title_label.text(), 'Sequences')
+        self.assertEqual(tab._sequence_card._badge.text(), '')
 
         groups = tab._combustion_card.findChildren(
             QWidget, 'CombustionStageCard')
@@ -167,6 +173,72 @@ class QtUiTests(unittest.TestCase):
         self.assertFalse(tab._combustion_card.isHidden())
         tab.close()
         session.shutdown()
+
+    def test_controller_cards_toggle_between_list_and_grid(self):
+        session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
+        session.selection = {
+            'A': ('NH3', 'Zone 1'),
+            'B': ('Air', 'Zone 1'),
+            'C': ('H2', 'Zone 1'),
+        }
+        session._rebuild_assignments()
+        tab = OperationTab(session)
+
+        self.assertEqual(tab._cards_view, 'list')
+        self.assertTrue(tab._cards_view_buttons['list'].isChecked())
+        self.assertTrue(all(not card._compact
+                            for card in tab._cards.values()))
+        tab._cards['A'].entry.setText('1.25')
+
+        tab._cards_view_buttons['grid'].click()
+
+        self.assertEqual(tab._cards_view, 'grid')
+        self.assertEqual(session.controller_cards_view, 'grid')
+        self.assertTrue(tab._cards_view_buttons['grid'].isChecked())
+        self.assertFalse(tab._cards_view_buttons['list'].isChecked())
+        self.assertTrue(all(card._compact for card in tab._cards.values()))
+        self.assertEqual(tab._cards['A'].entry.text(), '1.25')
+        positions = {}
+        for unit, card in tab._cards.items():
+            index = tab._cards_layout.indexOf(card)
+            row_number, column, _row_span, _column_span = (
+                tab._cards_layout.getItemPosition(index))
+            positions[unit] = row_number, column
+        occupied_rows = {}
+        for row_number, column in positions.values():
+            occupied_rows.setdefault(row_number, set()).add(column)
+        self.assertEqual(sorted(map(len, occupied_rows.values())), [1, 2])
+        self.assertIn({0, 1}, occupied_rows.values())
+
+        tab._cards_view_buttons['list'].click()
+        self.assertTrue(all(not card._compact
+                            for card in tab._cards.values()))
+        tab.close()
+        session.shutdown()
+
+    def test_agent_terminal_is_mounted_in_operation_sidebar(self):
+        session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
+        window = MainWindow(session)
+        self.assertIs(window.agent_pane, window.operation_tab.agent_pane)
+        self.assertTrue(window.operation_tab.isAncestorOf(window.agent_pane))
+        self.assertTrue(window.agent_pane.terminal.isReadOnly())
+        window.close()
+        self.app.processEvents()
+
+    def test_window_refuses_to_close_if_agent_cannot_be_terminated(self):
+        session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
+        window = MainWindow(session)
+        window.agent_manager.shutdown = Mock(return_value=False)
+        event = Mock()
+
+        with patch.object(QMessageBox, 'critical') as warning:
+            window.closeEvent(event)
+
+        event.ignore.assert_called_once_with()
+        warning.assert_called_once()
+        window.agent_manager.shutdown = Mock(return_value=True)
+        window.close()
+        self.app.processEvents()
 
     def test_inlet_area_is_calculated_from_the_diameter(self):
         self.assertAlmostEqual(_area_from_diameter(20.0), math.pi * 100.0)

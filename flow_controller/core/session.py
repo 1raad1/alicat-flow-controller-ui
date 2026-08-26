@@ -47,6 +47,8 @@ from ..services.discovery import DiscoveryService
 from .combustion_prefs import SCOPE_ALL, SCOPE_STAGE1, SCOPE_STAGE2
 from .csv_logger import CsvLogger, resolve_path
 from .graph_history import GraphHistory
+from .agent_read_model import build_snapshot, derive_state, windowed_history
+from .experiment_plan_controller import ExperimentPlanController
 from .ramps import RampLeg, RampRunner
 from .sequence import (DEADBAND_FLOOR, DEADBAND_FRACTION, SETTLE_TOLERANCE,
                        TICK_S, Sequence, SequencePlayer, SequenceRecorder,
@@ -131,6 +133,7 @@ class FlowSession(QObject):
     assignments_changed = Signal(dict)      # role key -> unit, after a live edit
     full_scale_changed = Signal(object, object)  # unit, SLPM or None for auto
     unit_ramp_changed = Signal(object, object)   # unit, SLPM/s or None for none
+    max_flow_changed = Signal(object, object)    # unit, SLPM or None for none
 
     # -- monitoring ------------------------------------------------------- #
     monitoring_changed = Signal(bool)
@@ -139,6 +142,7 @@ class FlowSession(QObject):
     samples_updated = Signal(int)           # generation
     restart_status = Signal(str, str)       # text, kind
     reconnect_finished = Signal(int)
+    communication_fault = Signal(str)       # uncertain read/write transport state
 
     # -- safety ----------------------------------------------------------- #
     estop_armed_changed = Signal(bool)
@@ -162,6 +166,7 @@ class FlowSession(QObject):
     sequence_saved = Signal(object)         # Path
     sequence_cycle = Signal(int, int)       # pass now running, of how many (0 = endless)
     sequence_hold = Signal(bool, str)       # replay clock held, why
+    sequence_ended = Signal(bool, str)      # completed normally, reason
 
     # -- recording -------------------------------------------------------- #
     logging_changed = Signal(bool, object)  # active, path
@@ -207,7 +212,8 @@ class FlowSession(QObject):
 
         # -- assignment state --
         self.selection = {}                  # unit -> (gas, zone)
-        #: ``{unit: {'full_scale': SLPM, 'ramp': SLPM/s}}`` as declared by the
+        #: ``{unit: {'full_scale': SLPM, 'ramp': SLPM/s, 'max_flow': SLPM}}``
+        #: as declared by the
         #: operator -- the devices report neither.  Loaded from disk because
         #: both describe the meter and its line rather than the run, so they
         #: should outlive the session that typed them.  A unit missing a full
@@ -246,6 +252,11 @@ class FlowSession(QObject):
 
         # -- safety state --
         self._zero_locked_units = set()
+        # A plan watchdog keeps its targets locked after the monitor confirms
+        # zero, until the GUI thread has stopped the replay and marked the plan
+        # aborted. This prevents queued GUI timer work from racing the abort
+        # when the event loop recovers from a stall.
+        self._watchdog_locked_units = set()
         self._zero_action_active = False
         self._active_zero_request = None
         self._emergency_stop_active = False
@@ -294,6 +305,7 @@ class FlowSession(QObject):
         self._replay_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._replay_timer.setInterval(max(20, int(TICK_S * 1000)))
         self._replay_timer.timeout.connect(self._sequence_tick)
+        self.experiment_plans = ExperimentPlanController(self, self)
 
     # ==================================================================== #
     #  Thread marshalling and narration                                    #
@@ -489,6 +501,63 @@ class FlowSession(QObject):
                            f"Unit {unit}: bar full scale back to automatic."))
         self.full_scale_changed.emit(unit, cleaned)
         return cleaned
+
+    def max_flow_for(self, unit):
+        """The declared command ceiling for one controller, or ``None``."""
+        return self.pref_for(unit, 'max_flow')
+
+    def set_max_flow(self, unit, value):
+        """Declare -- or with ``None``/0 withdraw -- one command ceiling.
+
+        This is deliberately separate from the meter full scale.  A full scale
+        only changes a tracking bar; this value rejects any higher command at
+        the session boundary, regardless of whether it came from a card,
+        replay, ignition sequence, or a future automation interface.
+        """
+        cleaned = self._set_pref(
+            unit, 'max_flow', value,
+            lambda maximum: (f"Unit {unit}: command ceiling set to "
+                             f"{maximum:g} SLPM."
+                             if maximum is not None else
+                             f"Unit {unit}: command ceiling cleared."))
+        self.max_flow_changed.emit(unit, cleaned)
+        previous = self._last_sp.get(unit, 0.0)
+        if (cleaned is not None and isinstance(previous, (int, float))
+                and math.isfinite(float(previous)) and float(previous) > cleaned):
+            # A newly lowered hard limit must not grandfather an already-live
+            # higher command.  Use the application's established verified
+            # ZERO ALL path: a broad safe shutdown is preferable to inventing
+            # an unreviewed capped setpoint or leaving the rig over its limit.
+            self._last_sp[unit] = 0.0
+            self._log(
+                f"Unit {unit}: MAX FLOW was lowered below the last commanded "
+                "setpoint; requesting a verified zero for that controller.")
+            if self.controllers_connected:
+                self._request_zero_units(
+                    (str(unit),), scope="limit",
+                    scope_label=f"UNIT {unit} LIMIT")
+        return cleaned
+
+    def _setpoint_limit_error(self, unit, setpoint):
+        """Return why a normal command is unsafe *at this instant*.
+
+        This check is deliberately repeated immediately before every hardware
+        write.  A queued command can outlive the preference value under which
+        it was accepted, so enqueue-time validation alone is not a safety
+        boundary.
+        """
+        if isinstance(setpoint, bool):
+            return "invalid setpoint"
+        try:
+            value = float(setpoint)
+        except (TypeError, ValueError):
+            return "invalid setpoint"
+        if not math.isfinite(value) or value < 0.0:
+            return "invalid setpoint"
+        maximum = self.max_flow_for(unit)
+        if maximum is not None and value > maximum:
+            return f"command ceiling is {maximum:.3f} SLPM"
+        return None
 
     def ramp_rate_for(self, unit):
         """How fast this controller is allowed to move, SLPM/s, or ``None``."""
@@ -1121,11 +1190,15 @@ class FlowSession(QObject):
                         timeout_counts[unit] = timeout_counts.get(unit, 0) + 1
                         self._log(f"Read timeout Unit {unit} "
                                   f"({timeout_counts[unit]}/{MAX_TIMEOUTS})")
+                        self.communication_fault.emit(
+                            f"read timeout on Unit {unit}")
                         if timeout_counts[unit] >= MAX_TIMEOUTS:
                             self._post(self._auto_restart_monitoring)
                             return
                     except Exception as exc:
                         self._log(f"Read error Unit {unit}: {type(exc).__name__}: {exc}")
+                        self.communication_fault.emit(
+                            f"read error on Unit {unit}: {type(exc).__name__}")
 
                 timestamp = datetime.now()
                 self._write_log_row(pass_samples, timestamp)
@@ -1150,6 +1223,13 @@ class FlowSession(QObject):
         failures = []
         for unit, controller in controllers.items():
             wanted = self._last_sp.get(unit, 0.0)
+            limit_error = self._setpoint_limit_error(unit, wanted)
+            if limit_error:
+                self._log(
+                    f"WARNING: Unit {unit} stored SP {wanted!r} will not be "
+                    f"restored; {limit_error}. Restoring zero instead.")
+                wanted = 0.0
+                self._last_sp[unit] = 0.0
             try:
                 await asyncio.wait_for(
                     controller.set_flow_rate(wanted), timeout=2.0)
@@ -1187,7 +1267,14 @@ class FlowSession(QObject):
             except Exception:
                 break
         for unit, setpoint in pending.items():
-            if unit in self._zero_locked_units and abs(setpoint) > 0.001:
+            limit_error = self._setpoint_limit_error(unit, setpoint)
+            if limit_error:
+                self._log(
+                    f"Unit {unit}: queued SP {setpoint!r} dropped before write; "
+                    f"{limit_error}.")
+                continue
+            if (unit in self._zero_locked_units
+                    or unit in self._watchdog_locked_units) and abs(setpoint) > 0.001:
                 self._log(
                     f"Unit {unit}: nonzero setpoint blocked by active zero command.")
                 continue
@@ -1196,6 +1283,8 @@ class FlowSession(QObject):
                              if value == unit), "unknown")
                 self._log(f"ERROR: Setpoint dropped — Unit {unit} ({role}) "
                           "has no open connection.")
+                self.communication_fault.emit(
+                    f"write target Unit {unit} has no open connection")
                 continue
             try:
                 await asyncio.wait_for(
@@ -1206,8 +1295,12 @@ class FlowSession(QObject):
             except asyncio.TimeoutError:
                 self._log(f"WARNING: Unit {unit} SP={setpoint:.3f} — write sent "
                           "but readback timed out (command likely applied).")
+                self.communication_fault.emit(
+                    f"setpoint write timeout on Unit {unit}; applied state is uncertain")
             except Exception as exc:
                 self._log(f"Set-flow error Unit {unit}: {exc}")
+                self.communication_fault.emit(
+                    f"setpoint write error on Unit {unit}: {type(exc).__name__}")
             finally:
                 await asyncio.sleep(0.05)
 
@@ -1243,8 +1336,18 @@ class FlowSession(QObject):
         refused is not recorded: the sequence is what the rig was asked *and
         allowed* to do.
         """
+        limit_error = self._setpoint_limit_error(unit, setpoint)
+        if limit_error == "invalid setpoint":
+            self._log(f"Unit {unit}: invalid setpoint rejected.")
+            return False
         value = float(setpoint)
-        if unit in self._zero_locked_units and abs(value) > 0.001:
+        maximum = self.max_flow_for(unit)
+        if limit_error:
+            self._log(f"Unit {unit}: SP {value:.3f} SLPM rejected; command "
+                      f"ceiling is {maximum:.3f} SLPM.")
+            return False
+        if (unit in self._zero_locked_units
+                or unit in self._watchdog_locked_units) and abs(value) > 0.001:
             return False
         self.setpoint_queue.put((unit, value))
         self._note_setpoint(unit, value)
@@ -1292,20 +1395,32 @@ class FlowSession(QObject):
         if not unit:
             self.failed.emit("Manual Set", f"No unit assigned for {key}.")
             return False
-        if setpoint < 0:
-            self.failed.emit("Manual Set", "Setpoint cannot be negative.")
+        try:
+            value = float(setpoint)
+        except (TypeError, ValueError):
+            self.failed.emit("Manual Set", "Setpoint must be a finite number.")
+            return False
+        if not math.isfinite(value) or value < 0.0:
+            self.failed.emit("Manual Set", "Setpoint must be finite and non-negative.")
+            return False
+        maximum = self.max_flow_for(unit)
+        if maximum is not None and value > maximum:
+            self.failed.emit(
+                "Manual Set", f"Setpoint {value:g} SLPM exceeds Unit {unit}'s "
+                f"command ceiling of {maximum:g} SLPM.")
             return False
         start = self.flow_for_role(key)
-        seconds = self.ramp_seconds_for(unit, key, float(setpoint) - start)
+        seconds = self.ramp_seconds_for(unit, key, value - start)
         if seconds > 0.0:
             # replace: a setpoint typed while the line is still moving is a
             # change of mind, and the new figure is the one that counts.  The
             # move restarts from where the flow actually is, so redirecting
             # mid-ramp is a redirection rather than a jump.
-            return self.start_ramp(key, setpoint, seconds=seconds, replace=True)
-        self.queue_setpoint(unit, setpoint)
-        self._log(f"Unit {unit} ({key}): SP → {setpoint:.3f} SLPM (manual)")
-        return True
+            return self.start_ramp(key, value, seconds=seconds, replace=True)
+        queued = self.queue_setpoint(unit, value)
+        if queued:
+            self._log(f"Unit {unit} ({key}): SP → {value:.3f} SLPM (manual)")
+        return queued
 
     def flow_for_role(self, key, samples=None):
         """Live flow for a role, straight from the sample cache."""
@@ -1519,6 +1634,19 @@ class FlowSession(QObject):
     def live_samples(self):
         return self._live_samples
 
+    def read_snapshot(self):
+        """A copied read-only description of the current rig configuration."""
+        return build_snapshot(self)
+
+    def read_history(self, *, window_s=None, units=None, metric_keys=None):
+        """Copied graph history for a caller that must not touch its deques."""
+        return windowed_history(
+            self.history, window_s=window_s, units=units, metric_keys=metric_keys)
+
+    def read_derived_state(self, *, duration_s, tolerance):
+        """Current phi values and role-by-role flow tracking over a window."""
+        return derive_state(self, duration_s=duration_s, tolerance=tolerance)
+
     def clear_history(self):
         """Throw away the plotted history and restart its time axis.
 
@@ -1558,12 +1686,69 @@ class FlowSession(QObject):
     def zero_all(self):
         return self.request_zero(include_air=True)
 
+    def make_zero_request(self, *, include_air, scope=None):
+        """Snapshot the currently selected units for a priority zero."""
+        unit_gases = [
+            (unit, gas) for unit, (gas, zone) in self.selection.items()
+            if gas not in ('', roles.UNSELECTED_GAS)
+            and zone != roles.UNASSIGNED_ZONE
+        ]
+        units = select_zero_units(unit_gases, include_air=include_air)
+        return ZeroRequest(
+            scope=scope or ("all" if include_air else "fuel"),
+            units=tuple(units))
+
+    def enqueue_watchdog_zero(self, request, reason):
+        """Enqueue a verified zero from a non-Qt deadline watchdog.
+
+        Only the serial monitor loop touches hardware. ``Queue`` and the ramp
+        runner are thread-safe, so this method can pre-empt writes even while
+        Qt's event loop is blocked. GUI narration is posted for later.
+        """
+        if not isinstance(request, ZeroRequest) or not request.units:
+            return False
+        units = tuple(request.units)
+        self._zero_action_active = True
+        self._active_zero_request = request
+        self._zero_locked_units.update(units)
+        self._watchdog_locked_units.update(units)
+        self._ramps.cancel_all()
+        for unit in units:
+            self._last_sp[unit] = 0.0
+        self._zero_request_queue.put(request)
+        self._post(self._announce_watchdog_zero, request, str(reason))
+        return True
+
+    def _announce_watchdog_zero(self, request, reason):
+        self._set_ignition_state("IDLE")
+        self._set_estop_armed(False)
+        for unit in request.units:
+            self._note_setpoint(unit, 0.0)
+        self.banner.emit("PLAN TIMEOUT — VERIFIED ZERO IN PROGRESS", 'danger')
+        self._log(
+            f"Experiment-plan watchdog fired: {reason} Priority zero queued "
+            f"for Unit(s) {', '.join(request.units)}.")
+        self.zero_started.emit(request)
+
+    def release_watchdog_zero_lock(self, units):
+        """Release the temporary recovery lock after Qt has stopped the plan."""
+        self._watchdog_locked_units.difference_update(units)
+
     def request_zero(self, *, include_air):
         """Command an immediate verified zero without dropping the connection.
 
         Monitoring keeps running.  Closing the port would mean the operator
         loses sight of the rig at exactly the moment they need it most.
         """
+        request = self.make_zero_request(include_air=include_air)
+        scope = "all" if include_air else "fuel"
+        scope_label = "ALL FLOWS" if include_air else "FUEL FLOWS"
+        return self._request_zero_units(
+            request.units, scope=scope, scope_label=scope_label)
+
+    def _request_zero_units(self, units, *, scope, scope_label):
+        """Start the established verified-zero path for explicit units."""
+        units = list(dict.fromkeys(str(unit) for unit in units if str(unit)))
         if not self.controllers_connected:
             self.failed.emit("Zero Flow", "Connect the flow meters first.")
             return False
@@ -1573,20 +1758,11 @@ class FlowSession(QObject):
             self.failed.emit(
                 "Zero Flow", "Wait for the current connection operation to finish.")
             return False
-
-        unit_gases = [
-            (unit, gas) for unit, (gas, zone) in self.selection.items()
-            if gas not in ('', roles.UNSELECTED_GAS)
-            and zone != roles.UNASSIGNED_ZONE
-        ]
-        units = select_zero_units(unit_gases, include_air=include_air)
         if not units:
             self.failed.emit(
                 "Zero Flow", "No selected controllers match this zero-flow action.")
             return False
 
-        scope = "all" if include_air else "fuel"
-        scope_label = "ALL FLOWS" if include_air else "FUEL FLOWS"
         self._zero_action_active = True
         self._zero_locked_units.update(units)
         self._set_ignition_state("IDLE")
@@ -1734,7 +1910,12 @@ class FlowSession(QObject):
         self._emergency_stop_active = False
         self._zero_locked_units.difference_update(request.units)
         self._set_estop_armed(self.controllers_connected)
-        scope_label = "ALL FLOWS" if request.scope == "all" else "FUEL FLOWS"
+        if request.scope == "all" or request.scope.endswith("_all"):
+            scope_label = "ALL FLOWS"
+        elif request.scope == "fuel" or request.scope.endswith("_fuel"):
+            scope_label = "FUEL FLOWS"
+        else:
+            scope_label = "LIMIT ENFORCEMENT"
         for unit in confirmed:
             self._last_sp[unit] = 0.0
             self._log(f"ZERO {scope_label}: Unit {unit} confirmed at zero. ✓")
@@ -2036,9 +2217,74 @@ class FlowSession(QObject):
 
     # -- the sequence in hand --------------------------------------------- #
 
+    def sequence_validation_errors(self, sequence):
+        """Return fail-closed errors for a sequence in this live rig.
+
+        Files are parsed strictly by :class:`Sequence`; this extra pass is
+        intentionally session-owned because only the live assignments reveal
+        which unit (and therefore which command ceiling) a role drives today.
+        Unassigned tracks remain loadable for editing and are rejected by the
+        existing binding check when replay is requested.
+        """
+        if not isinstance(sequence, Sequence):
+            return ["The sequence is not a valid sequence object."]
+        errors = []
+        keys = [track.key for track in sequence.tracks]
+        duplicates = sorted({key for key in keys if keys.count(key) > 1})
+        if duplicates:
+            errors.append(
+                "Duplicate sequence role(s): " + ", ".join(duplicates) + ".")
+        for track in sequence.tracks:
+            unit = self.unit_for_role(track.key)
+            maximum = self.max_flow_for(unit) if unit else None
+            for index, frame in enumerate(track.keyframes, start=1):
+                try:
+                    at = float(frame.t)
+                except (TypeError, ValueError):
+                    errors.append(f"{track.label}, keyframe {index}: time is invalid.")
+                else:
+                    if not math.isfinite(at) or at < 0.0:
+                        errors.append(
+                            f"{track.label}, keyframe {index}: time must be finite "
+                            "and non-negative.")
+                try:
+                    value = float(frame.value)
+                except (TypeError, ValueError):
+                    errors.append(f"{track.label}, keyframe {index}: value is invalid.")
+                    continue
+                if not math.isfinite(value) or value < 0.0:
+                    errors.append(
+                        f"{track.label}, keyframe {index}: value must be finite "
+                        "and non-negative.")
+                elif maximum is not None and value > maximum:
+                    errors.append(
+                        f"{track.label}, keyframe {index}: {value:g} SLPM exceeds "
+                        f"Unit {unit}'s command ceiling of {maximum:g} SLPM.")
+        for index, marker in enumerate(sequence.markers, start=1):
+            try:
+                at = float(marker)
+            except (TypeError, ValueError):
+                errors.append(f"Marker {index}: time is invalid.")
+            else:
+                if not math.isfinite(at) or at < 0.0:
+                    errors.append(
+                        f"Marker {index}: time must be finite and non-negative.")
+        return errors
+
+    def _sequence_is_valid(self, sequence, action):
+        """Report a validation failure through the normal user-facing signal."""
+        errors = self.sequence_validation_errors(sequence)
+        if not errors:
+            return True
+        detail = "\n".join(f"• {error}" for error in errors)
+        self.failed.emit("Sequence", f"Cannot {action}:\n\n{detail}")
+        return False
+
     def set_sequence(self, sequence):
         """Adopt a sequence edited by the view, or clear it with ``None``."""
         if self._sequence_state == SEQ_REPLAYING:
+            return False
+        if sequence is not None and not self._sequence_is_valid(sequence, "use this sequence"):
             return False
         previous = self.sequence
         self.sequence = sequence
@@ -2059,6 +2305,8 @@ class FlowSession(QObject):
         except Exception as exc:
             self.failed.emit("Sequence",
                              f"Could not open that sequence:\n\n{exc}")
+            return None
+        if not self._sequence_is_valid(sequence, "load this sequence"):
             return None
         self.sequence = sequence
         self._log(f"Sequence loaded: '{sequence.name}' ({sequence.duration:.1f} s) "
@@ -2156,6 +2404,8 @@ class FlowSession(QObject):
             return False
         if sequence.duration <= 0:
             self.failed.emit("Replay", "That sequence has no duration.")
+            return False
+        if not self._sequence_is_valid(sequence, "replay this sequence"):
             return False
 
         bound, missing = sequence.bind(self.unit_for_role)
@@ -2263,6 +2513,7 @@ class FlowSession(QObject):
             self.sequence_hold.emit(False, "")
         self.banner.emit("", 'clear')
         self.sequence_progress.emit(position, duration)
+        self.sequence_ended.emit(reason == "finished", reason)
         return True
 
     def _sequence_tick(self):
@@ -2484,6 +2735,7 @@ class FlowSession(QObject):
 
     def shutdown(self):
         """Stop everything in the order that leaves the rig safest."""
+        self.experiment_plans.shutdown()
         self._ramps.cancel_all()
         self.stop_replay(reason="cancelled at shutdown")
         self._replay_timer.stop()

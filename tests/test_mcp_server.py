@@ -1,0 +1,28 @@
+import asyncio
+import importlib.util
+import unittest
+
+from flow_controller.agent.mcp_server import build_server
+
+
+@unittest.skipUnless(importlib.util.find_spec("mcp"),
+                     "the optional MCP dependency is not installed")
+class McpServerTests(unittest.TestCase):
+    def test_server_advertises_read_draft_and_gated_live_tools(self):
+        from mcp.client import Client
+
+        async def inspect():
+            async with Client(build_server()) as client:
+                return await client.list_tools()
+
+        result = asyncio.run(inspect())
+        names = {tool.name for tool in result.tools}
+        self.assertEqual(names, {
+            "read_snapshot", "read_history", "read_derived_state",
+            "submit_sequence_draft", "submit_plan_draft",
+            "set_role_setpoint", "start_armed_plan",
+        })
+
+
+if __name__ == "__main__":
+    unittest.main()
