@@ -76,10 +76,6 @@ class FakeAuthority(QObject):
 class FakeAuthorityService:
     def __init__(self):
         self.authority = FakeAuthority()
-        self.approval_handler = None
-
-    def set_approval_handler(self, callback):
-        self.approval_handler = callback
 
     def preview_live_authority(self):
         return self.authority.envelope
@@ -200,6 +196,9 @@ class AgentLauncherTests(unittest.TestCase):
         self.assertIn("mcp__flow_controller__submit_sequence_draft", tools)
         self.assertIn("mcp__flow_controller__set_role_setpoint", tools)
         self.assertIn("mcp__flow_controller__run_saved_sequence", tools)
+        allowed = claude[claude.index("--allowedTools") + 1]
+        self.assertIn("mcp__flow_controller__set_role_setpoint", allowed)
+        self.assertIn("mcp__flow_controller__run_saved_sequence", allowed)
         config = json.loads(claude[claude.index("--mcp-config") + 1])
         server = config["mcpServers"]["flow_controller"]
         self.assertEqual(server["command"], "python.exe")
@@ -211,7 +210,7 @@ class AgentLauncherTests(unittest.TestCase):
         mcp_override = next(item for item in codex
                             if item.startswith("mcp_servers={"))
         self.assertIn("flow_controller={command=", mcp_override)
-        self.assertIn("flow_controller={command=", mcp_override)
+        self.assertIn('default_tools_approval_mode="approve"', mcp_override)
 
     def test_stop_is_nonblocking_and_explicitly_does_not_change_setpoints(self):
         process = FakeProcess()
@@ -491,6 +490,7 @@ class AgentLauncherTests(unittest.TestCase):
                 return_value=QMessageBox.StandardButton.Yes) as confirm:
             pane.live_toggle.click()
         self.assertTrue(confirm.called)
+        self.assertIn('ONLY CONTROL WARNING', confirm.call_args.args[2])
         self.assertTrue(service.authority.enabled)
         self.assertEqual(pane.live_toggle.text(), 'LIVE CONTROL ON')
 

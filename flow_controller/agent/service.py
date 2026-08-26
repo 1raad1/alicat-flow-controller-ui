@@ -48,20 +48,14 @@ class AgentAuditLog:
 
 
 class AgentDraftService:
-    """Qt-thread service for read, draft, supervised, and armed operations."""
+    """Qt-thread service for read, draft, and toggle-authorized operations."""
 
-    def __init__(self, session, *, audit=None, authority=None,
-                 approve_action=None):
+    def __init__(self, session, *, audit=None, authority=None):
         self.session = session
         self.audit = audit or AgentAuditLog()
         self.authority = authority or AgentAuthority(session)
-        self._approve_action = approve_action
         self._last_read_at = {}
         self.authority.changed.connect(self._on_authority_changed)
-
-    def set_approval_handler(self, callback):
-        """Install the UI callback used for every supervised setpoint."""
-        self._approve_action = callback
 
     def preview_live_authority(self):
         return self.authority.preview()
@@ -409,34 +403,16 @@ class AgentDraftService:
                     "role": role, "unit": unit, "setpoint": previous}
                 record["new"] = {
                     "role": role, "unit": unit, "setpoint": float(value)}
-                record["approval"] = "required"
-                if self._approve_action is None:
-                    raise AgentRequestError(
-                        "No operator approval UI is available for live control.")
-                approved = bool(self._approve_action({
-                    "agent": agent_id,
-                    "role": role,
-                    "unit": unit,
-                    "previous": previous,
-                    "value": float(value),
-                    "envelope": dict(role_envelope),
-                }))
-                if not approved:
-                    record["approval"] = "rejected"
-                    raise AgentRequestError("Operator rejected the setpoint request.")
-                record["approval"] = "approved"
-                # The dialog may have remained open while the rig changed, so
-                # validate the full envelope again.
-                self.authority.check_role(role, value)
+                record["approval"] = "live_toggle"
                 self._audit_before_live_execution(
-                    record, "approved_for_execution")
+                    record, "armed_for_execution")
                 # Audit I/O may block on a synced filesystem. Expiry and all
                 # live rig invariants therefore get one final check at the
                 # session boundary, after the durable record exists.
                 self.authority.check_role(role, value)
                 if not self.session.set_role_setpoint(role, value):
                     raise AgentRequestError(
-                        "The session refused the approved setpoint.")
+                        "The session refused the setpoint.")
                 result = {
                     "accepted": True,
                     "status": "queued",

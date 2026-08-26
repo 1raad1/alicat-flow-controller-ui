@@ -223,7 +223,7 @@ AGENT_PROFILES = {
         arguments=('--setting-sources', '', '--disable-slash-commands',
                    '--permission-mode', 'default', '--tools', 'Read'),
         description=('Claude Code: no user/project settings or slash commands; '
-                     'only Read and the allowlisted rig MCP tools are offered; '
+                     'only Read and pre-authorized rig MCP tools are offered; '
                      'live rig authority remains default-off in the app.'),
     ),
     'codex': AgentProfile(
@@ -233,8 +233,8 @@ AGENT_PROFILES = {
         arguments=('--sandbox', 'read-only', '--ask-for-approval', 'on-request'),
         description=('Codex: read-only sandbox and approval requests. The Codex '
                      'CLI has no public flag that makes this pane a hard '
-                     'shell-denial boundary; live MCP actions still require '
-                     'the app toggle and operator approval.'),
+                     'shell-denial boundary; allowlisted rig MCP tools are '
+                     'pre-authorized only while the app toggle permits them.'),
     ),
 }
 
@@ -346,7 +346,10 @@ def launch_command(agent: str, executable: str, project_dir: Path, *,
             }
             arguments.extend((
                 '--strict-mcp-config', '--mcp-config',
-                json.dumps(config, separators=(',', ':'))))
+                json.dumps(config, separators=(',', ':')),
+                '--allowedTools', ','.join(
+                    f'mcp__flow_controller__{name}'
+                    for name in MCP_TOOL_NAMES)))
         else:
             environment_table = '{' + ','.join(
                 f'{key}={_toml_string(value)}'
@@ -354,7 +357,8 @@ def launch_command(agent: str, executable: str, project_dir: Path, *,
             server_table = (
                 '{command=' + _toml_string(python_executable)
                 + ',args=' + json.dumps(server_args)
-                + ',env=' + environment_table + '}')
+                + ',env=' + environment_table
+                + ',default_tools_approval_mode="approve"}')
             arguments.extend((
                 # Replace the whole configured MCP table: user-configured
                 # external tools must not leak into this restricted session.
@@ -755,9 +759,8 @@ class AgentLauncherPane(Card):
         self.live_toggle.setProperty('variant', 'quiet')
         self.live_toggle.setProperty('density', 'compact')
         self._live_tooltip = (
-            'Default off. When enabled, each individual setpoint still needs '
-            'operator confirmation; saved sequences may run once per request '
-            'when every command fits the frozen envelope.')
+            'Default off. One warning enables automatic setpoint changes and '
+            'saved-sequence starts within the frozen envelope until revoked.')
         self.live_toggle.setToolTip(self._live_tooltip)
         self.live_toggle.toggled.connect(self._on_live_toggled)
         authority_row.addWidget(self.live_toggle)
@@ -844,7 +847,6 @@ class AgentLauncherPane(Card):
         manager.terminal_output.connect(self._on_terminal_output)
         manager.terminal_cleared.connect(self._clear_terminal)
         if self.service is not None:
-            self.service.set_approval_handler(self._confirm_setpoint)
             self.service.authority.changed.connect(self._on_authority_changed)
         self._on_status_changed('running' if manager.is_running() else 'idle',
                                 manager.status)
@@ -1008,8 +1010,9 @@ class AgentLauncherPane(Card):
             self, 'Enable live agent control?',
             "Live control stays enabled until you switch it off or the app "
             "revokes it after a safety-relevant change.\n\n"
-            "Every individual setpoint still opens a separate operator "
-            "confirmation. The agent cannot exceed these snapshotted limits:\n"
+            "THIS IS THE ONLY CONTROL WARNING. After you enable it, the agent "
+            "may change setpoints automatically without asking again. It "
+            "cannot exceed these snapshotted limits:\n"
             f"{role_lines}\n\n{sequence_authority}\n\n"
             "Disconnection, communication fault, monitoring stop, "
             "assignment/limit/ramp changes, "
@@ -1029,22 +1032,6 @@ class AgentLauncherPane(Card):
             QMessageBox.critical(self, 'Cannot enable live control', str(exc))
         self._sync_authority()
 
-    def _confirm_setpoint(self, action):
-        previous = action.get('previous')
-        previous_text = 'unknown' if previous is None else f'{float(previous):g}'
-        answer = QMessageBox.warning(
-            self, 'Approve agent setpoint?',
-            f"Agent: {action['agent']}\n"
-            f"Role: {action['role']} (Unit {action['unit']})\n"
-            f"Previous command: {previous_text} SLPM\n"
-            f"Requested command: {action['value']:g} SLPM\n\n"
-            "Approve this one action? The request will be revalidated against "
-            "the live assignment, MAX FLOW, ramp ceiling, and toggle state before "
-            "it is queued.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        return answer == QMessageBox.StandardButton.Yes
-
     def _show_help(self):
         QMessageBox.information(
             self, 'Agent launcher',
@@ -1053,13 +1040,16 @@ class AgentLauncherPane(Card):
             'flow in this same terminal; the app never reads or stores account '
             'credentials. Claude Code is launched with Read plus the '
             'allowlisted rig tools; Codex is launched in its read-only sandbox '
-            'and asks for approval. Codex still retains shell access, so its '
+            'and may still ask for approval for shell operations. Codex retains '
+            'shell access, so its '
             'live-control confirmation includes an additional warning: the '
             'sandbox is not a hard COM-port security boundary.\n\n'
             'The flow-controller MCP server exposes telemetry/configuration reads '
-            'and sequence draft submission. Live tools are default-off. The '
-            'operator must enable the red toggle; every individual setpoint then '
-            'needs a separate confirmation. The agent may also list and run '
+            'and sequence draft submission. Its instructions tell the agent to '
+            'use MCP for every rig read and command, so normal prompts do not '
+            'need to repeat that. Live tools are default-off. The '
+            'operator accepts one warning by enabling the red toggle. The agent '
+            'may then change setpoints automatically and list or run '
             'saved sequences once per request when every command fits the armed '
             'limits and the measured flows match the sequence opening. The '
             'launcher is more than a generic terminal because '

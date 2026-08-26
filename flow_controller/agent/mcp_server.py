@@ -32,12 +32,12 @@ def build_server():
     server = MCPServer(
         "Flow Controller",
         instructions=(
-            "Live authority is default-off and controlled by the operator in "
-            "the app. Read the rig state and submit drafts at any time. A "
-            "setpoint always needs a per-action operator confirmation. While "
-            "live control is enabled, saved sequences may be selected and "
-            "started once when they fit the armed limits and the measured "
-            "flows match their opening."))
+            "Use this MCP server for every flow-controller read and command; "
+            "never access controller serial ports or app data files directly. "
+            "Live authority is default-off and controlled by one operator "
+            "warning and toggle in the app. While enabled, setpoints may be "
+            "changed automatically within the armed limits, and saved "
+            "sequences may be started when measured flows match their opening."))
 
     @server.tool()
     def read_snapshot() -> dict:
@@ -71,7 +71,7 @@ def build_server():
 
     @server.tool()
     def set_role_setpoint(role: str, value: float) -> dict:
-        """Request one role setpoint; the operator must approve it in the app."""
+        """Set one role automatically within the enabled live envelope."""
         return _call("set_role_setpoint", {"role": role, "value": value})
 
     @server.tool()

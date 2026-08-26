@@ -111,62 +111,30 @@ class AgentDraftServiceTests(unittest.TestCase):
         self.session.unit_prefs["A"] = {
             "max_flow": 5.0, "ramp": 100.0, "ramp_off": False}
 
-    def test_supervised_setpoint_requires_and_records_operator_approval(self):
+    def test_live_toggle_authorizes_automatic_setpoints_and_records_it(self):
         self._make_live_ready()
-        approvals = []
-        self.service.set_approval_handler(
-            lambda action: approvals.append(action) or True)
         self.service.set_live_enabled(True)
 
-        answer = self.service.handle(
+        first = self.service.handle(
             "agent-1", "set_role_setpoint",
             {"role": "nh3_rich", "value": 2.0})
+        second = self.service.handle(
+            "agent-1", "set_role_setpoint",
+            {"role": "nh3_rich", "value": 3.0})
 
-        self.assertEqual(answer["status"], "queued")
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "queued")
         self.assertEqual(self.session.setpoint_queue.get_nowait(), ("A", 2.0))
-        self.assertEqual(approvals[0]["previous"], 1.0)
-        row = next(row for row in self.audit_rows()
-                   if row["method"] == "set_role_setpoint")
-        self.assertEqual(row["approval"], "approved")
+        self.assertEqual(self.session.setpoint_queue.get_nowait(), ("A", 3.0))
+        rows = [row for row in self.audit_rows()
+                if row["method"] == "set_role_setpoint"]
+        self.assertEqual(
+            [row["approval"] for row in rows],
+            ["live_toggle", "live_toggle"])
 
-    def test_rejected_supervised_setpoint_never_reaches_session(self):
-        self._make_live_ready()
-        self.service.set_approval_handler(lambda _action: False)
-        self.service.set_live_enabled(True)
-        with self.assertRaisesRegex(AgentRequestError, "rejected"):
-            self.service.handle(
-                "agent-1", "set_role_setpoint",
-                {"role": "nh3_rich", "value": 2.0})
-        self.assertTrue(self.session.setpoint_queue.empty())
-        row = next(row for row in self.audit_rows()
-                   if row["method"] == "set_role_setpoint")
-        self.assertEqual(row["approval"], "rejected")
-
-    def test_authority_revoked_during_approval_refuses_the_action(self):
+    def test_session_refusal_still_fails_closed_after_toggle_approval(self):
         self._make_live_ready()
         self.service.set_live_enabled(True)
-
-        def approve_after_revocation(_action):
-            self.service.authority.revoke("operator switched live control off")
-            return True
-
-        self.service.set_approval_handler(approve_after_revocation)
-        with self.assertRaisesRegex(AgentRequestError, "disabled"):
-            self.service.handle(
-                "agent-1", "set_role_setpoint",
-                {"role": "nh3_rich", "value": 2.0})
-        self.assertTrue(self.session.setpoint_queue.empty())
-
-    def test_missing_approval_ui_or_session_refusal_fails_closed(self):
-        self._make_live_ready()
-        self.service.set_live_enabled(True)
-        with self.assertRaisesRegex(AgentRequestError, "approval UI"):
-            self.service.handle(
-                "agent-1", "set_role_setpoint",
-                {"role": "nh3_rich", "value": 2.0})
-        self.assertTrue(self.session.setpoint_queue.empty())
-
-        self.service.set_approval_handler(lambda _action: True)
         with patch.object(
                 self.session, "set_role_setpoint", return_value=False):
             with self.assertRaisesRegex(AgentRequestError, "session refused"):
@@ -189,7 +157,7 @@ class AgentDraftServiceTests(unittest.TestCase):
         authority.enable()
         service = AgentDraftService(
             self.session, authority=authority,
-            audit=FailsOnExecutionRecord(), approve_action=lambda _action: True)
+            audit=FailsOnExecutionRecord())
         with self.assertRaisesRegex(AgentRequestError, "not executed"):
             service.handle(
                 "agent-1", "set_role_setpoint",
@@ -212,8 +180,7 @@ class AgentDraftServiceTests(unittest.TestCase):
 
         service = AgentDraftService(
             self.session, authority=authority,
-            audit=ChangesEnvelopeDuringExecutionAudit(),
-            approve_action=lambda _action: True)
+            audit=ChangesEnvelopeDuringExecutionAudit())
         with self.assertRaisesRegex(AgentRequestError, "revoked"):
             service.handle(
                 "agent-1", "set_role_setpoint",
@@ -432,9 +399,8 @@ class AgentDraftServiceTests(unittest.TestCase):
         queued.pop()()
         self.assertFalse(audit_path.exists())
 
-    def test_supervised_setpoint_does_not_time_out_while_waiting_for_qt(self):
+    def test_setpoint_request_timeout_cancels_late_qt_execution(self):
         self._make_live_ready()
-        self.service.set_approval_handler(lambda _action: True)
         self.service.set_live_enabled(True)
         queued = []
         self.session._post = lambda function, *args: queued.append(
@@ -446,13 +412,12 @@ class AgentDraftServiceTests(unittest.TestCase):
         }
         with patch("flow_controller.agent.ipc.CLIENT_REQUEST_TIMEOUT_S", 0.05):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(server._call_on_qt, request)
-                time.sleep(0.1)
-                self.assertFalse(future.done())
-                queued.pop()()
-                answer = future.result(timeout=1)
-        self.assertTrue(answer["ok"])
-        self.assertEqual(answer["result"]["status"], "queued")
+                answer = pool.submit(
+                    server._call_on_qt, request).result(timeout=1)
+        self.assertFalse(answer["ok"])
+        self.assertIn("did not answer", answer["error"])
+        queued.pop()()
+        self.assertTrue(self.session.setpoint_queue.empty())
 
     @unittest.skipUnless(importlib.util.find_spec("mcp"),
                          "the optional MCP dependency is not installed")

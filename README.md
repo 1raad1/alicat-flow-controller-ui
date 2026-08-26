@@ -209,20 +209,23 @@ the provider CLI. The app does not read or store the account credentials.
 Claude is given an explicit Read-plus-allowlisted-MCP tool profile. Codex runs
 in its read-only sandbox but retains shell access, so its live-control arming
 dialog carries an additional warning. Live authority is always off when either
-agent starts. Both agents can:
+agent starts. The launcher injects the MCP server and its rig-only instructions,
+so prompts do not need to say "use MCP." Tool selection remains model-driven;
+Codex users can enter `/mcp` to verify that `flow_controller` is connected.
+Both agents can:
 
 - read copied assignments, Alicat telemetry, recent history, derived state,
   ramp policies, and declared command ceilings;
 - list saved sequences and see whether the current rig can run each one;
 - submit a sequence draft to the existing sequence editor;
-- request a supervised role setpoint, which always opens a previous/new
-  confirmation in the application; or
+- change role setpoints automatically while live control is enabled; or
 - run a saved sequence once per request while live control is enabled.
 
 The red **LIVE CONTROL** toggle is default-off and is enabled while either
 supported agent is running. Enabling it shows the captured role-to-unit
 mapping, MAX FLOW, and ramp ceilings. It also explains that the agent may
-select any valid `.fcseq.json` file in the app's sequence folder.
+set values without further confirmation and select any valid `.fcseq.json`
+file in the app's sequence folder. This is the only control warning.
 Only roles with both a positive MAX FLOW and positive enabled ramp rate enter
 the envelope. Authority remains enabled until the toggle is switched off, and
 is also revoked by stopping the agent, a communication fault, disconnecting,
