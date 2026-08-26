@@ -142,8 +142,10 @@ Open the hamburger menu on a live controller card to edit these settings:
 | **OFF** | Disables application-side ramping for that controller, including the built-in minimum move time for air and pilot lines. New controllers start in this state. |
 
 Ramping defaults to **OFF**, so setpoints are written as steps. To use a ramp,
-clear the red **OFF** latch and enter a rate. With ramping enabled but no rate
-declared, CH4 pilot and air lines still use the built-in minimum ten-second move.
+enter a rate and clear the red **OFF** latch. The rate remains editable while
+OFF, but it does not take effect until the latch is cleared. With ramping
+enabled but no rate declared, CH4 pilot and air lines still use the built-in
+minimum ten-second move.
 
 ## Sequences
 
@@ -201,8 +203,10 @@ or Codex in an embedded Windows terminal and connects a local, authenticated
 MCP server. Click inside the terminal and type normally; terminal input is sent
 directly to the running agent without a separate message field. The terminal
 tracks the visible sidebar width and resizes its PTY columns so output wraps at
-the card edge. Claude and Codex are launched from their compact provider icons;
-hover either icon for its restricted-profile details.
+the card edge. It retains bounded scrollback instead of replacing older output
+when the active terminal screen advances. Claude and Codex are launched from
+their compact provider icons; hover either icon for its restricted-profile
+details.
 On a new PC, open **Agent setup** to sign in, refresh CLI detection, or open the
 official installation guide. Sign-in runs in the same embedded terminal through
 the provider CLI. The app does not read or store the account credentials.
@@ -238,23 +242,26 @@ same toggle-authorized setpoint boundary.
 
 The red **LIVE CONTROL** toggle is default-off and is enabled while either
 supported agent is running. Enabling it shows the captured role-to-unit
-mapping, MAX FLOW, and ramp ceilings. It also explains that the agent may
-set values without further confirmation and select any valid `.fcseq.json`
-file in the app's sequence folder. This is the only control warning.
-Only roles with both a positive MAX FLOW and positive enabled ramp rate enter
-the envelope. Authority remains enabled until the toggle is switched off, and
-is also revoked by stopping the agent, a communication fault, disconnecting,
-stopping monitoring, or changing assignments, limits, or ramps. Turning it off
-prevents new agent actions. It does not silently stop or zero a sequence that
-is already replaying; use the existing replay controls for that run. There is
-no agent zero-flow tool. Agent read calls
+mapping and any configured MAX FLOW or ramp policies. It also explains that the
+agent may set values without further confirmation and select any valid
+`.fcseq.json` file in the app's sequence folder. This is the only control
+warning.
+Every assigned role is available: MAX FLOW and ramp rates are optional, exactly
+as they are for a value entered manually. A configured MAX FLOW is still
+enforced, while ramping OFF sends a step through the normal session path.
+Authority remains enabled until the toggle is switched off, and is also revoked
+by stopping the agent, a communication fault, disconnecting, stopping
+monitoring, or changing assignments, limits, or ramps. Turning it off prevents
+new agent actions. It does not silently stop or zero a sequence that is already
+replaying; use the existing replay controls for that run. There is no agent
+zero-flow tool. Agent read calls
 are rate-limited to 10 calls/s per method and agent before audit I/O (throttled
 calls are not logged individually). Saved-sequence names cannot contain paths,
 files are size-bounded, and each file is re-read after the durable
-pre-execution audit. Every track and keyframe must remain inside the frozen
-authority envelope. Replay is refused if another sequence is active or the
-measured flows do not match its opening. The audit is written to
-`Documents\Flow Controller\agent_audit.jsonl`.
+pre-execution audit. Every track must use a currently assigned role, and every
+keyframe obeys any MAX FLOW that has been declared. Replay is refused if another
+sequence is active or the measured flows do not match its opening. The audit is
+written to `Documents\Flow Controller\agent_audit.jsonl`.
 
 There is no separate automated-test editor in the Sequences card. Build and
 save ordinary flow sequences, then ask the agent to choose and run them in the

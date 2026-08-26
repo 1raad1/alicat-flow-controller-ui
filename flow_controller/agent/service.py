@@ -602,7 +602,7 @@ class AgentDraftService:
                 record["approval"] = "live_toggle"
                 self._audit_before_live_execution(
                     record, "armed_for_execution")
-                # Audit I/O may block on a synced filesystem. Expiry and all
+                # Audit I/O may block on a synced filesystem. Authority and all
                 # live rig invariants therefore get one final check at the
                 # session boundary, after the durable record exists.
                 self.authority.check_role(role, value)

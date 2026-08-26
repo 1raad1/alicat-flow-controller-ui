@@ -943,7 +943,16 @@ class UnitCard(QFrame):
 
     def _apply_ramp_off(self, off):
         """Dress the ramp controls for the state they are actually in."""
-        self.ramp_spin.setEnabled(not off)
+        # Keep the stored rate editable while ramping is off. A disabled spin
+        # box lets clicks fall through to its QMenu and dismiss the settings
+        # popup, and it prevents an operator preparing the rate before turning
+        # pacing back on. The red OFF latch remains the source of truth about
+        # whether this value is currently active.
+        self.ramp_spin.setEnabled(True)
+        self.ramp_spin.setToolTip(
+            "How fast this line may move, in SLPM per second. The value can be "
+            "edited while ramping is OFF, but it takes effect only after the "
+            "red OFF latch is cleared. 'step' means no declared rate.")
         # Red while ramping is off: this is the one control on the card that
         # takes a protection away rather than changing a number, and it should
         # not look like the rest of the settings while it is doing that.
