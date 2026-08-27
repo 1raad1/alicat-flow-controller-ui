@@ -26,6 +26,8 @@ The desktop interface is built with PySide6 and Qt.
 | Choose Standard or Staged mode | [Operating modes](#operating-modes) |
 | Understand setpoints, ramps, or zero commands | [Controls and safety behavior](#controls-and-safety-behavior) |
 | Record or replay a run | [Sequences](#sequences) |
+| Search for low NO with live or manual MEXA readings | [Bayesian optimiser](#bayesian-optimiser) |
+| Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
@@ -196,77 +198,112 @@ During replay:
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
-## Agent launcher and saved sequences
+## Bayesian optimiser
 
-The collapsible **Agent launcher** in the Operation sidebar opens Claude Code
-or Codex in an embedded Windows terminal and connects a local, authenticated
-MCP server. Click inside the terminal and type normally; terminal input is sent
-directly to the running agent without a separate message field. The terminal
-tracks the visible sidebar width and resizes its PTY columns so output wraps at
-the card edge. It retains bounded scrollback instead of replacing older output
-when the active terminal screen advances. Claude and Codex are launched from
-their compact provider icons; hover either icon for its restricted-profile
-details.
-On a new PC, open **Agent setup** to sign in, refresh CLI detection, or open the
-official installation guide. Sign-in runs in the same embedded terminal through
-the provider CLI. The app does not read or store the account credentials.
-Claude is given an explicit Read-plus-allowlisted-MCP tool profile. Codex runs
-in its read-only sandbox but retains shell access, so its live-control arming
-dialog carries an additional warning. Live authority is always off when either
-agent starts. The launcher injects the MCP server and its rig-only instructions,
-so prompts do not need to say "use MCP." Tool selection remains model-driven;
-Codex users can enter `/mcp` to verify that `flow_controller` is connected.
-Both agents can:
+The **Bayesian optimiser** replaces the Agent launcher in the Operation sidebar.
+The desktop app no longer launches an agent terminal or starts its IPC gateway.
+The optimiser runs locally; it needs neither an API key nor an internet connection.
+Legacy agent modules remain in the repository but are not mounted by the app.
 
-- read copied assignments, Alicat telemetry, recent history, derived state,
-  ramp policies, declared command ceilings, and the last calculated combustion
-  condition;
-- list saved sequences and see whether the current rig can run each one;
-- read every keyframe in the selected or a named saved sequence;
-- submit a sequence draft to the existing sequence editor, or save a validated
-  non-overwriting variant of a sequence it just read;
-- recalculate targets after changing any combination of power, hydrogen
-  fraction, Stage 1 equivalence ratio, global equivalence ratio, and Stage 1
-  fuel split, filling omitted values from the last complete calculation;
-- change role setpoints automatically while live control is enabled; or
-- run a saved sequence once per request while live control is enabled.
+### Create and run an experiment
 
-The prompt carries the operator's intent; the launcher does not try to parse a
-fixed list of commands. The agent fetches structured context through MCP when it
-needs it. It can therefore make other sequence variations—not only a faster
-transition or a different equivalence ratio—while the app continues to validate
-the resulting file and refuses to overwrite an existing sequence. Preparing a
-combustion condition only updates the calculated targets. If the prompt asks to
-apply it to the live rig, the agent must send every returned target through the
-same toggle-authorized setpoint boundary.
+1. Expand **Bayesian optimiser** and choose **New experiment**. Enter the fixed
+   NH3/H2 thermal input, stage-1 fuel split, and permitted bounds for H2 volume
+   percentage, stage-1 phi and overall phi. Bounds are intentionally blank.
+   This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
+   present. The methane pilot must be off during measurements.
+2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
+   initial-design size (default 16 completed tests) and minimum averaging window
+   (default 30 seconds). Save a new `.fcbo.json` experiment. These settings are
+   fixed for the campaign; use a new file to change them.
+3. Click **Suggest next test**, then **Load target fields**. This fills the
+   existing flow fields, including zero for the pilot and unused lines. It
+   sends no commands. Review every field and the transition procedure before
+   applying through the usual controls. Existing MAX FLOW limits and ramps
+   still apply. Do not assume that safe endpoints imply a safe transition.
+4. After switching the pilot off and allowing the burner, sample line and
+   analyser to settle, check both confirmations. For live measurements, connect
+   the bridge in the **MEXA analyser** tab and select **Capture NO/O2
+   automatically**. Click **Start window**. With live capture off, average
+   the analyser's uncorrected dry NO and O2 manually over that window.
+5. Click **Finish window** after both streams cover the minimum duration.
+   Live capture fills and locks the NO/O2 means; manual mode lets you enter
+   those means and an optional NO standard error. Add notes, confirm the
+   uncorrected dry basis, then **Save result**. No flows change on save.
+6. Suggest the next test. Use the **History** tab to inspect results, repeat
+   a completed point, or export CSV. Repeating a point creates a separate test.
 
-The red **LIVE CONTROL** toggle is default-off and is enabled while either
-supported agent is running. Enabling it shows the captured role-to-unit
-mapping and any configured MAX FLOW or ramp policies. It also explains that the
-agent may set values without further confirmation and select any valid
-`.fcseq.json` file in the app's sequence folder. This is the only control
-warning.
-Every assigned role is available: MAX FLOW and ramp rates are optional, exactly
-as they are for a value entered manually. A configured MAX FLOW is still
-enforced, while ramping OFF sends a step through the normal session path.
-Authority remains enabled until the toggle is switched off, and is also revoked
-by stopping the agent, a communication fault, disconnecting, stopping
-monitoring, or changing assignments, limits, or ramps. Turning it off prevents
-new agent actions. It does not silently stop or zero a sequence that is already
-replaying; use the existing replay controls for that run. There is no agent
-zero-flow tool. Agent read calls
-are rate-limited to 10 calls/s per method and agent before audit I/O (throttled
-calls are not logged individually). Saved-sequence names cannot contain paths,
-files are size-bounded, and each file is re-read after the durable
-pre-execution audit. Every track must use a currently assigned role, and every
-keyframe obeys any MAX FLOW that has been declared. Replay is refused if another
-sequence is active or the measured flows do not match its opening. The audit is
-written to `Documents\Flow Controller\agent_audit.jsonl`.
+The optimiser requires one NH3 line, one H2 line and one air line in stage 1,
+plus stage-2 air. Stage-2 fuel lines are required only when the fixed fuel split
+is below 100%. A pilot controller may remain assigned at zero or be unassigned.
+All other assigned gas lines must read off during measurement.
 
-There is no separate automated-test editor in the Sequences card. Build and
-save ordinary flow sequences, then ask the agent to choose and run them in the
-order required by the test. This keeps one sequence format and one replay path
-for manual and agent-driven operation.
+### Measurement basis and limits
+
+The objective is oxygen-corrected dry **NO**, not total NOx or mass per energy:
+
+```text
+corrected_NO = raw_dry_NO * (20.9 - reference_O2) / (20.9 - measured_dry_O2)
+```
+
+This avoids optimising raw ppm merely by adding air. It does not measure NO2,
+NH3 slip, N2O or combustion efficiency. Confirm the MEXA sensor's calibration,
+sample conditioning and suitability for the NH3/H2 exhaust matrix before making
+emissions claims. Do not enter an already oxygen-corrected reading. Readings at
+or above 20.9% O2 cannot be corrected; readings close to air concentration amplify
+measurement errors. NO input is limited to the published 0–5000 ppm range.
+
+Fresh flow and setpoint readings must track targets within the larger of 3%
+or 0.05 SLPM. Measured thermal input must be within 3% of the campaign setting.
+These are data-acceptance tolerances, not safety limits or proof of a stable
+flame. The operator confirms that the pilot is off. Missing telemetry, a gap in
+polling, a run/configuration change or a non-tracking flow discards an active
+window. At least three fresh passes and the configured duration are required.
+One capture cannot exceed an hour.
+
+Live MEXA capture also requires at least three new analyser samples, spanning
+the configured minimum duration inside the flow window. A disconnect, source
+restart, missing sequence number, invalid reading or stale stream discards the
+capture. Readings older than five seconds, PC clocks more than one second ahead,
+and acquisition cycles over three seconds are rejected. Keep both PC clocks
+synchronised and account for the sample-line and sensor settling time before
+starting. Simulation, an unknown reporting basis, or an unvalidated serial
+reader cannot feed the optimiser. See [MEXA setup](docs/MEXA_SETUP.md).
+
+Live results use the arithmetic mean of each channel, followed by oxygen
+correction of those means, consistent with manual entry. Each analyser record
+counts once regardless of the flow polling rate. Sample standard deviations,
+ranges, sequence IDs and the receiver audit-log path are saved. Sensor samples
+may be autocorrelated, so the standard deviation is not converted into an
+assumed standard error; the model still fits observation noise.
+
+**Discard window** and **Mark test invalid** do not stop or zero the burner.
+Use the existing flow and emergency controls for the physical process. Invalid
+tests retain their reason but have no numerical emissions result; they are
+excluded from fitting rather than treated as zero emissions.
+
+### Model and records
+
+The initial design selects spread-out points from a scrambled Sobol candidate
+pool. Subsequent suggestions fit a Matérn-5/2 Gaussian process and maximise
+Monte Carlo noisy expected improvement over a feasible candidate pool. The model
+uses measured blend and equivalence ratios from the captured flow window, with
+the requested settings retained alongside them. It fits residual observation
+noise and accepts an optional per-test NO standard error. O2 uncertainty and
+systematic calibration bias are not propagated. Suggestions respect the declared
+search region and current flow ceilings; no flame-safety boundary is learned.
+
+Experiment changes are written atomically after each suggestion, completed
+window and result. **Open** resumes a saved campaign, including a pending test,
+without loading target fields or applying flows. An unfinished capture is not
+resumed after closing the app. Typed measurement text is not durable until
+**Save result**; it does survive an appearance refresh. The history identifies
+the lowest observed corrected NO, not a certified global minimum. Repeat
+promising points and reference conditions to check reproducibility and drift.
+
+The model runs in a background worker so fitting does not block the Qt control
+interface. Campaigns are limited to 500 tests. The implementation uses
+scikit-learn and SciPy; run `install.bat` when upgrading another installation.
 
 ### Sequencing in operation
 
@@ -354,6 +391,15 @@ The acquisition logger writes one row after each completed serial polling pass:
 - flow, setpoint, pressure, temperature, internal setpoint error, and first
   valve drive for each connected unit; and
 - live Stage 1, Stage 2, and global equivalence ratios.
+
+New logs also include `mexa_` columns: NO, O2, acquisition/receipt timestamps,
+sample age, source/sequence ID, state, validity, simulation and reporting basis.
+These columns exist even if the MEXA is connected after logging starts. A fresh
+analyser value can be held across multiple flow rows; `mexa_new_sample=False`
+identifies a repeat, not an independent measurement. Stale, invalid or
+future-dated measurements have blank NO/O2 values. Use the receiver's separate
+CSV/JSONL for the complete analyser record, including readings between flow
+polls. Retained graph-history export remains a flow-only export.
 
 Column names include gas, zone, and unit. The header is fixed when logging
 starts, so assignments cannot change while the file is open. Failed readings

@@ -51,6 +51,18 @@ class QtUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        # Clicking a controller's ramp spinner persists its value. Keep UI
+        # tests out of the installed rig's preferences, even without a runner.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        preferences = patch.dict(os.environ, {
+            'FLOW_CONTROLLER_UNIT_PREFS': str(Path(directory.name) / 'units.json'),
+            'FLOW_CONTROLLER_COMBUSTION_PREFS': str(Path(directory.name) / 'combustion.json'),
+        })
+        preferences.start()
+        self.addCleanup(preferences.stop)
+
     def test_connected_badge_counts_assigned_controllers(self):
         session = SimpleNamespace(
             assigned_units=lambda: ['A', 'B'], controller_instances={},
@@ -263,19 +275,21 @@ class QtUiTests(unittest.TestCase):
         tab.close()
         session.shutdown()
 
-    def test_agent_terminal_is_mounted_in_operation_sidebar(self):
+    def test_optimiser_replaces_agent_terminal_in_operation_sidebar(self):
         session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
         window = MainWindow(session)
-        self.assertIs(window.agent_pane, window.operation_tab.agent_pane)
-        self.assertTrue(window.operation_tab.isAncestorOf(window.agent_pane))
-        self.assertTrue(window.agent_pane.terminal.isReadOnly())
+        self.assertIs(window.optimiser_pane, window.operation_tab.optimiser_pane)
+        self.assertTrue(window.operation_tab.isAncestorOf(window.optimiser_pane))
+        self.assertFalse(hasattr(window, 'agent_manager'))
+        self.assertFalse(hasattr(window, 'agent_gateway'))
+        self.assertFalse(window.optimiser_pane.ask_button.isEnabled())
         window.close()
         self.app.processEvents()
 
-    def test_window_refuses_to_close_if_agent_cannot_be_terminated(self):
+    def test_window_waits_for_optimiser_worker_before_closing(self):
         session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
         window = MainWindow(session)
-        window.agent_manager.shutdown = Mock(return_value=False)
+        window.optimiser.shutdown = Mock(return_value=False)
         event = Mock()
 
         with patch.object(QMessageBox, 'critical') as warning:
@@ -283,7 +297,7 @@ class QtUiTests(unittest.TestCase):
 
         event.ignore.assert_called_once_with()
         warning.assert_called_once()
-        window.agent_manager.shutdown = Mock(return_value=True)
+        window.optimiser.shutdown = Mock(return_value=True)
         window.close()
         self.app.processEvents()
 

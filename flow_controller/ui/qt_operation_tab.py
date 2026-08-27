@@ -40,7 +40,8 @@ from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
 from ..domain import combustion, roles, rql
 from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
-from .qt_agent_launcher import AgentLauncherPane
+from ..core.optimiser_controller import OptimiserController
+from .qt_optimiser import OptimiserPane
 from .qt_sequence_panel import SequencePanel
 from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
@@ -267,12 +268,15 @@ class OperationTab(QWidget):
     #: so the window can put it in the status bar rather than a dialog.
     status = Signal(str)
 
-    def __init__(self, session, parent=None, *, agent_manager=None,
-                 agent_collapsed=True):
+    def __init__(self, session, parent=None, *, optimiser=None):
         super().__init__(parent)
         self.session = session
-        self.agent_manager = agent_manager
-        self.agent_collapsed = bool(agent_collapsed)
+        if optimiser is None:
+            optimiser = getattr(session, '_optimiser_controller', None)
+            if optimiser is None:
+                optimiser = OptimiserController(session, session)
+                session._optimiser_controller = optimiser
+        self.optimiser = optimiser
         self._cards = {}
         self._card_keys = {}
         #: Unit to the largest figure that line has been asked for, and unit to
@@ -356,6 +360,7 @@ class OperationTab(QWidget):
         # the rig is running.
         self._on_targets(dict(session.target_flows))
         self._on_logging(session.logging_active, session.log_path)
+        self.optimiser.targets_ready.connect(self._load_optimiser_targets)
 
     # ------------------------------------------------------------------ #
     #  Mode strip                                                         #
@@ -471,10 +476,8 @@ class OperationTab(QWidget):
         column.addWidget(self._autocalc_card)
         self._sequence_card = self._card_sequence()
         column.addWidget(self._sequence_card)
-        if self.agent_manager is not None:
-            self.agent_pane = AgentLauncherPane(
-                self.agent_manager, collapsed=self.agent_collapsed)
-            column.addWidget(self.agent_pane)
+        self.optimiser_pane = OptimiserPane(self.optimiser)
+        column.addWidget(self.optimiser_pane)
         column.addWidget(self._card_syslog())
         column.addStretch(1)
         scroll.setWidget(holder)
@@ -641,6 +644,20 @@ class OperationTab(QWidget):
             tile.set_value('—' if value is None else f'{value:.2f}')
         # New targets change what the bars are measured against.
         self._refresh_readings(force=True)
+
+    def _load_optimiser_targets(self, targets):
+        """Populate fields only; never emit a setpoint request here."""
+        for unit, card in self._cards.items():
+            card.entry.setText(f"{targets.get(self._card_keys[unit], 0.0):.6f}")
+        request = self.session.autocalc_request
+        for name, value in (
+                ('Power (kW)', request.power_kw),
+                ('H₂ percentage (%)', request.h2_fraction * 100),
+                ('Stage 1 split (%)', request.split_rich * 100),
+                ('φ stage 1', request.phi_stage1), ('φ global', request.phi_global)):
+            self._calc_fields[name].setText(f'{value:.8g}')
+        self.calc_status.setText('Optimiser targets loaded into controller fields, including zero '
+                                'for pilot/unused lines. No commands sent; review before applying.')
 
     def _on_autocalc(self, available, config):
         """Reflect what the current assignment can actually calculate."""
