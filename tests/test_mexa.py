@@ -225,6 +225,11 @@ class RecordTests(unittest.TestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 capture.add(ReceivedSample(item, utc_now(), time.monotonic(), "audit.jsonl"))
 
+    def test_live_window_requires_a_receiver_audit_record(self):
+        sample = ReceivedSample(packet(), utc_now(), time.monotonic(), "")
+        with self.assertRaisesRegex(ValueError, "Save received MEXA logs"):
+            LiveWindow(sample)
+
     def test_combined_flow_log_labels_held_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             log = CsvLogger()
@@ -365,6 +370,23 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(source, [])
             self.assertTrue(any("STOPPED" in message for message in messages))
             bridge.stop()
+
+    def test_bridge_stream_only_never_creates_a_log(self):
+        with patch("flow_controller.mexa.bridge.AuditLog", side_effect=AssertionError("Unexpected disk write")) as log:
+            ready = threading.Event()
+            bridge = Bridge(host="127.0.0.1", port=self.port, token=self.key, serial_port="NEVER",
+                            save_logs=False, simulated=True, on_sample=lambda p: ready.set())
+            try:
+                self.assertTrue(ready.wait(3))
+                self.assertIsNone(bridge.log)
+                self.assertTrue(bridge.running)
+                log.assert_not_called()
+            finally:
+                self.assertTrue(bridge.stop())
+
+    def test_bridge_logging_requires_a_directory(self):
+        with self.assertRaisesRegex(ValueError, "log directory"):
+            Bridge(host="127.0.0.1", port=self.port, token=self.key, serial_port="NEVER", save_logs=True)
 
 
 if __name__ == "__main__":

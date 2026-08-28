@@ -197,6 +197,16 @@ class QtOptimiserTests(unittest.TestCase):
             self.controller.start_window(True, True, live=True)
         self.assertIsNone(self.controller.capture)
 
+    def test_unlogged_preview_stream_cannot_start_an_optimiser_window(self):
+        from dataclasses import replace
+        with patch("flow_controller.mexa.records.time.time", side_effect=lambda: self.clock.timestamp()):
+            sample = self.mexa(1)
+            self.session.mexa.latest = replace(sample, log_path="")
+            with self.assertRaisesRegex(ValueError, "Save received MEXA logs"):
+                self.controller.start_window(True, True, live=True)
+        self.assertIsNone(self.controller.capture)
+        self.assertTrue(self.session.setpoint_queue.empty())
+
     def test_simulated_stream_cannot_start_experimental_window(self):
         with patch("flow_controller.mexa.records.time.time", side_effect=lambda: self.clock.timestamp()):
             self.mexa(1, simulated=True)

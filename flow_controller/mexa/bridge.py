@@ -10,7 +10,7 @@ from .transport import StreamServer
 
 
 class Bridge:
-    def __init__(self, *, host, port, token, serial_port, directory, simulated=False,
+    def __init__(self, *, host, port, token, serial_port, directory=None, save_logs=True, simulated=False,
                  validated=False, dry=False, on_sample=lambda packet: None,
                  on_status=lambda text: None):
         self.source_id = str(uuid.uuid4())
@@ -18,11 +18,14 @@ class Bridge:
         self.validated, self.dry = validated, dry
         self.on_sample, self.on_status = on_sample, on_status
         self.stop_event = threading.Event()
-        self.log = AuditLog(directory, "mexa-source")
+        if save_logs and not str(directory or "").strip():
+            raise ValueError("Choose a local log directory or turn off local logging")
+        self.log = AuditLog(directory, "mexa-source") if save_logs else None
         try:
             self.server = StreamServer(host, port, token, on_status)
         except Exception:
-            self.log.close()
+            if self.log is not None:
+                self.log.close()
             raise
         self.thread = threading.Thread(target=self._run, name="mexa-acquisition", daemon=True)
         self.thread.start()
@@ -58,7 +61,8 @@ class Bridge:
                 packet = make_packet(cycle, self.source_id, seq, simulated=self.simulated,
                                      validated=self.validated, dry=self.dry,
                                      cycle_s=min(10., time.monotonic() - begin))
-                self.log.write(packet)
+                if self.log is not None:
+                    self.log.write(packet)
                 self.server.publish(packet)
                 self.on_sample(packet)
                 # Maximum nominal rate is 1 Hz. Slower failed cycles are never
@@ -72,7 +76,8 @@ class Bridge:
                     reader.close()
             finally:
                 try:
-                    self.log.close()
+                    if self.log is not None:
+                        self.log.close()
                 finally:
                     self.server.stop()
 

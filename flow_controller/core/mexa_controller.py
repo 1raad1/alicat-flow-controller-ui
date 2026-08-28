@@ -6,7 +6,7 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal, Qt
 
-from ..mexa.records import AuditLog, ReceivedSample, epoch, utc_now
+from ..mexa.records import AuditLog, ReceivedSample, RECEIVER_LOG_REQUIRED, epoch, utc_now
 from ..mexa.transport import StreamClient
 
 
@@ -24,8 +24,9 @@ class MexaController(QObject):
         self.latest = None
         self.lock = threading.Lock()
         self.generation = 0
+        self._receiving = False
         self.status = "MEXA disconnected"
-        self.settings = {"host": "127.0.0.1", "port": 61234, "token": "", "directory": ""}
+        self.settings = {"host": "127.0.0.1", "port": 61234, "token": "", "directory": "", "save_logs": True}
         self._incoming.connect(self._receive, Qt.ConnectionType.QueuedConnection)
         self._status.connect(self._set_status, Qt.ConnectionType.QueuedConnection)
         self.timer = QTimer(self)
@@ -33,23 +34,27 @@ class MexaController(QObject):
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
-    def connect_bridge(self, host, port, token, directory):
+    def connect_bridge(self, host, port, token, directory=None, *, save_logs=True):
         if self.client is not None:
             raise ValueError("Disconnect the current MEXA link first")
         generation = self.generation + 1
         client = StreamClient(host, port, token,
                               lambda packet: self._incoming.emit(generation, packet),
                               lambda ready, text: self._status.emit(generation, ready, text))
-        log = AuditLog(directory, "mexa-received")
+        if save_logs and not str(directory or "").strip():
+            raise ValueError("Choose a received-data log directory or turn off receiver logging")
+        log = AuditLog(directory, "mexa-received") if save_logs else None
         self.generation = generation
+        self._receiving = True
         self.client, self.log = client, log
-        self.settings = dict(host=host, port=port, token=token, directory=str(directory))
+        self.settings = dict(host=host, port=port, token=token, directory=str(directory or ""), save_logs=bool(save_logs))
         self.status = "Connecting to MEXA bridge…"
         self.changed.emit()
         client.start()
 
     def disconnect_bridge(self):
         self.generation += 1  # ignore queued callbacks from a previous connection
+        self._receiving = False
         client, self.client = self.client, None
         if client:
             client.stop()
@@ -68,17 +73,18 @@ class MexaController(QObject):
         self.changed.emit()
 
     def _receive(self, generation, packet):
-        if generation != self.generation or self.log is None:
+        if generation != self.generation or not self._receiving:
             return
         stamp = utc_now()
         try:
-            self.log.write(packet, stamp)
+            if self.log is not None:
+                self.log.write(packet, stamp)
         except OSError as exc:
             self.disconnect_bridge()
             self.status = f"MEXA reception stopped: local log failed ({exc})"
             self.changed.emit()
             return
-        sample = ReceivedSample(deepcopy(packet), stamp, time.monotonic(), str(self.log.path))
+        sample = ReceivedSample(deepcopy(packet), stamp, time.monotonic(), str(self.log.path) if self.log else "")
         with self.lock:
             self.latest = sample
         self.status = sample.problem() or ("SIMULATED MEXA data" if packet["simulated"] else "MEXA live")
@@ -107,6 +113,8 @@ class MexaController(QObject):
         problem = sample.problem(experimental=True) if sample else "Fresh MEXA data is required"
         if problem:
             raise ValueError(problem)
+        if not sample.log_path:
+            raise ValueError(RECEIVER_LOG_REQUIRED)
         return sample
 
     def csv_snapshot(self, flow_timestamp):

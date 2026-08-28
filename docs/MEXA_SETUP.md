@@ -1,9 +1,9 @@
 # MEXA-584L reader and two-PC setup
 
-The replacement reader acquires NO and O2 on the analyser PC, logs locally,
-and streams to the flow-controller PC. It does not need the HORIBA executable.
-Keep the original application as a fallback, but close it before this reader
-opens the analyser's COM port.
+The replacement reader acquires NO and O2 on the analyser PC and streams to
+the flow-controller PC. Either PC can save logs independently. Keep the reader
+running to acquire and stream data. The original HORIBA application must stay
+closed while the reader uses the analyser's COM port.
 
 Hardware validation is not complete. Automated tests use synthetic data and
 fake serial replies. The read protocol was recovered from the supplied HORIBA
@@ -13,7 +13,7 @@ software performs itself.
 
 ## Install on the analyser PC
 
-1. Copy and extract the complete `MEXA-584L-bridge.zip` folder onto that PC.
+1. Copy and extract the latest MEXA-584L bridge ZIP onto that PC.
    Do not run a launcher inside the ZIP. Alternatively, copy the full flow
    controller project; it contains the same reader.
 2. Install 64-bit Python 3.11 or newer if needed. Run
@@ -29,9 +29,12 @@ software performs itself.
    **Local IPv4…** lists active adapter addresses without probing the network.
    `127.0.0.1` is only for running both applications on the same PC. The
    default TCP port is `61234`. Leave it unchanged unless it conflicts.
-6. Choose a local log folder, preferably outside OneDrive. The default is
-   `%LOCALAPPDATA%\MEXA-584L\logs`. Each start creates new CSV and raw JSONL
-   files, without overwriting previous runs.
+6. Leave **Save CSV + raw logs on this PC** off to stream without saving
+   files. This is the default. For a local backup, enable it and choose a
+   folder, preferably outside OneDrive. The default folder is
+   `%LOCALAPPDATA%\MEXA-584L\logs`. Each start with logging enabled creates
+   new CSV and raw JSONL files without overwriting previous runs. Stop the
+   reader before changing this choice.
 7. Leave the two validation/basis checkboxes unchecked for commissioning.
    Use **Copy key** to transfer the shared key to the receiver. A new key is
    generated at each reader launch; it is not written into logs or preferences.
@@ -47,11 +50,19 @@ in its existing mode; use the front panel for standby or shutdown.
 
 1. Restart the updated flow-controller application when safe for the rig.
 2. Open **MEXA analyser**. Enter the analyser PC's IPv4 address, the same port,
-   and the copied shared key. Choose the local received-data log folder.
+   and the copied shared key. **Save received MEXA logs on this PC** is on
+   by default; choose a folder, or turn it off if you only need the display
+   or combined flow CSV. Live optimiser capture requires it to be on.
 3. Click **Connect MEXA**. The NO/O2 display updates when complete, valid
-   readings arrive. Receiver CSV and raw JSONL logs start with the connection.
+   readings arrive. Receiver CSV and raw JSONL logs start with the connection
+   only if selected. Disconnect before changing the logging choice.
 4. Start the normal flow CSV logger when needed. It includes MEXA values,
    timestamps, sequence IDs, sample age and quality flags alongside the flows.
+   It is independent of both MEXA logging switches.
+
+For receiver-only logging, leave the analyser PC's logging switch off and the
+receiver's switch on. If both are off, neither creates standalone MEXA logs;
+the normal flow CSV still records MEXA values if you start that logger.
 
 Both PCs need a network route to each other. Some university Wi-Fi networks
 isolate clients; use a lab network approved for instrument communication.
@@ -97,23 +108,26 @@ Sharing, bridge networks, create a hotspot, disable the firewall, or install a
 tunnel to work around UCL policy. No such network changes are made by this app.
 
 Once a TCP route is available, the acquisition and optimiser code are unchanged.
-If no direct route can be approved, the source logs remain usable, but a relay
-or offline import would be a separate implementation; neither is included here.
+If no direct route can be approved, enable source logging to retain readings
+on the analyser PC. A relay or offline import would be a separate implementation;
+neither is included here.
 
 ## Validate before experimental use
 
 - First test **Simulation only** with `127.0.0.1` on one PC, then over the lab
-  LAN. Check that both displays say SIMULATION, both logs contain readings,
-  and stopping the reader clears the receiver. Simulation cannot enter the
-  experimental optimiser and does not validate the serial protocol.
+  LAN. Check that both displays say SIMULATION and stopping the reader clears
+  the receiver. With logging enabled, check the saved readings on each PC.
+  With it off, check that no log files are created. Simulation cannot enter
+  the experimental optimiser and does not validate the serial protocol.
 - With the burner in a suitable safe commissioning state, use your approved
   analyser procedure to compare the reader with the instrument display and
   known calibration checks. Confirm NO in ppm and O2 in vol%, including
   channel presence, zero/span behaviour and the actual sampling configuration.
 - Check warm-up, standby, known alarm indications and a disconnected serial
   cable. Invalid readings should be flagged and excluded, not converted to
-  zero. Save the raw JSONL to investigate any mismatch. Do not validate a
-  reader that disagrees with the instrument.
+  zero. Enable logging during these checks so the raw JSONL is available to
+  investigate any mismatch. Do not validate a reader that disagrees with the
+  instrument.
 - Confirm with HORIBA or your validated method that the NO/O2 channels and
   sample-conditioning system are suitable for NH3/H2 combustion exhaust.
   Streaming does not resolve cross-sensitivity, ammonia slip, sample losses
@@ -139,8 +153,10 @@ the setup after changing sensors, sampling equipment, calibration or wiring.
 1. Create/open a campaign and obtain a suggestion as usual. Review and apply
    flows with the existing controls, following your transition procedure.
 2. Switch off the pilot and allow the burner and analyser to settle.
-3. Select **Capture NO/O2 automatically from the MEXA network link**, confirm
-   pilot off and settled, then click **Start window**.
+3. Connect the MEXA with **Save received MEXA logs on this PC** enabled.
+   Source logging on the analyser PC is optional. Select **Capture NO/O2
+   automatically from the MEXA network link**, confirm pilot off and settled,
+   then click **Start window**.
 4. Keep the condition steady. **Finish window** requires three or more new
    analyser records and three or more flow passes. Both streams must cover
    the campaign's minimum duration. Allow a few extra seconds because the
@@ -167,13 +183,16 @@ to manual mode.
 
 ## Logs and reconnects
 
-The reader keeps logging locally if the network drops. The receiver retries
-the connection but resumes with current samples only; it does not insert an
-outage backlog into a new live window. Use source IDs and sequence numbers to
-match the two logs when investigating gaps.
+With source logging enabled, the reader keeps saving locally if the network
+drops. With it off, readings missed during an outage are not retained and
+cannot be recovered. The receiver retries the connection but resumes with
+current samples only; it does not insert an outage backlog into a new live
+window. If both PCs save logs, use source IDs and sequence numbers to match
+them when investigating gaps.
 
-CSV files contain decoded readings and quality flags. Raw JSONL additionally
-contains all three serial replies in hexadecimal. Records are flushed on each
+When logging is enabled, CSV files contain decoded readings and quality flags.
+Raw JSONL additionally contains all three serial replies in hexadecimal.
+Records are flushed on each
 sample and fsynced on normal close. A reader log-write failure stops publication;
 a receiver log-write failure stops reception and invalidates its active window.
 An unexpected power failure can still lose recent OS-buffered data.
@@ -183,11 +202,12 @@ was held across another flow row, or no valid value was available. Do not count
 held rows as independent analyser samples. `mexa_valid` describes acquisition
 quality, not suitability for an experiment: also inspect `mexa_simulated`,
 `mexa_validated` and `mexa_basis`. Invalid or stale values are blank in the
-combined CSV; the raw analyser logs retain the diagnostic record.
+combined CSV; raw analyser logs retain the diagnostic record if enabled.
 
-Keep the source/receiver logs with the `.fcbo.json` campaign. The campaign stores
-window statistics and audit references, not a copy of every serial frame.
-Moving a log requires preserving that association manually.
+Keep the receiver logs with the `.fcbo.json` campaign, and any source logs saved
+as a backup. The campaign stores window statistics and audit references, not
+a copy of every serial frame. Moving a log requires preserving that association
+manually.
 
 ## Protocol provenance
 

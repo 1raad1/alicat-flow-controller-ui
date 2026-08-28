@@ -1,10 +1,11 @@
 """Network analyser connection and acquisition status, independent of burner I/O."""
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                               QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..mexa.app import default_log_dir
+from ..mexa.records import RECEIVER_LOG_REQUIRED
 from .qt_widgets import Card
 from . import qt_theme as theme
 
@@ -35,8 +36,13 @@ class MexaTab(QWidget):
         self.token.setEchoMode(QLineEdit.EchoMode.Password)
         self.directory = QLineEdit(config["directory"] or str(default_log_dir()))
         for title, widget in (("Analyser PC IPv4", self.host), ("TCP port", self.port),
-                              ("Shared key", self.token), ("Local received-data logs", self.directory)):
+                              ("Shared key", self.token)):
             form.addRow(title, widget)
+        self.save_logs = QCheckBox("Save received MEXA logs on this PC")
+        self.save_logs.setChecked(config.get("save_logs", True))
+        self.save_logs.setToolTip("CSV + raw JSONL. Required for live optimiser capture; optional for display and the normal flow log.")
+        form.addRow("", self.save_logs)
+        form.addRow("Local received-data logs", self.directory)
         card.add_layout(form)
         actions = QHBoxLayout()
         self.connect_button = QPushButton("Connect MEXA")
@@ -59,23 +65,27 @@ class MexaTab(QWidget):
         self.log_label = note("")
         self.log_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         card.add(self.log_label)
-        card.add(note("Every received sample is saved to CSV and raw JSONL, including invalid readings. "
-                      "The normal flow log adds timestamped MEXA columns; repeated held readings are labelled. "
+        card.add(note("Choose whether to save every received sample to CSV and raw JSONL. "
+                      "With this off, the live display still works and the normal flow logger can save "
+                      "MEXA values when you start it separately. Live optimiser capture requires receiver logging. "
                       "Use live capture in the Bayesian optimiser to average each analyser sample once. "
                       "No stream reconnection changes burner settings."))
+        card.add(note("Choose logging before connecting; disconnect to change it. "
+                      "The analyser PC's local logging choice is independent."))
         card.add(note("Keep both PC clocks synchronised. NO is not total NOx. Verify the analyser and "
                       "sampling system for NH3/H2 exhaust before using results. "
                       "Use a trusted LAN: the authenticated stream is not encrypted."))
         layout.addStretch()
         controller.changed.connect(self.refresh)
+        self.save_logs.toggled.connect(self._logging_choice)
         self.refresh()
 
     def _connect(self):
         try:
-            if not self.directory.text().strip():
+            if self.save_logs.isChecked() and not self.directory.text().strip():
                 raise ValueError("Choose a local received-data log directory")
             self.controller.connect_bridge(self.host.text().strip(), self.port.value(), self.token.text(),
-                                           self.directory.text().strip())
+                                           self.directory.text().strip(), save_logs=self.save_logs.isChecked())
         except (ValueError, OSError) as exc:
             self.status.setText(str(exc))
 
@@ -84,15 +94,23 @@ class MexaTab(QWidget):
         if path:
             self.directory.setText(path)
 
+    def _logging_choice(self, checked):
+        self.controller.settings["save_logs"] = checked
+        self.refresh()
+
     def refresh(self):
         c = self.controller
         connected = c.client is not None
         self.connect_button.setEnabled(not connected)
         self.disconnect_button.setEnabled(connected)
-        for widget in (self.host, self.port, self.token, self.directory, self.browse):
+        for widget in (self.host, self.port, self.token, self.save_logs):
             widget.setEnabled(not connected)
+        for widget in (self.directory, self.browse):
+            widget.setEnabled(not connected and self.save_logs.isChecked())
         self.status.setText(c.status)
-        self.log_label.setText(f"Receiving audit log: {c.log.path}" if c.log else "No receiver log open")
+        self.log_label.setText(f"Receiving audit log: {c.log.path}" if c.log else
+                               ("Live display only: receiver CSV/JSONL logging is off. The normal flow logger is independent."
+                                if connected else "No receiver log open"))
         sample = c.latest
         if sample is None or sample.problem():
             self.readings.setText("NO — ppm   ·   O₂ — %")
@@ -102,5 +120,6 @@ class MexaTab(QWidget):
         prefix = "SIMULATION · " if p["simulated"] else ""
         self.readings.setText(f"{prefix}NO {p['no_ppm']:.0f} ppm   ·   O₂ {p['o2_percent']:.2f}%")
         self.quality.setText(f"Sample {p['seq']} · {p['acquired_at']}\n"
-                             + (sample.problem(experimental=True) or "Eligible for operator-confirmed live capture")
+                             + (sample.problem(experimental=True) or
+                                ("Eligible for operator-confirmed live capture" if sample.log_path else RECEIVER_LOG_REQUIRED))
                              + ("\n" + ", ".join(p["warnings"]) if p["warnings"] else ""))

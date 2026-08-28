@@ -40,6 +40,7 @@ class QtMexaTests(unittest.TestCase):
 
     def receive(self, p=None):
         self.controller.log = AuditLog(self.directory.name, "receiver")
+        self.controller._receiving = True
         self.controller._receive(self.controller.generation, p or self.packet())
         return self.controller.latest
 
@@ -98,6 +99,9 @@ class QtMexaTests(unittest.TestCase):
             self.assertTrue(window.start_button.isEnabled())
             self.assertFalse(window.stop_button.isEnabled())
             self.assertFalse(window.validated.isChecked())
+            self.assertFalse(window.save_logs.isChecked())
+            self.assertFalse(window.directory.isEnabled())
+            self.assertTrue(tab.save_logs.isChecked())
             self.assertTrue(tab.connect_button.isEnabled())
             bridge.assert_not_called()
 
@@ -121,6 +125,104 @@ class QtMexaTests(unittest.TestCase):
         self.assertTrue(json.loads(records[0])["simulated"])
         self.controller.disconnect_bridge()
         self.assertIsNone(self.controller.latest)
+
+    def test_all_source_and_receiver_logging_combinations(self):
+        for source_logging, receiver_logging in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(source=source_logging, receiver=receiver_logging):
+                directory = Path(self.directory.name) / f"{source_logging}-{receiver_logging}"
+                probe = socket.socket()
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+                probe.close()
+                key = "optional-logging-integration-test-key"
+                bridge = Bridge(host="127.0.0.1", port=port, token=key, serial_port="NEVER",
+                                directory=directory / "source", save_logs=source_logging,
+                                simulated=True, dry=True)
+                try:
+                    self.controller.connect_bridge("127.0.0.1", port, key, directory / "receiver",
+                                                   save_logs=receiver_logging)
+                    self.assertTrue(self.wait_for(lambda: self.controller.latest is not None))
+                    sample = self.controller.latest
+                    self.assertEqual(bool(bridge.log), source_logging)
+                    self.assertEqual(bool(self.controller.log), receiver_logging)
+                    self.assertEqual(bool(sample.log_path), receiver_logging)
+                    self.assertEqual((directory / "source").exists(), source_logging)
+                    self.assertEqual((directory / "receiver").exists(), receiver_logging)
+                    self.assertTrue(self.controller.csv_snapshot(datetime.now())["mexa_valid"])
+                    tab = MexaTab(self.controller)
+                    try:
+                        self.assertIn("SIMULATION", tab.readings.text())
+                        self.assertFalse(tab.save_logs.isEnabled())
+                        self.assertEqual(tab.save_logs.isChecked(), receiver_logging)
+                    finally:
+                        tab.close()
+                finally:
+                    self.controller.disconnect_bridge()
+                    self.assertTrue(bridge.stop())
+
+    def test_preview_receiver_never_opens_a_log_and_cannot_supply_live_capture(self):
+        p = self.packet()
+        p.update(simulated=False, validated=True)
+        with patch("flow_controller.core.mexa_controller.StreamClient"), patch(
+                "flow_controller.core.mexa_controller.AuditLog", side_effect=AssertionError("Unexpected disk write")) as log:
+            self.controller.connect_bridge("127.0.0.1", 61234, "a" * 40, save_logs=False)
+            generation = self.controller.generation
+            self.controller._receive(generation, p)
+            self.assertEqual(self.controller.latest.log_path, "")
+            self.assertTrue(self.controller.csv_snapshot(datetime.now())["mexa_valid"])
+            with self.assertRaisesRegex(ValueError, "Save received MEXA logs"):
+                self.controller.checked_sample()
+            self.controller.disconnect_bridge()
+            self.controller._receive(generation, p)
+            self.controller._receive(self.controller.generation, p)
+            self.assertIsNone(self.controller.latest)
+            log.assert_not_called()
+
+    def test_reconnect_enables_logging_without_relabeling_preview_sample(self):
+        with patch("flow_controller.core.mexa_controller.StreamClient"):
+            p = self.packet()
+            p.update(simulated=False, validated=True)
+            self.controller.connect_bridge("127.0.0.1", 61234, "a" * 40, save_logs=False)
+            old_generation = self.controller.generation
+            self.controller._receive(old_generation, p)
+            preview_sample = self.controller.latest
+            self.controller.disconnect_bridge()
+            self.controller.connect_bridge("127.0.0.1", 61234, "a" * 40, self.directory.name, save_logs=True)
+            self.controller._receive(old_generation, p)
+            self.assertIsNone(self.controller.latest)
+            self.controller._receive(self.controller.generation, p)
+            self.assertTrue(self.controller.checked_sample().log_path)
+            self.assertEqual(preview_sample.log_path, "")
+
+    def test_logging_checkbox_controls_folder_fields(self):
+        window = BridgeWindow()
+        tab = MexaTab(self.controller)
+        self.addCleanup(window.close)
+        self.addCleanup(tab.close)
+        window.save_logs.setChecked(True)
+        self.assertTrue(window.directory.isEnabled())
+        window.save_logs.setChecked(False)
+        self.assertFalse(window.directory.isEnabled())
+        tab.save_logs.setChecked(False)
+        self.assertFalse(tab.directory.isEnabled())
+        self.assertFalse(self.controller.settings["save_logs"])
+        rebuilt = MexaTab(self.controller)
+        self.addCleanup(rebuilt.close)
+        self.assertFalse(rebuilt.save_logs.isChecked())
+
+    def test_bridge_ui_starts_stream_only_without_a_folder(self):
+        with patch("flow_controller.mexa.app.Bridge") as bridge:
+            bridge.return_value.log = None
+            bridge.return_value.running = True
+            bridge.return_value.stop.return_value = True
+            window = BridgeWindow()
+            self.addCleanup(window.close)
+            window.simulated.setChecked(True)
+            window.directory.clear()
+            window._start()
+            self.assertFalse(bridge.call_args.kwargs["save_logs"])
+            self.assertIn("Stream only", window.log_label.text())
+            self.assertFalse(window.save_logs.isEnabled())
 
 
 if __name__ == "__main__":
