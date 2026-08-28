@@ -1,4 +1,4 @@
-"""Standalone MEXA reader UI. Starts disconnected and never changes analyser mode."""
+"""Standalone MEXA reader with explicitly confirmed, local-only mode controls."""
 
 import os
 from pathlib import Path
@@ -10,10 +10,10 @@ from PySide6.QtGui import QFont
 from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-                              QSpinBox, QVBoxLayout, QWidget)
+                              QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .bridge import Bridge
-from .records import ReceivedSample, utc_now
+from .records import ReceivedSample, additional_reading_text, reading_text, utc_now
 from .transport import DEFAULT_PORT
 import time
 
@@ -28,6 +28,7 @@ def default_log_dir():
 class BridgeSignals(QObject):
     sample = Signal(object)
     status = Signal(str)
+    control = Signal(str)
 
 
 class BridgeWindow(QWidget):
@@ -35,19 +36,27 @@ class BridgeWindow(QWidget):
         super().__init__()
         self.setFont(QFont("Segoe UI", 10))
         self.setWindowTitle("MEXA-584L reader and network bridge")
-        self.resize(680, 650)
+        self.resize(760, 800)
         self.bridge = None
         self.last_sample = None
         self.signals = BridgeSignals(self)
         self.signals.sample.connect(self._sample)
         self.signals.status.connect(self._status)
-        layout = QVBoxLayout(self)
-        title = QLabel("MEXA-584L · NO and O₂ acquisition")
+        self.signals.control.connect(self._control_status)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
+        title = QLabel("MEXA-584L · all-channel acquisition")
         title.setStyleSheet("font-size: 20px; font-weight: 600")
         layout.addWidget(title)
-        hint = QLabel("Close the HORIBA application before connecting. Set MEAS and perform calibration "
-                      "using the instrument's front panel. This reader only queries data/status; "
-                      "it does not operate the burner or change analyser settings.")
+        hint = QLabel("Close the HORIBA application before connecting. MEAS/STANDBY can be requested "
+                      "below or on the front panel. Calibration remains on the front panel. "
+                      "No burner controls or network control commands are provided.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         form = QFormLayout()
@@ -60,6 +69,17 @@ class BridgeWindow(QWidget):
         refresh.clicked.connect(self._ports)
         port_line.addWidget(refresh)
         form.addRow("Serial port (9600, 8N1)", port_line)
+        self.transport = QComboBox()
+        self.transport.addItem("Direct LAN (TCP)", "lan")
+        self.transport.addItem("Internet relay (outbound WSS)", "relay")
+        form.addRow("Connection mode", self.transport)
+        self.relay_url = QLineEdit()
+        self.relay_url.setPlaceholderText("wss://your-approved-relay.example/mexa")
+        self.relay_key = QLineEdit()
+        self.relay_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.relay_key.setPlaceholderText("Publisher access key supplied by relay administrator")
+        form.addRow("Relay URL", self.relay_url)
+        form.addRow("Relay publisher key", self.relay_key)
         self.host = QLineEdit("127.0.0.1")
         host_line = QHBoxLayout()
         host_line.addWidget(self.host)
@@ -102,9 +122,9 @@ class BridgeWindow(QWidget):
             layout.addWidget(box)
         self.simulated.toggled.connect(self._simulation)
         warning = QLabel("First use: leave validation unchecked and compare this display with the instrument. "
-                         "For another PC, use this PC's lab-LAN IPv4 address and the same key on both PCs. "
-                         "One receiver at a time. Traffic is authenticated but not encrypted. "
-                         "Do not expose the port to the internet.")
+                         "One receiver at a time. Direct LAN is authenticated but unencrypted; never expose "
+                         "its TCP port to the internet. Relay mode uses an approved WSS server and opens "
+                         "no inbound port on this PC. Both PCs need the same analyser shared key.")
         warning.setWordWrap(True)
         layout.addWidget(warning)
         buttons = QHBoxLayout()
@@ -115,9 +135,34 @@ class BridgeWindow(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
         layout.addLayout(buttons)
+        self.listener_label = QLabel()
+        self.listener_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.listener_label.setWordWrap(True)
+        self.listener_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.listener_label)
+        self.enable_controls = QCheckBox("Enable local analyser mode controls (not burner controls)")
+        layout.addWidget(self.enable_controls)
+        mode_buttons = QHBoxLayout()
+        self.meas_button = QPushButton("MEAS…")
+        self.standby_button = QPushButton("STANDBY…")
+        self.meas_button.clicked.connect(lambda: self._mode("meas"))
+        self.standby_button.clicked.connect(lambda: self._mode("standby"))
+        mode_buttons.addWidget(self.meas_button)
+        mode_buttons.addWidget(self.standby_button)
+        layout.addLayout(mode_buttons)
+        self.control_label = QLabel("No mode command requested. Start/Stop only controls the reader.")
+        self.control_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.control_label.setWordWrap(True)
+        layout.addWidget(self.control_label)
         self.readings = QLabel("NO — ppm     O₂ — %")
+        self.readings.setWordWrap(True)
         self.readings.setStyleSheet("font-size: 28px; font-weight: 600")
         layout.addWidget(self.readings)
+        self.additional_readings = QLabel(additional_reading_text(None))
+        self.additional_readings.setTextFormat(Qt.TextFormat.PlainText)
+        self.additional_readings.setWordWrap(True)
+        self.additional_readings.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.additional_readings)
         self.quality = QLabel("No samples")
         self.quality.setTextFormat(Qt.TextFormat.PlainText)
         self.quality.setWordWrap(True)
@@ -132,8 +177,13 @@ class BridgeWindow(QWidget):
         layout.addWidget(self.log_label)
         layout.addStretch()
         self._config_widgets = [self.com, refresh, self.host, self.local_ip, self.port, self.directory,
-                                browse, self.save_logs, self.simulated, self.dry, self.validated]
+                                browse, self.save_logs, self.simulated, self.dry, self.validated,
+                                self.transport, self.relay_url, self.relay_key]
+        self.transport.currentIndexChanged.connect(self._tick)
         self.save_logs.toggled.connect(self._tick)
+        self.enable_controls.toggled.connect(self._tick)
+        self.host.textChanged.connect(self._tick)
+        self.port.valueChanged.connect(self._tick)
         self.timer = QTimer(self)
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._tick)
@@ -189,7 +239,11 @@ class BridgeWindow(QWidget):
                                  directory=self.directory.text().strip(), save_logs=self.save_logs.isChecked(),
                                  simulated=self.simulated.isChecked(),
                                  validated=self.validated.isChecked(), dry=self.dry.isChecked(),
-                                 on_sample=self.signals.sample.emit, on_status=self.signals.status.emit)
+                                 on_sample=self.signals.sample.emit, on_status=self.signals.status.emit,
+                                 on_control=self.signals.control.emit,
+                                 transport=self.transport.currentData(), relay_url=self.relay_url.text().strip(),
+                                 relay_key=self.relay_key.text())
+            self.control_label.setText("No mode command requested in this reader run.")
             self.status.setText("Reader started. Waiting for samples/client.")
             self.log_label.setText(f"Audit log: {self.bridge.log.path}" if self.bridge.log else
                                    "Stream only: no files saved on this PC. The receiver can log independently.")
@@ -209,6 +263,30 @@ class BridgeWindow(QWidget):
     def _status(self, text):
         self.status.setText(text)
 
+    def _control_status(self, text):
+        self.control_label.setText(text)
+        self.validated.setChecked(False)
+        self._tick()
+
+    def _mode(self, mode):
+        if not self.enable_controls.isChecked() or not self.bridge or not self.bridge.can_request_mode(mode):
+            return
+        answer = QMessageBox.question(
+            self, f"Request {mode.upper()}?",
+            f"Request {mode.upper()} on the analyser? Follow the instrument procedure and check the front panel. "
+            "This interrupts live optimiser capture. Recheck and restart the reader before using live optimisation. "
+            "A failed or timed-out command is not retried automatically.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.bridge.request_mode(mode)
+            self.validated.setChecked(False)
+            self.control_label.setText(f"{mode.upper()} queued. Awaiting acknowledgement and reported state.")
+        except ValueError as exc:
+            self.control_label.setText(str(exc))
+        self._tick()
+
     def _sample(self, packet):
         self.last_sample = ReceivedSample(packet, utc_now(), time.monotonic(), "")
         self._tick()
@@ -222,17 +300,34 @@ class BridgeWindow(QWidget):
         for widget in (self.directory, self.log_browse):
             widget.setEnabled(not running and self.save_logs.isChecked())
         self.token.setReadOnly(running)
+        relay = self.transport.currentData() == "relay"
+        for widget in (self.host, self.local_ip, self.port):
+            widget.setEnabled(not running and not relay)
+        for widget in (self.relay_url, self.relay_key):
+            widget.setEnabled(not running and relay)
+        host = self.host.text().strip()
+        endpoint = f"{host}:{self.port.value()}"
+        local_only = host.startswith("127.")
+        self.listener_label.setText(
+            (f"Listening on {endpoint}. " if running else f"Not listening. Selected endpoint: {endpoint}. ")
+            + ("LOCAL PC ONLY: use Local IPv4 to select Wi-Fi for another PC." if local_only else
+               "Enter this analyser PC address and port on the receiver; a listener alone does not prove network reachability."))
+        if relay:
+            self.listener_label.setText("Internet relay mode: outbound connection only; no local TCP listener. "
+                                        "See connection status below. A separate hosted relay is required. "
+                                        "ws:// numeric loopback URLs are for local testing only.")
+        for mode, button in (("meas", self.meas_button), ("standby", self.standby_button)):
+            button.setEnabled(bool(running and self.enable_controls.isChecked()
+                                   and self.bridge.can_request_mode(mode)))
         if not running:
             self.validated.setEnabled(not self.simulated.isChecked())
         sample = self.last_sample
-        problem = sample.problem() if sample and running else "No live acquisition"
-        if not sample or problem:
-            self.readings.setText("NO — ppm     O₂ — %")
-            self.quality.setText(problem)
+        self.readings.setText(reading_text(sample if running else None))
+        self.additional_readings.setText(additional_reading_text(sample if running else None))
+        if not sample or not running:
+            self.quality.setText("No live acquisition")
             return
         p = sample.packet
-        prefix = "SIMULATED · " if p["simulated"] else ""
-        self.readings.setText(f"{prefix}NO {p['no_ppm']:.0f} ppm     O₂ {p['o2_percent']:.2f} %")
         self.quality.setText(f"Sample {p['seq']} · {p['acquired_at']}\n"
                              + (sample.problem(experimental=True) or "Validated dry readings; operator checks still required")
                              + ("\n" + ", ".join(p["warnings"]) if p["warnings"] else ""))

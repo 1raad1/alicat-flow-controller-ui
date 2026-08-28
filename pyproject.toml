@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "alicat>=0.9,<0.10",
     "pyserial>=3.5,<4",
+    "websockets>=15.0.1,<16",
     "numpy>=2.0,<3",
     "scipy>=1.15,<2",
     "scikit-learn>=1.6,<2",
@@ -27,6 +28,7 @@ xlsx = ["openpyxl>=3.1,<4"]
 [project.scripts]
 flow-controller-v3 = "flow_controller.ui.qt_main_window:main"
 mexa-584l-bridge = "flow_controller.mexa.app:main"
+mexa-584l-relay = "flow_controller.mexa.relay_server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

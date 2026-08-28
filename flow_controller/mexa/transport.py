@@ -22,6 +22,18 @@ from .records import MAX_LINE, validate_packet
 DEFAULT_PORT = 61234
 
 
+def connection_hint(stage, endpoint):
+    address = f"{endpoint[0]}:{endpoint[1]}"
+    if stage == "connect":
+        return (f"TCP connection to {address} failed before authentication; the shared key has not been checked. "
+                "On the analyser PC, start the bridge bound to its active adapter IP. Check the port, "
+                "Windows firewall and eduroam routing. Do not disable the firewall.")
+    if stage == "authenticate":
+        return (f"TCP reached {address}, but the bridge handshake/authentication did not complete. "
+                "Check the shared key, port and whether another receiver is connected.")
+    return "Authenticated stream lost; the active live window must be restarted."
+
+
 def validate_endpoint(host, port, token):
     if ipaddress.ip_address(host).version != 4:
         raise ValueError("Use a numeric IPv4 address")
@@ -149,6 +161,8 @@ class StreamServer:
 class StreamClient:
     def __init__(self, host, port, token, on_packet, on_status):
         validate_endpoint(host, port, token)
+        if ipaddress.ip_address(host).is_unspecified or ipaddress.ip_address(host).is_multicast or host == "255.255.255.255":
+            raise ValueError("Use the analyser PC's actual adapter IPv4 address, not a wildcard or broadcast address")
         self.endpoint, self.token = (host, port), token
         self.on_packet, self.on_status = on_packet, on_status
         self.stop_event = threading.Event()
@@ -201,9 +215,7 @@ class StreamClient:
                     self.on_packet(packet)
             except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 if not self.stop_event.is_set():
-                    hint = {"connect": "Check the analyser PC's adapter IP, listener, TCP port and firewall/eduroam routing.",
-                            "authenticate": "Bridge reached, but authentication failed. Check the shared key and port.",
-                            "stream": "Stream lost; the active live window must be restarted."}[stage]
+                    hint = connection_hint(stage, self.endpoint)
                     self.on_status(False, f"MEXA link interrupted: {exc}. {hint}")
             finally:
                 close_socket(self.sock)
