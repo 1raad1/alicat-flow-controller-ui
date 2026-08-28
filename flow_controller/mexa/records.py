@@ -17,6 +17,7 @@ import uuid
 PROTOCOL = "mexa584l-horiba-v1-readonly"
 MAX_AGE = 5.0
 MAX_LINE = 16384
+RECEIVER_LOG_REQUIRED = ("Enable 'Save received MEXA logs on this PC' and reconnect before live optimiser capture")
 CSV_FIELDS = ("source_id", "seq", "acquired_at", "received_at", "no_ppm", "o2_percent",
               "co_percent", "co2_percent", "hc_ppm", "state", "valid", "simulated",
               "validated", "basis", "alarms", "warnings")
@@ -185,6 +186,8 @@ class LiveWindow:
         problem = baseline.problem(experimental=True)
         if problem:
             raise ValueError(problem)
+        if not baseline.log_path:
+            raise ValueError(RECEIVER_LOG_REQUIRED)
         self.source_id = baseline.packet["source_id"]
         self.seq = baseline.packet["seq"]
         self.last_stamp = epoch(baseline.packet["acquired_at"])

@@ -223,8 +223,9 @@ Legacy agent modules remain in the repository but are not mounted by the app.
    still apply. Do not assume that safe endpoints imply a safe transition.
 4. After switching the pilot off and allowing the burner, sample line and
    analyser to settle, check both confirmations. For live measurements, connect
-   the bridge in the **MEXA analyser** tab and select **Capture NO/O2
-   automatically**. Click **Start window**. With live capture off, average
+   the bridge in the **MEXA analyser** tab with **Save received MEXA logs on
+   this PC** enabled, then select **Capture NO/O2 automatically**. Click
+   **Start window**. With live capture off, average
    the analyser's uncorrected dry NO and O2 manually over that window.
 5. Click **Finish window** after both streams cover the minimum duration.
    Live capture fills and locks the NO/O2 means; manual mode lets you enter
@@ -397,9 +398,13 @@ sample age, source/sequence ID, state, validity, simulation and reporting basis.
 These columns exist even if the MEXA is connected after logging starts. A fresh
 analyser value can be held across multiple flow rows; `mexa_new_sample=False`
 identifies a repeat, not an independent measurement. Stale, invalid or
-future-dated measurements have blank NO/O2 values. Use the receiver's separate
-CSV/JSONL for the complete analyser record, including readings between flow
-polls. Retained graph-history export remains a flow-only export.
+future-dated measurements have blank NO/O2 values. Enable **Save received MEXA
+logs on this PC** for a separate CSV/JSONL record, including readings between
+flow polls. This is required for live optimiser capture. The bridge's **Save
+CSV + raw logs on this PC** switch is independent and defaults off, so the
+analyser PC can stream without saving files. The normal flow logger works
+with either MEXA logging switch off. Retained graph-history export remains a
+flow-only export. See [MEXA setup](docs/MEXA_SETUP.md) for the two-PC workflow.
 
 Column names include gas, zone, and unit. The header is fixed when logging
 starts, so assignments cannot change while the file is open. Failed readings

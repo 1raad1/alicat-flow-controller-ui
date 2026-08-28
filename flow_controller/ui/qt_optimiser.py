@@ -165,7 +165,7 @@ class OptimiserPane(Card):
         self.live.setChecked(self.controller.live_mode)
         self.live.toggled.connect(lambda checked: setattr(self.controller, "live_mode", checked))
         layout.addWidget(self.live)
-        layout.addWidget(note("Connect in the MEXA analyser tab first. Live capture requires validated, "
+        layout.addWidget(note("Connect in the MEXA analyser tab with receiver logging enabled. Live capture requires validated, "
                               "uncorrected dry readings, with no gaps or alarms. Simulation is excluded."))
         line = QHBoxLayout()
         self.start_button = self._button("Start window", self._start, line)

@@ -83,10 +83,14 @@ class BridgeWindow(QWidget):
         copy_key.clicked.connect(lambda: QApplication.clipboard().setText(self.token.text()))
         key_line.addWidget(copy_key)
         form.addRow("Shared key (copy to receiver)", key_line)
+        self.save_logs = QCheckBox("Save CSV + raw logs on this PC")
+        self.save_logs.setToolTip("Off: stream only. The receiving PC can save its own logs independently.")
+        form.addRow("", self.save_logs)
         self.directory = QLineEdit(str(default_log_dir()))
         folder_line = QHBoxLayout()
         folder_line.addWidget(self.directory)
         browse = QPushButton("Browse…")
+        self.log_browse = browse
         browse.clicked.connect(self._folder)
         folder_line.addWidget(browse)
         form.addRow("Local CSV + raw JSONL log", folder_line)
@@ -128,7 +132,8 @@ class BridgeWindow(QWidget):
         layout.addWidget(self.log_label)
         layout.addStretch()
         self._config_widgets = [self.com, refresh, self.host, self.local_ip, self.port, self.directory,
-                                browse, self.simulated, self.dry, self.validated]
+                                browse, self.save_logs, self.simulated, self.dry, self.validated]
+        self.save_logs.toggled.connect(self._tick)
         self.timer = QTimer(self)
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._tick)
@@ -173,7 +178,7 @@ class BridgeWindow(QWidget):
         try:
             if not self.simulated.isChecked() and not self.com.currentText().strip():
                 raise ValueError("Select the analyser's COM port")
-            if not self.directory.text().strip():
+            if self.save_logs.isChecked() and not self.directory.text().strip():
                 raise ValueError("Choose a local log directory")
             if self.bridge:
                 if not self.bridge.stop():
@@ -181,11 +186,13 @@ class BridgeWindow(QWidget):
             self.last_sample = None
             self.bridge = Bridge(host=self.host.text().strip(), port=self.port.value(),
                                  token=self.token.text(), serial_port=self.com.currentText().strip(),
-                                 directory=self.directory.text().strip(), simulated=self.simulated.isChecked(),
+                                 directory=self.directory.text().strip(), save_logs=self.save_logs.isChecked(),
+                                 simulated=self.simulated.isChecked(),
                                  validated=self.validated.isChecked(), dry=self.dry.isChecked(),
                                  on_sample=self.signals.sample.emit, on_status=self.signals.status.emit)
             self.status.setText("Reader started. Waiting for samples/client.")
-            self.log_label.setText(f"Audit log: {self.bridge.log.path}")
+            self.log_label.setText(f"Audit log: {self.bridge.log.path}" if self.bridge.log else
+                                   "Stream only: no files saved on this PC. The receiver can log independently.")
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, "Cannot start MEXA reader", str(exc))
         self._tick()
@@ -212,6 +219,8 @@ class BridgeWindow(QWidget):
         self.stop_button.setEnabled(running)
         for widget in self._config_widgets:
             widget.setEnabled(not running)
+        for widget in (self.directory, self.log_browse):
+            widget.setEnabled(not running and self.save_logs.isChecked())
         self.token.setReadOnly(running)
         if not running:
             self.validated.setEnabled(not self.simulated.isChecked())
