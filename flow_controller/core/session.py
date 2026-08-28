@@ -46,6 +46,7 @@ from ..infrastructure.serial_worker import SerialIOWorker
 from ..services.discovery import DiscoveryService
 from .combustion_prefs import SCOPE_ALL, SCOPE_STAGE1, SCOPE_STAGE2
 from .csv_logger import CsvLogger, resolve_path
+from .mexa_controller import MexaController
 from .graph_history import GraphHistory
 from .agent_read_model import build_snapshot, derive_state, windowed_history
 from .experiment_plan_controller import ExperimentPlanController
@@ -186,6 +187,7 @@ class FlowSession(QObject):
         self.calc = CombustionCalculator()
         self.history = GraphHistory()
         self._csv = CsvLogger()
+        self.mexa = MexaController(self)
         self._csv_lock = threading.Lock()
         self._ramps = RampRunner(self._emit_ramp_setpoint, log=self._log)
         self._udp = UdpCommandListener(
@@ -2712,7 +2714,7 @@ class FlowSession(QObject):
         try:
             with self._csv_lock:
                 actual = self._csv.start(
-                    Path(path), self.selection, source=source)
+                    Path(path), self.selection, source=source, mexa=True)
         except Exception as exc:
             self.failed.emit("Logging", f"Could not open the log file:\n\n{exc}")
             return False
@@ -2735,7 +2737,8 @@ class FlowSession(QObject):
             return
         phi_values = self.phi_values(pass_samples)
         with self._csv_lock:
-            self._csv.write_row(pass_samples, phi_values, timestamp)
+            self._csv.write_row(pass_samples, phi_values, timestamp,
+                                mexa=self.mexa.csv_snapshot(timestamp))
 
     # ==================================================================== #
     #  LabVIEW UDP triggers                                                #
@@ -2827,6 +2830,7 @@ class FlowSession(QObject):
         self.is_monitoring = False
         self._restart_pending = False
         self.stop_udp()
+        self.mexa.shutdown()
         if self._csv.active:
             self.stop_logging()
         future = self._monitor_future

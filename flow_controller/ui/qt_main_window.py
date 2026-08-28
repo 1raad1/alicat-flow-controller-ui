@@ -34,13 +34,12 @@ from PySide6.QtWidgets import (
 )
 
 from .. import APP_VERSION
-from ..agent.ipc import AgentIpcServer
-from ..agent.service import AgentDraftService
+from ..core.optimiser_controller import OptimiserController
 from ..core.session import FlowSession, SEQ_IDLE, SEQ_RECORDING, SEQ_REPLAYING
 from . import qt_theme as theme
-from .qt_agent_launcher import AgentProcessManager
 from .qt_connection_tab import ConnectionTab
 from .qt_logging_tab import LoggingTab
+from .qt_mexa import MexaTab
 from .qt_operation_tab import OperationTab, SafetyBar
 from .qt_settings import SettingsDialog
 from .qt_widgets import GlassBackdrop, GlassBar, StatusDot, label
@@ -328,16 +327,10 @@ class MainWindow(QMainWindow):
         self._settings = None
         self._theme_pending = False
         self._native_frame = False
-        self._agent_pane_expanded = False
-        # The manager is deliberately not a child of the rebuilt UI.  A theme
-        # refresh replaces widgets, but must not orphan an interactive agent
-        # running in its own console window.
-        project_dir = Path(__file__).resolve().parents[2]
-        self.agent_service = AgentDraftService(self.session)
-        self.agent_gateway = AgentIpcServer(self.session, self.agent_service)
-        self.agent_manager = AgentProcessManager(
-            project_dir, gateway=self.agent_gateway,
-            authority_service=self.agent_service, parent=self)
+        # The campaign and fitting worker outlive widgets replaced by a theme
+        # rebuild. No embedded agent, live-control authority or IPC server is
+        # started by the desktop application.
+        self.optimiser = OptimiserController(self.session, self)
 
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
@@ -521,17 +514,16 @@ class MainWindow(QMainWindow):
         tabs.setDocumentMode(True)
 
         self.connection_tab = ConnectionTab(self.session)
-        self.operation_tab = OperationTab(
-            self.session, agent_manager=self.agent_manager,
-            agent_collapsed=not self._agent_pane_expanded)
-        self.agent_pane = self.operation_tab.agent_pane
-        self.agent_pane.toggled.connect(self._set_agent_pane_expanded)
+        self.operation_tab = OperationTab(self.session, optimiser=self.optimiser)
+        self.optimiser_pane = self.operation_tab.optimiser_pane
         self.logging_tab = LoggingTab(self.session)
+        self.mexa_tab = MexaTab(self.session.mexa)
         # '&&' because QTabBar reads a single '&' as a mnemonic marker and
         # renders it as an underline on the following letter.
         tabs.addTab(self.connection_tab, 'Connection && Assignment')
         tabs.addTab(self.operation_tab, 'Operation && Monitoring')
         tabs.addTab(self.logging_tab, 'Logging && Graphs')
+        tabs.addTab(self.mexa_tab, 'MEXA analyser')
 
         self.operation_tab.status.connect(self.show_message)
         self.logging_tab.status.connect(self.show_message)
@@ -547,9 +539,6 @@ class MainWindow(QMainWindow):
                              Qt.Corner.TopRightCorner)
         self._tabs = tabs
         return tabs
-
-    def _set_agent_pane_expanded(self, expanded):
-        self._agent_pane_expanded = bool(expanded)
 
     def _build_status_bar(self):
         """The bottom strip: one-off messages, and nothing else.
@@ -742,14 +731,11 @@ class MainWindow(QMainWindow):
         if self._run_is_live() and not self._confirm_close():
             event.ignore()
             return
-        # Do not orphan an embedded shell. The manager uses a bounded Windows
-        # process-tree kill fallback; if even that fails, keep the app open so
-        # the operator can see and resolve the failure.
-        if not self.agent_manager.shutdown():
+        if not self.optimiser.shutdown():
             QMessageBox.critical(
-                self, 'Could not close agent terminal',
-                'The embedded agent process is still running, so Flow '
-                'Controller will remain open. Stop the agent and try again.')
+                self, 'Optimiser calculation finishing',
+                'Cancellation requested. Wait for the optimiser calculation '
+                'to finish, then close again. Flow control is unchanged.')
             event.ignore()
             return
         self.session.shutdown()

@@ -32,6 +32,11 @@ ZONE_ORDER = ("Zone 1", "Zone 2", "Pilot", "General")
 UNASSIGNED_ZONE = "-- unassigned --"
 UNSELECTED_GAS = "-- select --"
 
+MEXA_COLUMNS = ('mexa_source_id', 'mexa_seq', 'mexa_acquired_at', 'mexa_received_at',
+                'mexa_age_s', 'mexa_valid', 'mexa_new_sample', 'mexa_no_ppm',
+                'mexa_o2_percent', 'mexa_state', 'mexa_simulated', 'mexa_basis',
+                'mexa_validated')
+
 
 def unit_label(unit, gas, zone):
     """A descriptive column prefix, falling back to the bare unit letter."""
@@ -59,7 +64,7 @@ def order_units(assignments):
     return ordered
 
 
-def build_header(units, assignments):
+def build_header(units, assignments, *, mexa=False):
     """Column names for ``units`` in the given order, plus derived phi."""
     header = ['timestamp']
     for unit in units:
@@ -69,6 +74,8 @@ def build_header(units, assignments):
             header.append(f"{label}_{suffix}")
         header.append(f"{label}_valve_drive_1_pct")
     header += ['phi_stage1_live', 'phi_stage2_live', 'phi_global_live']
+    if mexa:
+        header.extend(MEXA_COLUMNS)
     return header
 
 
@@ -90,12 +97,14 @@ class CsvLogger:
         self.path = None
         self.units = []
         self.source = None
+        self.mexa = False
+        self._last_mexa = None
 
     @property
     def active(self):
         return self._file is not None
 
-    def start(self, path, assignments, *, source="Manual"):
+    def start(self, path, assignments, *, source="Manual", mexa=False):
         """Open ``path`` and write the header.  Raises on failure."""
         if self.active:
             raise RuntimeError("logging is already running")
@@ -107,7 +116,7 @@ class CsvLogger:
         handle = open(output, 'w', newline='', buffering=1)
         try:
             writer = csv.writer(handle)
-            writer.writerow(build_header(units, assignments))
+            writer.writerow(build_header(units, assignments, mexa=mexa))
         except Exception:
             handle.close()
             raise
@@ -116,9 +125,11 @@ class CsvLogger:
         self.path = str(output)
         self.units = units
         self.source = source
+        self.mexa = mexa
+        self._last_mexa = None
         return self.path
 
-    def write_row(self, samples, phi_values, timestamp=None):
+    def write_row(self, samples, phi_values, timestamp=None, *, mexa=None):
         """Append one pass.  Never raises -- a log fault must not stop control."""
         if not self.active:
             return False
@@ -132,6 +143,14 @@ class CsvLogger:
                 drives = sample.get('valve_drives') or ()
                 row.append(_format(drives[0]) if drives else '')
             row += [_format(value) for value in phi_values]
+            if self.mexa:
+                reading = dict(mexa or {})
+                identity = (reading.get('mexa_source_id'), reading.get('mexa_seq'))
+                fresh = bool(reading.get('mexa_valid'))
+                reading['mexa_new_sample'] = fresh and identity != self._last_mexa
+                if fresh:
+                    self._last_mexa = identity
+                row.extend(reading.get(key, '') for key in MEXA_COLUMNS)
             self._writer.writerow(row)
             try:
                 self._file.flush()
