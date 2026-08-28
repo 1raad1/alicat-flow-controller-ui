@@ -1,9 +1,17 @@
 # MEXA-584L reader and two-PC setup
 
-The replacement reader acquires NO and O2 on the analyser PC and streams to
-the flow-controller PC. Either PC can save logs independently. Keep the reader
+The replacement reader acquires all channels exposed by the original MEXA
+application and streams them to the flow-controller PC. Either PC can save
+logs independently. Keep the reader
 running to acquire and stream data. The original HORIBA application must stay
 closed while the reader uses the analyser's COM port.
+
+For a temporary internet connection test, choose **Host temporary relay on this
+PC** in the flow app and **Internet relay (outbound WSS)** in the analyser bridge.
+See [Quick Tunnel setup](MEXA_QUICK_TUNNEL.md). Use this only where UCL permits the
+tunnel and data transfer. For a separate approved server, choose Internet relay
+in both apps; see [relay setup and hosting](MEXA_RELAY.md).
+The IPv4/TCP instructions below apply to **Direct LAN** mode only.
 
 Hardware validation is not complete. Automated tests use synthetic data and
 fake serial replies. The read protocol was recovered from the supplied HORIBA
@@ -17,7 +25,7 @@ software performs itself.
    Do not run a launcher inside the ZIP. Alternatively, copy the full flow
    controller project; it contains the same reader.
 2. Install 64-bit Python 3.11 or newer if needed. Run
-   `install_mexa_bridge.bat`. This installs only PySide6 and pyserial into
+   `install_mexa_bridge.bat`. This installs PySide6, pyserial and websockets into
    `%USERPROFILE%\.mexa-584l\venv`; it does not install the optimiser.
 3. Start `run_mexa_bridge.bat`. Nothing connects until you click Start.
    On a PC with the existing flow-controller environment, the launcher can
@@ -25,7 +33,7 @@ software performs itself.
 4. Choose the analyser's COM port. **Refresh ports** lists Windows ports without
    probing instruments. The reader uses 9600 baud, 8 data bits, no parity,
    one stop bit, no handshaking, and DTR/RTS configured off before opening.
-5. Set **Listen IPv4 address** to the analyser PC's address on your lab LAN.
+5. For **Direct LAN**, set **Listen IPv4 address** to the analyser PC's address on your lab LAN.
    **Local IPv4…** lists active adapter addresses without probing the network.
    `127.0.0.1` is only for running both applications on the same PC. The
    default TCP port is `61234`. Leave it unchanged unless it conflicts.
@@ -38,13 +46,37 @@ software performs itself.
 7. Leave the two validation/basis checkboxes unchecked for commissioning.
    Use **Copy key** to transfer the shared key to the receiver. A new key is
    generated at each reader launch; it is not written into logs or preferences.
-8. Click **Start reader and stream**. Use the instrument's front panel to
-   select MEAS and perform its normal checks and calibration. This application
-   sends only read queries, not MEAS, standby, calibration or pump commands.
+8. Click **Start reader and stream**. This starts acquisition, not MEAS.
+   Select MEAS on the front panel or use the local mode controls below.
+   Perform calibration and normal instrument checks on the front panel.
 
 The original HORIBA application must not be using the same serial port. Stop
 this reader before reopening HORIBA. Stopping the reader leaves the instrument
 in its existing mode; use the front panel for standby or shutdown.
+
+### Local MEAS and STANDBY controls
+
+Select **Enable local analyser mode controls**, then choose **MEAS…** or
+**STANDBY…** and confirm the request. These controls are on the analyser PC
+only. No network command can operate the analyser or burner.
+
+MEAS requires a fresh standby status; STANDBY requires a fresh measuring
+status. Both are disabled during warm-up, missing/stale status or a pending
+command. An out-of-range channel does not by itself prevent a mode change.
+Commands run between read cycles on the same serial connection. There are no
+automatic mode changes on startup, reconnection, stopping or closing the reader.
+
+An ACK means the analyser acknowledged the request, not that the requested
+mode has been reached. Check the subsequent reported state and front panel.
+If a request fails or times out, its outcome is uncertain. The reader reports
+the failure and does not retry it; check the instrument before trying again.
+Calibration, zero/span settings and separate pump controls are not implemented.
+
+Every mode request invalidates live optimiser capture and clears serial
+validation for the remainder of that reader run. After checking the new mode,
+stop the reader, repeat the required instrument checks, confirm validation and
+restart. Re-settle before starting a new optimiser window. Starting/stopping
+the reader does not itself return the analyser to MEAS or STANDBY.
 
 ## Connect the flow-controller PC
 
@@ -53,9 +85,10 @@ in its existing mode; use the front panel for standby or shutdown.
    and the copied shared key. **Save received MEXA logs on this PC** is on
    by default; choose a folder, or turn it off if you only need the display
    or combined flow CSV. Live optimiser capture requires it to be on.
-3. Click **Connect MEXA**. The NO/O2 display updates when complete, valid
-   readings arrive. Receiver CSV and raw JSONL logs start with the connection
-   only if selected. Disconnect before changing the logging choice.
+3. Click **Connect MEXA**. The NO/O2 display updates when fresh readings arrive,
+   including out-of-range values labelled INVALID. Receiver CSV and raw JSONL
+   logs start with the connection only if selected. Disconnect before changing
+   the logging choice.
 4. Start the normal flow CSV logger when needed. It includes MEXA values,
    timestamps, sequence IDs, sample age and quality flags alongside the flows.
    It is independent of both MEXA logging switches.
@@ -64,17 +97,104 @@ For receiver-only logging, leave the analyser PC's logging switch off and the
 receiver's switch on. If both are off, neither creates standalone MEXA logs;
 the normal flow CSV still records MEXA values if you start that logger.
 
-Both PCs need a network route to each other. Some university Wi-Fi networks
+### Channels and metadata
+
+Both displays show NO/O2 and a separate panel of other reported channels.
+The stream, source and receiver CSV/JSONL logs, and combined flow CSV carry:
+
+| Field | Unit / meaning |
+| --- | --- |
+| NO | ppm, not total NOx |
+| O2, CO, CO2 | vol% |
+| HC | ppm as reported by the instrument |
+| AFR | Analyser-reported air-to-fuel ratio |
+| Lambda | Analyser-reported excess-air ratio |
+| RPM | Optional engine-speed sensor, rpm |
+| Oil temperature | Optional sensor, degrees Celsius; not exhaust temperature |
+| PEF | Reported PEF factor; not reapplied to HC |
+
+Records also carry timestamps, source/sequence IDs, option-presence flags,
+acquisition duration, analyser state, alarms, warnings and raw replies. RPM,
+temperature, NO and O2 are blank if their option is absent. Nothing substitutes
+zero or a previous reading for an unavailable channel.
+
+PEF is a separate read query. A failed PEF request leaves PEF blank and adds
+`pef_unavailable` plus the query error; the channel frame is retained. Normal
+freshness and acquisition-duration checks still apply. PEF raw bytes use the
+separate `raw_pef` field so the original three-frame `raw` object remains
+compatible with older receivers.
+
+The analyser's AFR/lambda are calculated for its automotive application.
+Do not interpret them as NH3/H2 burner equivalence ratios or replace the
+flow controller's flow-based phi values with them. HC is an instrument-reported
+hydrocarbon signal, not an ammonia measurement. The optimiser still uses NO/O2;
+its validity flag does not validate the other channels for an experiment.
+[HORIBA's specifications](https://www.horiba.com/aut/mobility/products/detail/action/show/Product/mexa-584l-120/)
+describe the automotive AFR/lambda calculations and optional sensors.
+
+New receivers still accept older bridge packets; channels those packets do
+not contain display as blank. Update both PCs to display and save the full set.
+
+In Direct LAN mode, both PCs need a network route to each other. Some university Wi-Fi networks
 isolate clients; use a lab network approved for instrument communication.
 If Windows or university policy blocks the link, ask IT to allow inbound TCP
 `61234` on the analyser PC from the flow-controller PC, on the appropriate
 trusted network profile. Do not disable the firewall or expose this port to
 the internet. The installer does not change firewall settings.
 
-The stream uses a random challenge and HMAC-SHA256 authentication, including
+The Direct LAN stream uses a random challenge and HMAC-SHA256 authentication, including
 per-record signatures tied to the connection. It is not encrypted. Use a
 trusted LAN or an institution-managed secure network. Only one receiver is
 served at a time. The network accepts no burner or analyser control commands.
+
+### Out-of-range readings versus a failed connection
+
+Network status and measurement quality are displayed separately. A connected
+stream can carry invalid measurements. An **Analyser not ready** warning is
+not itself a network error; a **TCP connection timed out** error is separate.
+
+Fresh out-of-range values are shown on both PCs with an INVALID label and the
+affected channel's limits. The software checks NO against 0–5000 ppm and O2
+against 0–25%. Negative or excessive reported values are not clipped to zero
+or accepted by the optimiser. These values are for diagnostics: they do not
+extend the analyser's measurement range. Compare with the front panel and
+saved serial frames before interpreting them. Missing channels and stale data
+still display dashes.
+
+Out-of-range records are streamed without requiring valid NO/O2 measurements
+and are saved by whichever MEXA loggers you enable. The combined flow CSV
+retains all fresh channel values in its `mexa_reported_` columns, alongside
+`mexa_quality` and `mexa_valid=False`. Its original `mexa_no_ppm` and
+`mexa_o2_percent` columns remain blank for invalid data. Live optimisation
+continues to reject those records.
+
+For a Direct LAN connection timeout (relay diagnostics are in the [relay guide](MEXA_RELAY.md)):
+
+1. Check that the bridge is started. Its listener label shows the bound address
+   and port. `127.0.0.1` only accepts a receiver on the same PC. Use the analyser
+   PC's active Wi-Fi/LAN IPv4 in both apps, not the receiving PC's address.
+2. On the analyser PC, run `Get-NetTCPConnection -LocalPort 61234 -State Listen`
+   in PowerShell. The local address must match the selected adapter address.
+   If no listener exists, resolve the bridge's startup error first.
+3. From the receiving PC, test that exact address and port:
+
+   ```powershell
+   $mexaAddress = Read-Host "Analyser PC IPv4"
+   Test-NetConnection -ComputerName $mexaAddress -Port 61234
+   ```
+
+4. If TCP fails despite a matching listener, investigate the analyser PC's
+   inbound firewall, the receiver's outbound policy and network filtering.
+   A shared-key change cannot fix a failure before authentication. Ask IT to
+   permit only the receiving PC to reach the analyser PC on TCP 61234, on the
+   active network profile. Do not disable the firewall or bypass managed policy.
+5. If TCP succeeds but authentication fails, copy the key from the currently
+   running bridge. Check that another receiver is not already connected.
+
+Windows can classify an eduroam connection as Public. An allow rule limited
+to the Private profile would then not apply. Firewall rules should be scoped
+to the required addresses and port, and approved for the actual profile.
+Recheck both addresses after reconnecting to Wi-Fi.
 
 ### Using UCL eduroam
 
@@ -93,8 +213,9 @@ enter that address in the receiver. Do not use an address from a web search for
 adapter address. Recheck the adapter address after reconnecting to Wi-Fi.
 
 Test with simulation before involving the analyser. A message saying **Bridge
-authenticated** confirms a working route and matching key. **Bridge reached,
-but authentication failed** points to the key or endpoint. A connection timeout
+authenticated** confirms a working route and matching key. **TCP reached**
+followed by a handshake/authentication failure points to the key, endpoint or
+another connected receiver. A connection timeout
 does not identify its cause: wrong IP, no listener, the PC firewall or university
 network filtering can all prevent the connection.
 
@@ -105,12 +226,13 @@ commands. Ask whether this is permitted over eduroam or should use an approved
 wired lab network. If needed, an approved isolated wired link can carry the
 measurements while Wi-Fi is used separately. Do not enable Internet Connection
 Sharing, bridge networks, create a hotspot, disable the firewall, or install a
-tunnel to work around UCL policy. No such network changes are made by this app.
+tunnel to work around UCL policy. The app does not change firewall rules or
+network adapters; its optional Quick Tunnel must be permitted by UCL.
 
-Once a TCP route is available, the acquisition and optimiser code are unchanged.
-If no direct route can be approved, enable source logging to retain readings
-on the analyser PC. A relay or offline import would be a separate implementation;
-neither is included here.
+If no direct route can be approved, use the separate [internet relay](MEXA_RELAY.md)
+with an approved hosting endpoint. Both PCs connect outward on WSS, usually port
+443. This still needs outbound access permitted by IT. Enable source logging to
+retain readings during outages. Offline log import is not implemented.
 
 ## Validate before experimental use
 
@@ -118,16 +240,22 @@ neither is included here.
   LAN. Check that both displays say SIMULATION and stopping the reader clears
   the receiver. With logging enabled, check the saved readings on each PC.
   With it off, check that no log files are created. Simulation cannot enter
-  the experimental optimiser and does not validate the serial protocol.
+  the experimental optimiser and does not validate the serial protocol. Test
+  simulated MEAS/STANDBY transitions, including confirmation and validation reset.
 - With the burner in a suitable safe commissioning state, use your approved
   analyser procedure to compare the reader with the instrument display and
   known calibration checks. Confirm NO in ppm and O2 in vol%, including
   channel presence, zero/span behaviour and the actual sampling configuration.
+  Compare the additional channels and PEF with the original application or
+  front panel separately. Stop the bridge before opening the original program.
 - Check warm-up, standby, known alarm indications and a disconnected serial
   cable. Invalid readings should be flagged and excluded, not converted to
   zero. Enable logging during these checks so the raw JSONL is available to
   investigate any mismatch. Do not validate a reader that disagrees with the
   instrument.
+- Commission MEAS/STANDBY separately from burner experiments. Verify each
+  acknowledged request against the front panel and subsequent status. Check
+  that rejected or timed-out requests are reported without automatic retries.
 - Confirm with HORIBA or your validated method that the NO/O2 channels and
   sample-conditioning system are suitable for NH3/H2 combustion exhaust.
   Streaming does not resolve cross-sensitivity, ammonia slip, sample losses
@@ -190,8 +318,14 @@ current samples only; it does not insert an outage backlog into a new live
 window. If both PCs save logs, use source IDs and sequence numbers to match
 them when investigating gaps.
 
-When logging is enabled, CSV files contain decoded readings and quality flags.
-Raw JSONL additionally contains all three serial replies in hexadecimal.
+When logging is enabled, CSV files contain every reported channel, quality
+flags and raw reply columns. JSONL also retains the complete structured packet.
+The three status/channel replies and the separate PEF reply are hexadecimal.
+Local mode-request records have blank channels, `valid=False`, and a `control`
+object containing the requested mode, phase, reply bytes and outcome detail.
+They are retained in source JSONL when enabled and in receiver JSONL if received.
+Normal readings are nominally at most 1 Hz; mode requests add diagnostic records.
+These records can interrupt/restart a live stream just like other invalid data.
 Records are flushed on each
 sample and fsynced on normal close. A reader log-write failure stops publication;
 a receiver log-write failure stops reception and invalidates its active window.
@@ -201,8 +335,15 @@ In the combined flow CSV, `mexa_new_sample=False` means the same recent value
 was held across another flow row, or no valid value was available. Do not count
 held rows as independent analyser samples. `mexa_valid` describes acquisition
 quality, not suitability for an experiment: also inspect `mexa_simulated`,
-`mexa_validated` and `mexa_basis`. Invalid or stale values are blank in the
-combined CSV; raw analyser logs retain the diagnostic record if enabled.
+`mexa_validated` and `mexa_basis`. Invalid values are blank in the original
+NO/O2 columns; fresh reported values remain in the diagnostic `mexa_reported_`
+columns. Stale or future values are blank in both sets. Raw analyser logs retain
+the diagnostic record if enabled.
+
+The combined flow CSV includes `mexa_reported_` columns for all ten numeric
+fields in the table, plus `mexa_options`, `mexa_cycle_s`, `mexa_alarms`,
+`mexa_warnings`, `mexa_pef_error` and `mexa_raw_` reply columns. These are
+snapshots at flow-poll times, not a replacement for the per-record MEXA logs.
 
 Keep the receiver logs with the `.fcbo.json` campaign, and any source logs saved
 as a backup. The campaign stores window statistics and audit references, not
@@ -225,6 +366,23 @@ the signed big-endian value at channel offsets 21–22; O2 uses offsets 11–12
 divided by 100. Option-presence bits are checked on every cycle. No old channel
 value is reused if a cycle fails. Nominal acquisition is at most 1 Hz, not a
 claim about independent sensor response time.
+
+Other channel offsets follow `ResponseParsers.ParseForData`: CO2 at 5 /100,
+CO at 7 /100, HC at 9, AFR at 13 /10, lambda at 15 /1000, RPM at 23 and oil
+temperature at 25. All use signed big-endian 16-bit values. Subsystem byte 6
+uses masks 1, 2, 4 and 8 for O2, NO, RPM and temperature presence respectively.
+The remaining frame bytes are retained as raw data without invented meanings.
+Return PEF is `02 03 18 00 00 E3`, with a six-byte ACK and 230 ms delay; the
+signed value at reply offsets 3–4 is divided by 1000, matching
+`PrecisionThreeDatum.FromChannelDatum` in the original application.
+
+Local mode requests were also recovered from `CommandFactory.GetCommand`:
+MEAS `02 01 A6 57` and STANDBY `02 01 A7 56`, with a 240 ms execution delay.
+`ResponseParsers.CheckResponse` requires a four-byte ACK, matching command ID
+and checksum. Five-byte NAK replies are retained for diagnostics and rejected.
+The telemetry protocol identifier retains its original `readonly` name for
+compatibility; the network remains receive-only for commands. Only the local
+operator can request a mode change.
 
 Known warm-up, calibration-error, leak, hang, filter, temperature and RPM alarm
 flags follow the legacy parser. Its automotive probe warning means CO2 below

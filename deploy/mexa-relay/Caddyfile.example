@@ -1,0 +1,6 @@
+# Run on the approved relay server, not on either lab PC.
+# Replace this reserved example hostname with your server's DNS name.
+# Keep the Python backend on loopback; do not expose port 8765 publicly.
+relay.example.org {
+    reverse_proxy 127.0.0.1:8765
+}

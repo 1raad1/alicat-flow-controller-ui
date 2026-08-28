@@ -28,6 +28,9 @@ The desktop interface is built with PySide6 and Qt.
 | Record or replay a run | [Sequences](#sequences) |
 | Search for low NO with live or manual MEXA readings | [Bayesian optimiser](#bayesian-optimiser) |
 | Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
+| Stream through a separate internet relay | [Relay setup and hosting](docs/MEXA_RELAY.md) |
+| Host a temporary tunnel from the flow-controller app | [Quick Tunnel setup](docs/MEXA_QUICK_TUNNEL.md) |
+| Host the relay on a CachyOS home PC | [Small host program and setup](CACHYOS_START_HERE.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
@@ -398,13 +401,47 @@ sample age, source/sequence ID, state, validity, simulation and reporting basis.
 These columns exist even if the MEXA is connected after logging starts. A fresh
 analyser value can be held across multiple flow rows; `mexa_new_sample=False`
 identifies a repeat, not an independent measurement. Stale, invalid or
-future-dated measurements have blank NO/O2 values. Enable **Save received MEXA
+future-dated measurements have blank values in the original NO/O2 columns.
+Fresh invalid NO/O2 readings remain visible with an INVALID label and are retained
+in `mexa_reported_no_ppm` / `mexa_reported_o2_percent`, with the reason in
+`mexa_quality`. They are not valid measurements or optimiser inputs.
+Enable **Save received MEXA
 logs on this PC** for a separate CSV/JSONL record, including readings between
 flow polls. This is required for live optimiser capture. The bridge's **Save
 CSV + raw logs on this PC** switch is independent and defaults off, so the
 analyser PC can stream without saving files. The normal flow logger works
 with either MEXA logging switch off. Retained graph-history export remains a
 flow-only export. See [MEXA setup](docs/MEXA_SETUP.md) for the two-PC workflow.
+
+The analyser PC's bridge also offers confirmed local **MEAS** and **STANDBY**
+requests. A mode request invalidates live capture and requires rechecking and
+restarting the reader before optimisation. Calibration remains on the front
+panel. Network status is separate from analyser readiness: a TCP timeout
+requires a listener/firewall/network check, not a change to measurement limits.
+
+The stream and both apps also expose CO, CO2, HC, AFR, lambda, optional RPM
+and oil temperature, plus the reported PEF factor. MEXA logs and the normal
+flow CSV retain these channels, status/option flags and raw replies. Missing
+sensors stay blank. The analyser's automotive AFR/lambda do not replace the
+NH3/H2 flow-based phi calculation; the optimiser still uses only NO/O2.
+
+The flow app can **Host temporary relay on this PC** from its MEXA tab. It
+starts a private relay and a Wormhole tunnel, then connects the receiver
+locally. Copy the temporary URL and publisher key into the analyser bridge.
+The Windows x64 helper is downloaded and SHA-256 checked on first use, or you
+can select an official executable. No home server or port forwarding is needed.
+Wormhole uses approved outbound HTTPS/WSS 443 on both PCs. Cloudflare Quick
+Tunnel remains an alternative and needs outbound TCP 7844 from the flow PC.
+Temporary tunnels have no uptime guarantee. See
+[temporary relay setup](docs/MEXA_QUICK_TUNNEL.md) before publishing data.
+
+Both MEXA apps also offer **Internet relay (outbound WSS)** alongside Direct LAN.
+With a separate approved relay, neither lab PC listens for incoming connections.
+The host forwards the measurements over TLS; publisher/receiver
+access keys are separate from the shared measurement key. The repository
+includes the server, not a hosted URL. Local logging, invalid-data rejection
+and live-capture safeguards are unchanged. See [relay setup](docs/MEXA_RELAY.md)
+for deployment, key handling and outage behaviour.
 
 Column names include gas, zone, and unit. The header is fixed when logging
 starts, so assignments cannot change while the file is open. Failed readings

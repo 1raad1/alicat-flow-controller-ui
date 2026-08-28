@@ -18,9 +18,13 @@ PROTOCOL = "mexa584l-horiba-v1-readonly"
 MAX_AGE = 5.0
 MAX_LINE = 16384
 RECEIVER_LOG_REQUIRED = ("Enable 'Save received MEXA logs on this PC' and reconnect before live optimiser capture")
+CHANNEL_FIELDS = ("no_ppm", "o2_percent", "co_percent", "co2_percent", "hc_ppm",
+                  "afr", "lambda", "rpm", "oil_temperature_c", "pef")
 CSV_FIELDS = ("source_id", "seq", "acquired_at", "received_at", "no_ppm", "o2_percent",
               "co_percent", "co2_percent", "hc_ppm", "state", "valid", "simulated",
-              "validated", "basis", "alarms", "warnings")
+              "validated", "basis", "alarms", "warnings", "afr", "lambda", "rpm",
+              "oil_temperature_c", "pef", "options", "cycle_s", "pef_error",
+              "raw_status", "raw_subsystem", "raw_channels", "raw_pef")
 
 
 def utc_now():
@@ -65,6 +69,21 @@ def validate_packet(packet):
     for key in ("no_ppm", "o2_percent", "co_percent", "co2_percent", "hc_ppm"):
         if packet[key] is not None:
             number(packet[key], key)
+    # New fields are optional on older v1 senders. Never fill a missing sensor
+    # or an old packet with a zero or the previous sample's value.
+    for key in CHANNEL_FIELDS[5:]:
+        if packet.get(key) is not None:
+            number(packet[key], key)
+    if packet.get("options") is not None and (type(packet["options"]) is not int or not 0 <= packet["options"] <= 255):
+        raise ValueError("Invalid option-presence flags")
+    if not isinstance(packet.get("pef_error", ""), str) or len(packet.get("pef_error", "")) > 300:
+        raise ValueError("Invalid PEF error")
+    if packet.get("pef_error") and packet.get("pef") is not None:
+        raise ValueError("Failed PEF query cannot supply a value")
+    raw_pef = packet.get("raw_pef", "")
+    if not isinstance(raw_pef, str) or len(raw_pef) > 12:
+        raise ValueError("Invalid raw PEF reply")
+    bytes.fromhex(raw_pef)
     raw = packet["raw"]
     if not isinstance(raw, dict) or set(raw) - {"status", "subsystem", "channels"}:
         raise ValueError("Invalid raw frame fields")
@@ -72,6 +91,16 @@ def validate_packet(packet):
         if not isinstance(frame, str) or len(frame) > 256:
             raise ValueError("Oversized raw frame")
         bytes.fromhex(frame)
+    if "control" in packet:
+        control = packet["control"]
+        if (not isinstance(control, dict) or set(control) != {"mode", "phase", "reply", "detail"}
+                or control["mode"] not in ("meas", "standby")
+                or control["phase"] not in ("requested", "acknowledged", "failed", "cancelled")
+                or not isinstance(control["reply"], str) or len(control["reply"]) > 10
+                or not isinstance(control["detail"], str) or len(control["detail"]) > 300
+                or packet["valid"] or packet["validated"]):
+            raise ValueError("Invalid local analyser control record")
+        bytes.fromhex(control["reply"])
     if packet["valid"]:
         if (packet["state"] != "measuring" or packet["alarms"] or packet["no_ppm"] is None
                 or packet["o2_percent"] is None or not 0 <= packet["no_ppm"] <= 5000
@@ -81,7 +110,10 @@ def validate_packet(packet):
 
 
 def make_packet(cycle, source_id, seq, *, simulated, validated, dry, cycle_s):
-    return validate_packet(dict(cycle, schema=1, protocol=PROTOCOL, source_id=source_id,
+    fields = dict.fromkeys(CHANNEL_FIELDS)
+    fields.update(options=None, pef_error="", raw_pef="")
+    fields.update(cycle)
+    return validate_packet(dict(fields, schema=1, protocol=PROTOCOL, source_id=source_id,
                                 seq=seq, acquired_at=utc_now(), cycle_s=cycle_s,
                                 simulated=simulated, validated=bool(validated and not simulated),
                                 basis="dry_uncorrected" if dry else "unknown"))
@@ -109,10 +141,11 @@ class AuditLog:
         self.raw.write(json.dumps(record, allow_nan=False, separators=(",", ":")) + "\n")
         self.raw.flush()
         row = dict(record)
+        row.update({f"raw_{name}": record["raw"].get(name, "") for name in ("status", "subsystem", "channels")})
+        row["pef_error"] = csv_text(record.get("pef_error", ""))
         for key in ("alarms", "warnings"):
             row[key] = "; ".join(record[key])
-            if row[key].lstrip().startswith(("=", "+", "-", "@")):
-                row[key] = "'" + row[key]
+            row[key] = csv_text(row[key])
         self.writer.writerow(row)
         self.csv.flush()
 
@@ -134,16 +167,25 @@ class ReceivedSample:
     received_mono: float
     log_path: str
 
-    def problem(self, *, experimental=False, now=None, mono=None):
+    def freshness_problem(self, *, now=None, mono=None):
         now = time.time() if now is None else now
         mono = time.monotonic() if mono is None else mono
         age = now - epoch(self.packet["acquired_at"])
         if not -1 <= age <= MAX_AGE or not 0 <= mono - self.received_mono <= MAX_AGE:
             return "Stale reading or PC clocks disagree (synchronise both clocks)"
+        return ""
+
+    def problem(self, *, experimental=False, now=None, mono=None):
+        freshness = self.freshness_problem(now=now, mono=mono)
+        if freshness:
+            return freshness
         if self.packet["cycle_s"] > 3:
             return "Analyser acquisition cycle exceeded 3 seconds"
         if not self.packet["valid"]:
-            return "Analyser not ready: " + ", ".join([self.packet["state"], *self.packet["alarms"]])
+            messages = {"no_out_of_range": f"NO out of range ({self.packet['no_ppm']} ppm; expected 0–5000)",
+                        "o2_out_of_range": f"O2 out of range ({self.packet['o2_percent']}%; expected 0–25)"}
+            alarms = [messages.get(alarm, alarm) for alarm in self.packet["alarms"]]
+            return "Analyser not ready: " + ", ".join([self.packet["state"], *alarms])
         if experimental:
             if self.packet["simulated"]:
                 return "Simulated readings cannot be used in an experiment"
@@ -154,6 +196,36 @@ class ReceivedSample:
             if self.packet["o2_percent"] >= 20.9:
                 return "O2 must be below 20.9% for oxygen correction"
         return ""
+
+
+def reading_text(sample):
+    """Show fresh reported values, including invalid ones, without implying validity."""
+    if sample is None or sample.freshness_problem():
+        return "NO — ppm   ·   O₂ — %"
+    p = sample.packet
+    no = "—" if p["no_ppm"] is None else f"{p['no_ppm']:g}"
+    o2 = "—" if p["o2_percent"] is None else f"{p['o2_percent']:.2f}"
+    prefix = "SIMULATION · " if p["simulated"] else ""
+    if sample.problem():
+        prefix += "INVALID · "
+    return f"{prefix}NO {no} ppm   ·   O₂ {o2}%"
+
+
+def csv_text(text):
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) else text
+
+
+def additional_reading_text(sample):
+    """Reported channels are not certified by the NO/O2 validity flag."""
+    p = sample.packet if sample and not sample.freshness_problem() else {}
+    def value(key, precision):
+        item = p.get(key)
+        return "—" if item is None else f"{item:.{precision}f}"
+    return (f"CO {value('co_percent', 2)}%   ·   CO₂ {value('co2_percent', 2)}%   ·   HC {value('hc_ppm', 0)} ppm\n"
+            f"AFR {value('afr', 1)}   ·   λ {value('lambda', 3)}   ·   PEF {value('pef', 3)}\n"
+            f"RPM {value('rpm', 0)}   ·   Oil temperature {value('oil_temperature_c', 0)} °C\n"
+            "Other reported channels, not separately validated. Missing/unfitted channels show —. "
+            "Analyser AFR/λ are not the NH3/H2 burner equivalence ratios.")
 
 
 def summarise(samples, start, end, minimum):

@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta
 import json
+import csv
 import os
 from pathlib import Path
 import socket
@@ -12,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flow_controller.core.mexa_controller import MexaController
 from flow_controller.mexa.app import BridgeWindow
@@ -223,6 +224,118 @@ class QtMexaTests(unittest.TestCase):
             self.assertFalse(bridge.call_args.kwargs["save_logs"])
             self.assertIn("Stream only", window.log_label.text())
             self.assertFalse(window.save_logs.isEnabled())
+
+    def test_invalid_values_visible_but_excluded_from_valid_csv_and_optimiser(self):
+        p = self.packet()
+        p.update(no_ppm=-3, o2_percent=26, valid=False, simulated=False,
+                 validated=True, alarms=["no_out_of_range", "o2_out_of_range"])
+        sample = self.receive(p)
+        tab = MexaTab(self.controller)
+        window = BridgeWindow()
+        self.addCleanup(tab.close)
+        self.addCleanup(window.close)
+        with patch("flow_controller.mexa.app.Bridge") as fake:
+            fake.return_value.running = True
+            fake.return_value.stop.return_value = True
+            window.bridge = fake.return_value
+            window._sample(p)
+            for label in (tab.readings, window.readings):
+                self.assertIn("INVALID", label.text())
+                self.assertIn("-3", label.text())
+                self.assertIn("26.00", label.text())
+            self.assertIn("0–5000", tab.quality.text())
+            self.assertIn("Network: connected", tab.network.text())
+            snapshot = self.controller.csv_snapshot(datetime.now())
+            self.assertFalse(snapshot["mexa_valid"])
+            self.assertIsNone(snapshot["mexa_no_ppm"])
+            self.assertEqual(snapshot["mexa_reported_no_ppm"], -3)
+            self.assertEqual(snapshot["mexa_reported_o2_percent"], 26)
+            self.assertIn("out of range", snapshot["mexa_quality"])
+            from flow_controller.core.csv_logger import CsvLogger
+            flow_log = CsvLogger()
+            flow_path = Path(self.directory.name) / "flows.csv"
+            flow_log.start(flow_path, {}, mexa=True)
+            self.assertTrue(flow_log.write_row({}, (None, None, None), mexa=snapshot))
+            flow_log.stop()
+            with flow_path.open(newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["mexa_reported_no_ppm"], "-3")
+            self.assertEqual(row["mexa_reported_o2_percent"], "26")
+            self.assertEqual(row["mexa_no_ppm"], "")
+            self.assertEqual(row["mexa_valid"], "False")
+            with self.assertRaisesRegex(ValueError, "out of range"):
+                self.controller.checked_sample()
+            saved = json.loads(Path(sample.log_path).read_text())
+            self.assertEqual(saved["no_ppm"], -3)
+            sample.packet["acquired_at"] = (datetime.now().astimezone() - timedelta(seconds=10)).isoformat()
+            tab.refresh()
+            self.assertNotIn("-3", tab.readings.text())
+            self.assertIsNone(self.controller.csv_snapshot(datetime.now())["mexa_reported_no_ppm"])
+
+    def test_out_of_range_stream_reaches_receiver_without_disconnect(self):
+        from flow_controller.mexa.protocol import decode_cycle
+        from flow_controller.mexa.transport import StreamServer
+        frames = {key: bytearray.fromhex(value) for key, value in self.packet()["raw"].items()}
+        frames["channels"][21:23] = bytes.fromhex("17 70")  # 6000 ppm, above the configured range
+        frames["channels"][-1] = -sum(frames["channels"][:-1]) & 255
+        cycle = decode_cycle({key: bytes(value) for key, value in frames.items()})
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        key = "out-of-range-network-test-shared-key"
+        server = StreamServer("127.0.0.1", port, key)
+        self.addCleanup(server.stop)
+        self.controller.connect_bridge("127.0.0.1", port, key, self.directory.name)
+        source = str(uuid.uuid4())
+        for seq in (1, 2):
+            p = make_packet(cycle, source, seq, simulated=False, validated=True, dry=True, cycle_s=.7)
+            server.publish(p)
+            self.assertTrue(self.wait_for(lambda: self.controller.latest is not None
+                                         and self.controller.latest.packet["seq"] == seq))
+            self.assertEqual(self.controller.latest.packet["no_ppm"], 6000)
+            self.assertFalse(self.controller.latest.packet["valid"])
+            self.assertIn("receiving records", self.controller.link_status)
+        self.assertEqual(len(self.controller.log.path.read_text().splitlines()), 2)
+
+    def test_mode_buttons_require_enablement_confirmation_and_fresh_state(self):
+        with patch("flow_controller.mexa.app.Bridge") as factory:
+            window = BridgeWindow()
+            self.addCleanup(window.close)
+            self.assertFalse(window.meas_button.isEnabled())
+            self.assertFalse(window.standby_button.isEnabled())
+            window.bridge = factory.return_value
+            window.bridge.running = True
+            window.bridge.can_request_mode.return_value = True
+            window.bridge.stop.return_value = True
+            window._tick()
+            self.assertFalse(window.meas_button.isEnabled())
+            window.enable_controls.setChecked(True)
+            self.assertTrue(window.meas_button.isEnabled())
+            with patch("flow_controller.mexa.app.QMessageBox.question", return_value=QMessageBox.StandardButton.No):
+                window._mode("meas")
+            window.bridge.request_mode.assert_not_called()
+            window.validated.setChecked(True)
+            with patch("flow_controller.mexa.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+                window._mode("meas")
+            window.bridge.request_mode.assert_called_once_with("meas")
+            self.assertFalse(window.validated.isChecked())
+            window.bridge.can_request_mode.return_value = False
+            window._tick()
+            self.assertFalse(window.meas_button.isEnabled())
+            self.assertFalse(window.standby_button.isEnabled())
+
+    def test_local_only_listener_hint_and_network_status_are_explicit(self):
+        window = BridgeWindow()
+        self.addCleanup(window.close)
+        self.assertIn("LOCAL PC ONLY", window.listener_label.text())
+        self.assertIn("Not listening", window.listener_label.text())
+        window.host.setText("10.97.74.19")
+        self.assertNotIn("LOCAL PC ONLY", window.listener_label.text())
+        self.assertIn("10.97.74.19:61234", window.listener_label.text())
+        self.controller._set_status(self.controller.generation, False, "TCP connection timed out")
+        tab = MexaTab(self.controller)
+        self.addCleanup(tab.close)
+        self.assertIn("TCP connection timed out", tab.network.text())
 
 
 if __name__ == "__main__":

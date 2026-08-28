@@ -13,7 +13,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from flow_controller.mexa.protocol import (ProtocolError, QUERIES, SerialReader,
+from flow_controller.mexa.protocol import (PEF_QUERY, ProtocolError, QUERIES, SerialReader,
                                            check_reply, decode_cycle, simulated_cycle)
 from flow_controller.mexa.records import (AuditLog, LiveWindow, ReceivedSample, epoch,
                                           make_packet, utc_now, validate_packet)
@@ -120,8 +120,11 @@ class ProtocolTests(unittest.TestCase):
                 assert self.dtr is False and self.rts is False
             def write(self, command):
                 commands.append(command)
-                name = next(name for name, query in QUERIES.items() if query.command == command)
-                self.buffer = frames[name]
+                if command == PEF_QUERY.command:
+                    self.buffer = bytes.fromhex("06 18 00 01 F4 ED")
+                else:
+                    name = next(name for name, query in QUERIES.items() if query.command == command)
+                    self.buffer = frames[name]
                 return len(command)
             def read(self, count):
                 data, self.buffer = self.buffer[:2], self.buffer[2:]
@@ -134,7 +137,7 @@ class ProtocolTests(unittest.TestCase):
             result = reader.read()
         finally:
             reader.close()
-        self.assertEqual(commands, [query.command for query in QUERIES.values()])
+        self.assertEqual(commands, [query.command for query in QUERIES.values()] + [PEF_QUERY.command])
         self.assertEqual(settings[0]["baudrate"], 9600)
         self.assertIsNone(settings[0]["port"])
         self.assertEqual(settings[0]["parity"], "N")

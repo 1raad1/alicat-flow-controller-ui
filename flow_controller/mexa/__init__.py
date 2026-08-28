@@ -1,1 +1,1 @@
-"""Read-only MEXA-584L acquisition and authenticated lab-network transport."""
+"""MEXA-584L acquisition, local mode controls and measurement-only transports."""

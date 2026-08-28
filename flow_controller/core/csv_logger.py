@@ -35,7 +35,12 @@ UNSELECTED_GAS = "-- select --"
 MEXA_COLUMNS = ('mexa_source_id', 'mexa_seq', 'mexa_acquired_at', 'mexa_received_at',
                 'mexa_age_s', 'mexa_valid', 'mexa_new_sample', 'mexa_no_ppm',
                 'mexa_o2_percent', 'mexa_state', 'mexa_simulated', 'mexa_basis',
-                'mexa_validated')
+                'mexa_validated', 'mexa_reported_no_ppm', 'mexa_reported_o2_percent',
+                'mexa_quality', 'mexa_reported_co_percent', 'mexa_reported_co2_percent',
+                'mexa_reported_hc_ppm', 'mexa_reported_afr', 'mexa_reported_lambda',
+                'mexa_reported_rpm', 'mexa_reported_oil_temperature_c', 'mexa_reported_pef',
+                'mexa_options', 'mexa_cycle_s', 'mexa_alarms', 'mexa_warnings', 'mexa_pef_error',
+                'mexa_raw_status', 'mexa_raw_subsystem', 'mexa_raw_channels', 'mexa_raw_pef')
 
 
 def unit_label(unit, gas, zone):

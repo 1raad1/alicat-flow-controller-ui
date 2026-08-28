@@ -1,5 +1,6 @@
 alicat==0.9.0
 pyserial==3.5
+websockets==15.0.1
 numpy==2.4.4
 scipy==1.16.3; python_version < "3.12"
 scipy==1.18.1; python_version >= "3.12"
