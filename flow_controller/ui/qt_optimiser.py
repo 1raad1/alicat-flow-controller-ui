@@ -26,11 +26,22 @@ def note(text):
     return widget
 
 
+def point_text(config, point):
+    request = config.request(point)
+    parts = [f"H2 {request.h2_fraction * 100:.4g}%",
+             f"φ1 {request.phi_stage1:.5g}", f"φ overall {request.phi_global:.5g}"]
+    if config.optimise_power:
+        parts.append(f"power {request.power_kw:.5g} kW")
+    if config.optimise_split:
+        parts.append(f"stage-1 split {request.split_rich * 100:.4g}%")
+    return " · ".join(parts)
+
+
 class ExperimentDialog(QDialog):
     def __init__(self, request=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New Bayesian experiment")
-        self.resize(theme.scale(540), theme.scale(550))
+        self.resize(theme.scale(600), theme.scale(650))
         layout = QVBoxLayout(self)
         layout.addWidget(note(
             "Pilot-off NH3/H2, rich stage 1 and lean overall. Enter a rig-approved search "
@@ -38,10 +49,11 @@ class ExperimentDialog(QDialog):
         form = QFormLayout()
         self.entries = {}
         for key, title, value in (
-            ("power", "Fixed thermal input (kW)", getattr(request, "power_kw", 10)),
-            ("split", "Fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
+            ("power", "Nominal/fixed thermal input (kW)", getattr(request, "power_kw", 10)),
+            ("split", "Nominal/fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
             ("reference", "Reporting reference O2 (dry vol%)", 15),
-            ("initial", "Initial space-filling points", 16),
+            ("initial", "Initial space-filling points", getattr(request, "initial_points", 16)),
+            ("pool", "Candidate pool size", getattr(request, "candidate_pool_size", None) or 1024),
             ("window", "Minimum averaging window (s)", 30),
         ):
             entry = QLineEdit(f"{value:g}")
@@ -63,7 +75,32 @@ class ExperimentDialog(QDialog):
                 grid.addWidget(entry, row, column)
                 pair.append(entry)
             self.bounds.append(pair)
+        self.optional = {}
+        existing_names = getattr(request, "variable_names", ())
+        existing_bounds = dict(zip(existing_names, getattr(request, "bounds", ())))
+        for row, (key, title, scale) in enumerate((
+                ("power_kw", "Optimise thermal input (kW)", 1),
+                ("split_rich", "Optimise stage-1 fuel split (%)", 100)), 4):
+            enabled = key in existing_names
+            check = QCheckBox(title)
+            check.setChecked(enabled)
+            grid.addWidget(check, row, 0)
+            pair = []
+            for column in (1, 2):
+                entry = QLineEdit()
+                entry.setPlaceholderText("Required if selected")
+                entry.setAccessibleName(f"{title} {'lower' if column == 1 else 'upper'}")
+                if enabled:
+                    entry.setText(f"{existing_bounds[key][column - 1] * scale:g}")
+                entry.setEnabled(enabled)
+                check.toggled.connect(entry.setEnabled)
+                grid.addWidget(entry, row, column)
+                pair.append(entry)
+            self.optional[key] = (check, pair, scale)
         layout.addLayout(grid)
+        layout.addWidget(note(
+            "The first three variables are always searched. Select power or fuel split only when "
+            "they can be measured reliably and every value inside the bounds is approved."))
         layout.addWidget(note(
             "Objective: dry NO × (20.9 − reference O2) / (20.9 − measured O2). "
             "Use uncorrected dry analyser readings. NO is not total NOx; NH3 slip, "
@@ -88,11 +125,21 @@ class ExperimentDialog(QDialog):
             initial = finite(self.entries["initial"].text(), "Initial points")
             if not initial.is_integer():
                 raise ValueError("Initial points must be a whole number.")
+            pool = finite(self.entries["pool"].text(), "Candidate pool size")
+            if not pool.is_integer():
+                raise ValueError("Candidate pool size must be a whole number.")
+            selected = {name: check.isChecked()
+                        for name, (check, _pair, _scale) in self.optional.items()}
+            for name, (_check, pair, scale) in self.optional.items():
+                if selected[name]:
+                    bounds.append([finite(entry.text(), "Bound") / scale for entry in pair])
             self.config = SearchConfig(
                 power_kw=self.entries["power"].text(), bounds=bounds,
                 split_rich=finite(self.entries["split"].text(), "Fuel split") / 100,
                 reference_o2=self.entries["reference"].text(),
-                initial_points=int(initial), window_seconds=self.entries["window"].text())
+                initial_points=int(initial), window_seconds=self.entries["window"].text(),
+                optimise_power=selected["power_kw"], optimise_split=selected["split_rich"],
+                candidate_pool_size=int(pool))
         except ValueError as exc:
             self.error.setText(str(exc))
             return
@@ -335,17 +382,18 @@ class OptimiserPane(Card):
             self.inputs["no"].setText(f"{mexa['no_ppm']:.8g}")
             self.inputs["o2"].setText(f"{mexa['o2_percent']:.8g}")
             self.inputs["sem"].setText("")
-        self.summary.setText("Create a campaign with fixed power, fuel split and O2 reference."
+        self.summary.setText("Create a campaign with approved variable bounds and O2 reference."
                              if not experiment else
-                             f"{experiment.path.name}\n{experiment.config.power_kw:g} kW · "
-                             f"{experiment.config.split_rich * 100:g}% fuel in stage 1 · "
+                             f"{experiment.path.name}\n{experiment.config.dimensions} variables · "
+                             f"{experiment.config.initial_points} initial points · "
                              f"NO @ {experiment.config.reference_o2:g}% O2")
         if experiment:
-            self.summary.setToolTip(str(experiment.path) + "\nBounds: " + str(experiment.config.bounds))
+            names = ", ".join(experiment.config.variable_names)
+            self.summary.setToolTip(str(experiment.path) + f"\nVariables: {names}\nBounds: "
+                                    + str(experiment.config.bounds))
         self.candidate.setText("No pending test." if not pending else
                                f"Test {pending['number']} · {pending['method']}\n"
-                               f"H2 {pending['point'][0] * 100:.4g}% · "
-                               f"φ1 {pending['point'][1]:.5g} · φ overall {pending['point'][2]:.5g}")
+                               + point_text(experiment.config, pending["point"]))
         self.window_label.setText(
             f"Saved window: {window['duration_s']:.1f} s, {window['samples']} passes\n"
             f"{window['start']} → {window['end']}"
@@ -358,8 +406,8 @@ class OptimiserPane(Card):
         completed = []
         for t in experiment.trials if experiment else []:
             outcome = f"{t['result']['corrected_no']:.3f} ppm" if t["status"] == "completed" else t["status"]
-            item = QListWidgetItem(f"#{t['number']}  {outcome}  ·  H2 {t['point'][0] * 100:.3g}%  "
-                                   f"φ1 {t['point'][1]:.4g}  φ {t['point'][2]:.4g}")
+            item = QListWidgetItem(f"#{t['number']}  {outcome}  ·  "
+                                   + point_text(experiment.config, t["point"]))
             item.setData(Qt.ItemDataRole.UserRole, t["id"])
             item.setToolTip(str(t))
             self.history.addItem(item)

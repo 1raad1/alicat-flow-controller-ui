@@ -14,6 +14,8 @@ ROLES = (
     ('nh3_lean', 'NH3 Stage 2'),
     ('h2_lean', 'H2 Stage 2'),
     ('ch4_stage2', 'CH4 Stage 2'),
+    ('nh3_pilot', 'NH3 Pilot'),
+    ('h2_pilot', 'H2 Pilot'),
     ('ch4_pilot', 'CH4 Pilot'),
     ('rich_air', 'Air Stage 1'),
     ('lean_air', 'Air Stage 2'),
@@ -26,19 +28,22 @@ ROLE_LABELS = dict(ROLES)
 STAGES = (
     ('Stage 1', ('nh3_rich', 'h2_rich', 'ch4_stage1', 'rich_air')),
     ('Stage 2', ('nh3_lean', 'h2_lean', 'ch4_stage2', 'lean_air')),
-    ('Pilot', ('ch4_pilot',)),
+    ('Pilot', ('nh3_pilot', 'h2_pilot', 'ch4_pilot')),
 )
 
 FUEL_KEYS = frozenset({
     'nh3_rich', 'h2_rich', 'ch4_stage1',
-    'nh3_lean', 'h2_lean', 'ch4_stage2', 'ch4_pilot',
+    'nh3_lean', 'h2_lean', 'ch4_stage2',
+    'nh3_pilot', 'h2_pilot', 'ch4_pilot',
 })
 AIR_KEYS = frozenset({'rich_air', 'lean_air'})
 
 #: Roles whose setpoint is always approached as a ramp rather than a step.
 #: The pilot and the air stages feed a lit flame; a step change there is a
 #: pressure transient into the burner, not just a different number.
-RAMP_KEYS = frozenset({'ch4_pilot', 'rich_air', 'lean_air'})
+RAMP_KEYS = frozenset({
+    'nh3_pilot', 'h2_pilot', 'ch4_pilot', 'rich_air', 'lean_air',
+})
 
 BASE_GAS_TYPES = ('Air', 'NH3', 'H2', 'CH4')
 UNASSIGNED_ZONE = '-- unassigned --'
@@ -57,13 +62,14 @@ ROLE_MAP = {
     ('H2', 'Zone 2'): 'h2_lean',
     ('CH4', 'Zone 2'): 'ch4_stage2',
     ('Air', 'Zone 2'): 'lean_air',
+    ('NH3', 'Pilot'): 'nh3_pilot',
+    ('H2', 'Pilot'): 'h2_pilot',
     ('CH4', 'Pilot'): 'ch4_pilot',
 }
 
 #: Lower heating values, MJ/kg, and densities at standard conditions, kg/m^3.
-#: Methane joins them for the pilot: it is a third of the rig's heat release
-#: whenever the pilot is lit, so leaving it out of the live power estimate
-#: would understate the burner by however much the pilot is carrying.
+#: Every supported pilot gas is already represented here, so pilot flow is
+#: included in the live power estimate by the same calculation as stage fuel.
 LHV_NH3 = 18.6
 LHV_H2 = 120.0
 LHV_CH4 = 50.0

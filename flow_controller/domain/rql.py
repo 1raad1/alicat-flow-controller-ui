@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .combustion import CombustionCalculator
-from .roles import LHV_H2, LHV_NH3, RHO_H2, RHO_NH3
+from .combustion import CombustionCalculator, DENSITY
+from .roles import LHV_H2, LHV_NH3
 
 #: Assignment configurations this calculation is defined for.
 FULL_RQL = "FULL_RQL"
@@ -66,9 +66,11 @@ def auto_calc(request, config=FULL_RQL, calculator=None):
     nh3_frac = 1.0 - h2_frac
 
     # Volume fractions -> mass fractions, so the heating values apply.
-    rho_mix = nh3_frac * RHO_NH3 + h2_frac * RHO_H2
-    m_nh3 = nh3_frac * RHO_NH3 / rho_mix
-    m_h2 = h2_frac * RHO_H2 / rho_mix
+    # Use the same 25 °C standard-volume convention as measured-power
+    # reconstruction, so requested and observed power are inverse operations.
+    rho_mix = nh3_frac * DENSITY['NH3'] + h2_frac * DENSITY['H2']
+    m_nh3 = nh3_frac * DENSITY['NH3'] / rho_mix
+    m_h2 = h2_frac * DENSITY['H2'] / rho_mix
     lhv_mix = m_nh3 * LHV_NH3 + m_h2 * LHV_H2
 
     m_dot = request.power_kw / (lhv_mix * 1000.0)      # kg/s
