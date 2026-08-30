@@ -54,6 +54,7 @@ TARGET_KEYS = ('nh3_rich', 'h2_rich', 'nh3_lean',
 SHORT_LABELS = {
     'nh3_rich': 'NH3-1', 'h2_rich': 'H2-1', 'rich_air': 'AIR-1',
     'nh3_lean': 'NH3-2', 'h2_lean': 'H2-2', 'lean_air': 'AIR-2',
+    'nh3_pilot': 'NH3', 'h2_pilot': 'H2',
     'ch4_pilot': 'CH4',
 }
 
@@ -1407,7 +1408,9 @@ class OperationTab(QWidget):
         if flows is None:
             flows = {key: self.session.flow_for_role(key, samples)
                      for key, _role_label in roles.ROLES}
-        pilot = max(0.0, flows.get('ch4_pilot', 0.0))
+        pilot = sum(
+            max(0.0, flows.get(key, 0.0))
+            for key in ('nh3_pilot', 'h2_pilot', 'ch4_pilot'))
         stage1_fuel = pilot + sum(
             max(0.0, flows.get(key, 0.0))
             for key in ('nh3_rich', 'h2_rich', 'ch4_stage1'))

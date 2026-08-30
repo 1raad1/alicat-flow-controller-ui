@@ -19,6 +19,16 @@ def config(**kwargs):
                         initial_points=4, window_seconds=5, **kwargs)
 
 
+def extended_config(**kwargs):
+    values = dict(
+        power_kw=10,
+        bounds=((.15, .65), (1.05, 1.6), (.5, .85), (8, 12), (.75, 1.0)),
+        split_rich=.9, initial_points=6, window_seconds=5,
+        optimise_power=True, optimise_split=True, candidate_pool_size=128)
+    values.update(kwargs)
+    return SearchConfig(**values)
+
+
 def window_for(settings, point):
     targets = settings.targets(point)
     window = MeasurementWindow(settings, targets, {})
@@ -100,6 +110,41 @@ class BayesianTests(unittest.TestCase):
         self.assertLess(final_best, initial_best)
         self.assertLess(final_best, 20)
 
+    def test_optional_power_and_split_expand_search_to_five_dimensions(self):
+        settings = extended_config()
+        trials = []
+        for index in range(settings.initial_points):
+            answer = suggest(settings, trials, seed=30 + index, pool_size=128)
+            self.assertEqual(len(answer["point"]), 5)
+            request = settings.request(answer["point"])
+            self.assertTrue(8 <= request.power_kw <= 12)
+            self.assertTrue(.75 <= request.split_rich <= 1)
+            value = 20 + 10 * sum((np.asarray(answer["point"]) -
+                                   np.array([.35, 1.3, .68, 10, .9])) ** 2)
+            trials.append(synthetic_trial(settings, answer["point"], value))
+        answer = suggest(settings, trials, seed=99, pool_size=128)
+        self.assertIn("Bayesian", answer["method"])
+        self.assertEqual(len(answer["point"]), 5)
+        self.assertTrue(np.isfinite(answer["expected_improvement"]))
+
+    def test_extended_window_models_measured_power_and_split(self):
+        settings = extended_config()
+        point = [.3, 1.2, .7, 11, .8]
+        window = window_for(settings, point)
+        observed = settings.observed_vector(window)
+        np.testing.assert_allclose(observed, point, rtol=1e-12)
+        self.assertAlmostEqual(window["split_rich"], .8)
+        self.assertAlmostEqual(window["power_kw"], 11)
+
+    def test_dimension_controls_initial_design_and_candidate_pool_validation(self):
+        with self.assertRaisesRegex(ValueError, "6 to 100"):
+            extended_config(initial_points=5)
+        with self.assertRaisesRegex(ValueError, "Candidate pool"):
+            config(candidate_pool_size=32)
+        with self.assertRaisesRegex(ValueError, "fuel-split bounds"):
+            SearchConfig(10, ((.15, .65), (1.05, 1.6), (.5, .85), (.8, 1.1)),
+                         split_rich=.9, initial_points=5, optimise_split=True)
+
 
 class ExperimentTests(unittest.TestCase):
     def setUp(self):
@@ -119,7 +164,7 @@ class ExperimentTests(unittest.TestCase):
         result = Experiment.load(self.path)
         self.assertIsNone(result.pending)
         self.assertEqual(result.trials[0]["result"]["no_ppm"], 100)
-        self.assertEqual(result.trials[0]["window"]["observed_point"][0], .3)
+        self.assertAlmostEqual(result.trials[0]["window"]["observed_point"][0], .3)
 
     def test_single_pending_and_invalid_not_zero(self):
         self.experiment.add_trial({"point": self.point, "method": "test"})
@@ -160,6 +205,31 @@ class ExperimentTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8-sig")
         self.assertIn("corrected_no_ppm", text)
         self.assertIn("'=formula", text)
+
+    def test_legacy_three_variable_file_loads_without_new_config_fields(self):
+        data = deepcopy(self.experiment.data)
+        data["schema"] = 1
+        for key in ("optimise_power", "optimise_split", "candidate_pool_size"):
+            data["config"].pop(key, None)
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.config.variable_names,
+                         ("h2_fraction", "phi_stage1", "phi_overall"))
+        self.assertEqual(reopened.config.dimensions, 3)
+
+    def test_extended_csv_exports_requested_and_observed_variables(self):
+        settings = extended_config()
+        path = self.path.with_name("extended.fcbo.json")
+        experiment = Experiment.create(path, settings)
+        point = [.3, 1.2, .7, 11, .8]
+        experiment.add_trial({"point": point, "method": "test"})
+        experiment.record_window(window_for(settings, point))
+        experiment.complete(100, 10)
+        csv_path = path.with_suffix(".csv")
+        experiment.export_csv(csv_path)
+        text = csv_path.read_text(encoding="utf-8-sig")
+        self.assertIn("observed_split_rich", text)
+        self.assertIn(",11.0,0.8,", text)
 
     def test_capture_requires_duration_tracking_and_fresh_timestamps(self):
         targets = self.config.targets(self.point)

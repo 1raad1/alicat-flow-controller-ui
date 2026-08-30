@@ -18,7 +18,8 @@ from ..domain.combustion import CombustionCalculator
 from ..mexa.records import PROTOCOL, epoch, number
 
 
-SCHEMA = 1
+SCHEMA = 2
+SUPPORTED_SCHEMAS = (1, SCHEMA)
 MAX_TRIALS = 500
 FLOW_REL_TOL = .03
 FLOW_ABS_TOL = .05  # SLPM measurement acceptance, NOT a safety threshold
@@ -70,7 +71,7 @@ class Experiment:
             raise ValueError("Experiment file exceeds 10 MB.")
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data["schema"] != SCHEMA:
+            if data["schema"] not in SUPPORTED_SCHEMAS:
                 raise ValueError("Unsupported experiment file version.")
             experiment = cls(path, data)
             trials = data["trials"]
@@ -181,7 +182,8 @@ class Experiment:
                       "power_kw", "split_rich", "reference_o2", "no_ppm_dry",
                       "o2_percent_dry", "corrected_no_ppm", "corrected_no_sem",
                       "observed_h2_fraction", "observed_phi_stage1", "observed_phi_overall",
-                      "observed_power_kw", "window_start", "window_end", "notes",
+                      "observed_power_kw", "observed_split_rich",
+                      "window_start", "window_end", "notes",
                       "measurement_source", "mexa_source_id", "mexa_first_seq", "mexa_last_seq",
                       "mexa_sample_count", "mexa_no_sd", "mexa_o2_sd", "mexa_audit_log"]
             writer = csv.DictWriter(handle, fieldnames=fields)
@@ -190,18 +192,34 @@ class Experiment:
                 result, window = t.get("result") or {}, t.get("window") or {}
                 mexa = window.get("mexa") or {}
                 observed = window.get("observed_point", [None] * 3)
+                request = self.config.request(t["point"])
                 note = result.get("notes", t.get("reason", ""))
                 # Neutralise spreadsheet formula injection in operator notes.
                 if note.lstrip().startswith(("=", "+", "-", "@")):
                     note = "'" + note
-                writer.writerow(dict(zip(fields, [
-                    t["number"], t["status"], *t["point"], self.config.power_kw,
-                    self.config.split_rich, self.config.reference_o2,
-                    result.get("no_ppm"), result.get("o2_percent"), result.get("corrected_no"),
-                    result.get("corrected_sem"), *observed, window.get("power_kw"),
-                    window.get("start"), window.get("end"), note, result.get("source", "manual"),
-                    mexa.get("source_id"), mexa.get("first_seq"), mexa.get("last_seq"),
-                    mexa.get("samples"), mexa.get("no_sd"), mexa.get("o2_sd"), mexa.get("log_path")])))
+                writer.writerow({
+                    "test": t["number"], "status": t["status"],
+                    "h2_fraction": request.h2_fraction,
+                    "phi_stage1": request.phi_stage1,
+                    "phi_overall": request.phi_global,
+                    "power_kw": request.power_kw, "split_rich": request.split_rich,
+                    "reference_o2": self.config.reference_o2,
+                    "no_ppm_dry": result.get("no_ppm"),
+                    "o2_percent_dry": result.get("o2_percent"),
+                    "corrected_no_ppm": result.get("corrected_no"),
+                    "corrected_no_sem": result.get("corrected_sem"),
+                    "observed_h2_fraction": observed[0],
+                    "observed_phi_stage1": observed[1],
+                    "observed_phi_overall": observed[2],
+                    "observed_power_kw": window.get("power_kw"),
+                    "observed_split_rich": window.get("split_rich"),
+                    "window_start": window.get("start"), "window_end": window.get("end"),
+                    "notes": note, "measurement_source": result.get("source", "manual"),
+                    "mexa_source_id": mexa.get("source_id"),
+                    "mexa_first_seq": mexa.get("first_seq"), "mexa_last_seq": mexa.get("last_seq"),
+                    "mexa_sample_count": mexa.get("samples"), "mexa_no_sd": mexa.get("no_sd"),
+                    "mexa_o2_sd": mexa.get("o2_sd"), "mexa_audit_log": mexa.get("log_path"),
+                })
 
 
 def observed_condition(flows):
@@ -217,6 +235,16 @@ def observed_condition(flows):
     return point, calc.power_kw({"NH3": nh3, "H2": h2})
 
 
+def observed_split(flows):
+    rich = finite(flows.get("nh3_rich", 0), "Measured rich NH3") + finite(
+        flows.get("h2_rich", 0), "Measured rich H2")
+    lean = finite(flows.get("nh3_lean", 0), "Measured lean NH3") + finite(
+        flows.get("h2_lean", 0), "Measured lean H2")
+    if rich + lean <= 0:
+        raise ValueError("No measured NH3/H2 fuel flow.")
+    return rich / (rich + lean)
+
+
 def validate_window(window, config):
     if not isinstance(window, dict):
         raise ValueError("Capture and finish a valid flow-measurement window first.")
@@ -224,10 +252,11 @@ def validate_window(window, config):
         raise ValueError("Pilot-off confirmation is missing.")
     if len(window["observed_point"]) != 3:
         raise ValueError("Measured operating point must have three coordinates.")
-    for value, (lower, upper) in zip(window["observed_point"], config.bounds):
+    for value, (lower, upper) in zip(window["observed_point"], config.bounds[:3]):
         if not lower - 1e-10 <= finite(value, "Measured coordinate") <= upper + 1e-10:
             raise ValueError("Measured operating point is outside the campaign bounds.")
-    if abs(finite(window["power_kw"], "Measured power") / config.power_kw - 1) > .03:
+    if (not config.optimise_power
+            and abs(finite(window["power_kw"], "Measured power") / config.power_kw - 1) > .03):
         raise ValueError("Measured thermal input differs from the experiment by more than 3%.")
     if (type(window["samples"]) is not int or window["samples"] < 3
             or not config.window_seconds <= finite(window["duration_s"], "Window duration") <= 3600):
@@ -236,9 +265,15 @@ def validate_window(window, config):
     if abs(duration - window["duration_s"]) > .001:
         raise ValueError("Measurement timestamps disagree with the recorded duration.")
     point, power = observed_condition(window["mean_flows"])
+    split = observed_split(window["mean_flows"])
     if (not np.allclose(point, window["observed_point"], atol=1e-8, rtol=1e-8)
-            or abs(power - window["power_kw"]) > 1e-8):
+            or abs(power - window["power_kw"]) > 1e-8
+            or ("split_rich" in window and abs(split - window["split_rich"]) > 1e-8)):
         raise ValueError("Measured coordinates do not match the saved flow averages.")
+    observed = config.observed_vector(window)
+    for name, value, (lower, upper) in zip(config.variable_names, observed, config.bounds):
+        if not lower - 1e-10 <= value <= upper + 1e-10:
+            raise ValueError(f"Measured {name} is outside the campaign bounds.")
     if "mexa" in window:
         validate_mexa_window(window, config)
 
@@ -308,10 +343,11 @@ class MeasurementWindow:
         duration = (self.stamps[-1] - self.stamps[0]).total_seconds()
         means = {key: float(np.mean([row[key] for row in self.rows])) for key in self.targets}
         point, power = observed_condition(means)
+        split = observed_split(means)
         window = {"start": self.stamps[0].astimezone(timezone.utc).isoformat(),
                   "end": self.stamps[-1].astimezone(timezone.utc).isoformat(),
                   "duration_s": duration, "samples": len(self.rows), "mean_flows": means,
-                  "observed_point": point, "power_kw": power,
+                  "observed_point": point, "power_kw": power, "split_rich": split,
                   "assignments": self.assignments, "pilot_off_confirmed": True,
                   "tracking_relative_tolerance": FLOW_REL_TOL,
                   "tracking_absolute_tolerance_slpm": FLOW_ABS_TOL}

@@ -201,7 +201,7 @@ class QtUiTests(unittest.TestCase):
             session.combustion_effective_diameter(SCOPE_STAGE2),
             math.sqrt(4.0 * 1600.0 / math.pi))
         tab._refresh_combustion_staged({}, flows={
-            'ch4_pilot': 1.0, 'ch4_stage1': 2.0,
+            'h2_pilot': 1.0, 'ch4_stage1': 2.0,
             'nh3_rich': 7.0, 'h2_rich': 2.0,
         })
         self.assertEqual(tab._combustion['pilot_split'].value.text(), '8.3')

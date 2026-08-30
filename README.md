@@ -69,16 +69,17 @@ Staged mode groups controllers by stage:
 | --- | --- |
 | Stage 1 | NH3, H2, CH4, Air |
 | Stage 2 | NH3, H2, CH4, Air |
-| Pilot | CH4 |
+| Pilot | NH3, H2, or CH4 (one pilot line) |
 
 CH4 assigned directly to Stage 1 or Stage 2 is included in that stage's live
-combustion estimate. The CH4 pilot is also included in Stage 1. Automatic RQL
+combustion estimate. The selected pilot fuel is also included in Stage 1. Automatic RQL
 target calculation still uses its established seven required lines:
 
 Auto-calculation is enabled for either of these assignments:
 
-- **Full RQL:** NH3, H2, and Air in both stages, plus the CH4 pilot.
-- **Rich + quench-air:** Stage 1 fuels and air, Stage 2 air, and the CH4 pilot.
+- **Full RQL:** NH3, H2, and Air in both stages, plus one NH3, H2, or CH4 pilot.
+- **Rich + quench-air:** Stage 1 fuels and air, Stage 2 air, plus one NH3, H2,
+  or CH4 pilot.
 
 The calculator accepts firing rate, hydrogen fraction by volume, Stage 1 fuel
 split, Stage 1 equivalence ratio, and global equivalence ratio. It stores the
@@ -149,7 +150,7 @@ Open the hamburger menu on a live controller card to edit these settings:
 Ramping defaults to **OFF**, so setpoints are written as steps. To use a ramp,
 enter a rate and clear the red **OFF** latch. The rate remains editable while
 OFF, but it does not take effect until the latch is cleared. With ramping
-enabled but no rate declared, CH4 pilot and air lines still use the built-in
+enabled but no rate declared, pilot and air lines still use the built-in
 minimum ten-second move.
 
 ## Sequences
@@ -207,18 +208,24 @@ The **Bayesian optimiser** replaces the Agent launcher in the Operation sidebar.
 The desktop app no longer launches an agent terminal or starts its IPC gateway.
 The optimiser runs locally; it needs neither an API key nor an internet connection.
 Legacy agent modules remain in the repository but are not mounted by the app.
+For the algorithms, equations, file format and code map, see the
+[Bayesian optimiser technical manual](docs/BAYESIAN_OPTIMISER_MANUAL.md).
 
 ### Create and run an experiment
 
-1. Expand **Bayesian optimiser** and choose **New experiment**. Enter the fixed
+1. Expand **Bayesian optimiser** and choose **New experiment**. Enter the nominal
    NH3/H2 thermal input, stage-1 fuel split, and permitted bounds for H2 volume
-   percentage, stage-1 phi and overall phi. Bounds are intentionally blank.
+   percentage, stage-1 phi and overall phi. Optionally select thermal input or
+   stage-1 fuel split to add them as fourth and fifth search variables, then enter
+   their bounds. Unselected values remain fixed. Bounds are intentionally blank.
    This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
-   present. The methane pilot must be off during measurements.
+   present. Every assigned pilot fuel line must be off during measurements.
 2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
-   initial-design size (default 16 completed tests) and minimum averaging window
-   (default 30 seconds). Save a new `.fcbo.json` experiment. These settings are
-   fixed for the campaign; use a new file to change them.
+   initial-design size (default 16 completed tests), candidate-pool size and
+   minimum averaging window (default 30 seconds). The initial design must contain
+   at least one more completed test than the number of variables. Save a new
+   `.fcbo.json` experiment. These settings are fixed for the campaign; use a new
+   file to change them.
 3. Click **Suggest next test**, then **Load target fields**. This fills the
    existing flow fields, including zero for the pilot and unused lines. It
    sends no commands. Review every field and the transition procedure before
@@ -238,8 +245,8 @@ Legacy agent modules remain in the repository but are not mounted by the app.
    a completed point, or export CSV. Repeating a point creates a separate test.
 
 The optimiser requires one NH3 line, one H2 line and one air line in stage 1,
-plus stage-2 air. Stage-2 fuel lines are required only when the fixed fuel split
-is below 100%. A pilot controller may remain assigned at zero or be unassigned.
+plus stage-2 air. Stage-2 fuel lines are required when a fixed or proposed fuel
+split is below 100%. A pilot controller may remain assigned at zero or be unassigned.
 All other assigned gas lines must read off during measurement.
 
 ### Measurement basis and limits
@@ -258,7 +265,9 @@ or above 20.9% O2 cannot be corrected; readings close to air concentration ampli
 measurement errors. NO input is limited to the published 0–5000 ppm range.
 
 Fresh flow and setpoint readings must track targets within the larger of 3%
-or 0.05 SLPM. Measured thermal input must be within 3% of the campaign setting.
+or 0.05 SLPM. When power is fixed, measured thermal input must be within 3% of
+the campaign setting; when it is searched, the measured value must remain inside
+the declared power bounds.
 These are data-acceptance tolerances, not safety limits or proof of a stable
 flame. The operator confirms that the pilot is off. Missing telemetry, a gap in
 polling, a run/configuration change or a non-tracking flow discards an active
@@ -288,11 +297,12 @@ excluded from fitting rather than treated as zero emissions.
 
 ### Model and records
 
-The initial design selects spread-out points from a scrambled Sobol candidate
-pool. Subsequent suggestions fit a Matérn-5/2 Gaussian process and maximise
+The initial design selects spread-out points from an N-dimensional scrambled
+Sobol candidate pool. Subsequent suggestions fit a Matérn-5/2 Gaussian process and maximise
 Monte Carlo noisy expected improvement over a feasible candidate pool. The model
-uses measured blend and equivalence ratios from the captured flow window, with
-the requested settings retained alongside them. It fits residual observation
+uses measured blend, equivalence ratios, and any selected power or split variables
+from the captured flow window, with the requested settings retained alongside them.
+It fits residual observation
 noise and accepts an optional per-test NO standard error. O2 uncertainty and
 systematic calibration bias are not propagated. Suggestions respect the declared
 search region and current flow ceilings; no flame-safety boundary is learned.
@@ -479,8 +489,8 @@ The card reports:
 - fuel firing rate from lower heating value; and
 - cold-flow inlet bulk velocity when an inlet diameter or area has been declared.
 
-In Staged mode the pilot CH4 contributes to Stage 1 and the global result. In
-In Standard mode, all assigned controllers are aggregated by gas. Use the menu on
+In Staged mode the selected NH3, H2, or CH4 pilot contributes to Stage 1 and
+the global result. In Standard mode, all assigned controllers are aggregated by gas. Use the menu on
 the combustion card to enter a circular inlet diameter or the actual inlet area
 for square and other shapes. The same menu sets the number of Stage 2 inlets and
 the display refresh interval. Pausing the card affects display only; logging

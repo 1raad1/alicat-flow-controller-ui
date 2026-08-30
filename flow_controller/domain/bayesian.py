@@ -17,7 +17,17 @@ from .rql import AutoCalcRequest, auto_calc
 
 
 AIR_O2 = 20.9  # dry volume %, the fixed reporting convention
-PARAMETERS = ("H2 fraction", "stage-1 phi", "overall phi")
+BASE_VARIABLES = ("h2_fraction", "phi_stage1", "phi_overall")
+OPTIONAL_VARIABLES = ("power_kw", "split_rich")
+VARIABLE_LABELS = {
+    "h2_fraction": "H2 fraction",
+    "phi_stage1": "stage-1 phi",
+    "phi_overall": "overall phi",
+    "power_kw": "thermal input",
+    "split_rich": "stage-1 fuel split",
+}
+# Public compatibility name used by older callers and documentation.
+PARAMETERS = tuple(VARIABLE_LABELS[key] for key in BASE_VARIABLES)
 
 
 def finite(value, name):
@@ -40,6 +50,9 @@ class SearchConfig:
     reference_o2: float = 15.0
     initial_points: int = 16
     window_seconds: float = 30.0
+    optimise_power: bool = False
+    optimise_split: bool = False
+    candidate_pool_size: int | None = None
 
     def __post_init__(self):
         for name in ("power_kw", "split_rich", "reference_o2", "window_seconds"):
@@ -52,31 +65,90 @@ class SearchConfig:
             raise ValueError("Reference O2 must be between 0 and 20.9%, exclusive at 20.9.")
         if not 5 <= self.window_seconds <= 3600:
             raise ValueError("Measurement window must be between 5 and 3600 seconds.")
+        for name in ("optimise_power", "optimise_split"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be true or false.")
+        dimensions = 3 + self.optimise_power + self.optimise_split
         if (isinstance(self.initial_points, bool)
                 or not isinstance(self.initial_points, int)
-                or not 4 <= self.initial_points <= 100):
-            raise ValueError("Initial design must contain 4 to 100 completed points.")
-        if len(self.bounds) != 3 or any(len(pair) != 2 for pair in self.bounds):
-            raise ValueError("Supply lower and upper bounds for all three variables.")
+                or not dimensions + 1 <= self.initial_points <= 100):
+            raise ValueError(
+                f"A {dimensions}-variable initial design must contain "
+                f"{dimensions + 1} to 100 completed points.")
+        pool_size = self.candidate_pool_size
+        if pool_size is None:
+            pool_size = max(1024, 256 * dimensions)
+        if (isinstance(pool_size, bool) or not isinstance(pool_size, int)
+                or not 64 <= pool_size <= 65_536):
+            raise ValueError("Candidate pool size must be an integer from 64 to 65536.")
+        object.__setattr__(self, "candidate_pool_size", pool_size)
+        if len(self.bounds) != dimensions or any(len(pair) != 2 for pair in self.bounds):
+            raise ValueError(f"Supply lower and upper bounds for all {dimensions} variables.")
+        names = self.variable_names
         bounds = tuple(tuple(finite(v, name) for v in pair)
-                       for name, pair in zip(PARAMETERS, self.bounds))
+                       for name, pair in zip(names, self.bounds))
         object.__setattr__(self, "bounds", bounds)
-        for name, (lo, hi) in zip(PARAMETERS, bounds):
+        for name, (lo, hi) in zip(names, bounds):
             if not 0 < lo < hi:
-                raise ValueError(f"{name}: require 0 < lower < upper.")
+                raise ValueError(f"{VARIABLE_LABELS[name]}: require 0 < lower < upper.")
         if bounds[0][1] >= 1:
             raise ValueError("H2 bounds must lie strictly between 0 and 100%.")
         if bounds[1][0] < 1 or bounds[2][1] >= 1:
             raise ValueError("This rich/lean experiment requires stage-1 phi >= 1 and overall phi < 1.")
+        values = dict(zip(names, bounds))
+        if self.optimise_power and not values["power_kw"][0] <= self.power_kw <= values["power_kw"][1]:
+            raise ValueError("Nominal thermal input must lie inside its optimisation bounds.")
+        if self.optimise_split:
+            lo, hi = values["split_rich"]
+            if hi > 1:
+                raise ValueError("Stage-1 fuel-split bounds cannot exceed 100%.")
+            if not lo <= self.split_rich <= hi:
+                raise ValueError("Nominal stage-1 fuel split must lie inside its optimisation bounds.")
+
+    @property
+    def variable_names(self):
+        names = list(BASE_VARIABLES)
+        enabled = {"power_kw": self.optimise_power, "split_rich": self.optimise_split}
+        names.extend(name for name in OPTIONAL_VARIABLES if enabled[name])
+        return tuple(names)
+
+    @property
+    def dimensions(self):
+        return len(self.variable_names)
+
+    def values(self, point):
+        if len(point) != self.dimensions:
+            raise ValueError(f"An operating point must have {self.dimensions} coordinates.")
+        values = {name: finite(value, VARIABLE_LABELS[name])
+                  for name, value in zip(self.variable_names, point)}
+        for name, (lo, hi) in zip(self.variable_names, self.bounds):
+            if not lo <= values[name] <= hi:
+                raise ValueError(f"{VARIABLE_LABELS[name]} is outside this experiment's bounds.")
+        values.setdefault("power_kw", self.power_kw)
+        values.setdefault("split_rich", self.split_rich)
+        return values
 
     def request(self, point):
+        values = self.values(point)
+        return AutoCalcRequest(values["power_kw"], values["h2_fraction"],
+                               values["phi_stage1"], values["phi_overall"],
+                               split_rich=values["split_rich"])
+
+    def observed_vector(self, window):
+        point = list(window["observed_point"])
         if len(point) != 3:
-            raise ValueError("An operating point must have three coordinates.")
-        point = tuple(finite(v, name) for name, v in zip(PARAMETERS, point))
-        for value, (lo, hi) in zip(point, self.bounds):
-            if not lo <= value <= hi:
-                raise ValueError("Candidate is outside this experiment's bounds.")
-        return AutoCalcRequest(self.power_kw, *point, split_rich=self.split_rich)
+            raise ValueError("Measured operating point must have three combustion coordinates.")
+        if self.optimise_power:
+            point.append(finite(window["power_kw"], "Measured thermal input"))
+        if self.optimise_split:
+            split = window.get("split_rich")
+            if split is None:
+                flows = window["mean_flows"]
+                rich = flows.get("nh3_rich", 0) + flows.get("h2_rich", 0)
+                lean = flows.get("nh3_lean", 0) + flows.get("h2_lean", 0)
+                split = rich / (rich + lean)
+            point.append(finite(split, "Measured stage-1 fuel split"))
+        return point
 
     def targets(self, point):
         targets = auto_calc(self.request(point))
@@ -140,7 +212,7 @@ def noisy_expected_improvement(gp, baseline, candidates, rng, draws=128):
     return np.maximum(ei.mean(axis=0), 0), mu_c, np.sqrt(var_c)
 
 
-def suggest(config, trials, limits=None, seed=0, pool_size=1024):
+def suggest(config, trials, limits=None, seed=0, pool_size=None):
     """Return a feasible suggestion, never a flow command.
 
     Initial design uses space-filling maximin selection from a Sobol pool.
@@ -155,14 +227,18 @@ def suggest(config, trials, limits=None, seed=0, pool_size=1024):
     from threadpoolctl import threadpool_limits
 
     rng = np.random.default_rng(seed)
+    dimensions = config.dimensions
+    pool_size = config.candidate_pool_size if pool_size is None else pool_size
     bounds = np.array(config.bounds)
     lower, span = bounds[:, 0], bounds[:, 1] - bounds[:, 0]
-    pool = qmc.Sobol(3, scramble=True, seed=seed).random_base2(int(math.ceil(math.log2(pool_size))))
+    pool = qmc.Sobol(dimensions, scramble=True, seed=seed).random_base2(
+        int(math.ceil(math.log2(pool_size))))
     completed = [t for t in trials if t["status"] == "completed"]
     if completed:
         best = min(completed, key=lambda t: t["result"]["corrected_no"])
         centre = (np.asarray(best["point"]) - lower) / span
-        pool = np.vstack((pool, np.clip(centre + rng.normal(0, .08, (128, 3)), 0, 1)))
+        pool = np.vstack((pool, np.clip(
+            centre + rng.normal(0, .08, (128, dimensions)), 0, 1)))
     tried = np.array([(np.asarray(t["point"]) - lower) / span for t in trials])
     if len(tried):
         distance = np.linalg.norm(pool[:, None, :] - tried[None, :, :], axis=2).min(axis=1)
@@ -184,13 +260,13 @@ def suggest(config, trials, limits=None, seed=0, pool_size=1024):
             index = int(np.argmin(np.linalg.norm(pool - .5, axis=1)))
         return {"point": (lower + pool[index] * span).tolist(), "method": "Space-filling initial design"}
 
-    x = np.array([t["window"]["observed_point"] for t in completed])
+    x = np.array([config.observed_vector(t["window"]) for t in completed])
     x = (x - lower) / span
     y = np.array([t["result"]["corrected_no"] for t in completed])
     centre, scale = float(y.mean()), max(float(y.std()), 1.0)
     errors = np.array([t["result"].get("corrected_sem") or 0 for t in completed]) / scale
     kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-        [.3] * 3, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+        [.3] * dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
     gp = GaussianProcessRegressor(kernel=kernel, alpha=errors ** 2 + 1e-8,
                                  n_restarts_optimizer=1, random_state=seed)
     with threadpool_limits(limits=1), warnings.catch_warnings():

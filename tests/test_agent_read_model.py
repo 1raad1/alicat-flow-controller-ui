@@ -25,8 +25,9 @@ class SnapshotTests(unittest.TestCase):
         session = SimpleNamespace(
             _live_samples={'A': sample(1.25, 1.5)},
             assignments={'nh3_rich': 'A', 'h2_rich': None, 'nh3_lean': None,
-                         'h2_lean': None, 'ch4_pilot': None, 'rich_air': None,
-                         'lean_air': None},
+                         'h2_lean': None, 'nh3_pilot': None,
+                         'h2_pilot': None, 'ch4_pilot': None,
+                         'rich_air': None, 'lean_air': None},
             custom_assignments={'B': 'custom_B'},
             selection={'A': ('NH3', 'Zone 1'), 'B': ('Air', 'General')},
             unit_prefs={'A': {'full_scale': 5.0, 'ramp': 0.2},

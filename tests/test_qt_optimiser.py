@@ -18,6 +18,7 @@ from flow_controller.core.session import FlowSession, MODE_STAGED
 from flow_controller.core.optimiser_controller import OptimiserController
 from flow_controller.domain.bayesian import SearchConfig
 from flow_controller.ui.qt_main_window import MainWindow
+from flow_controller.ui.qt_optimiser import ExperimentDialog
 from flow_controller.ui.qt_operation_tab import OperationTab
 from flow_controller.core.optimisation import Experiment
 from flow_controller.mexa.protocol import simulated_cycle
@@ -87,6 +88,50 @@ class QtOptimiserTests(unittest.TestCase):
             self.assertAlmostEqual(float(card.entry.text()), self.targets.get(tab._card_keys[unit], 0), places=5)
         self.assertEqual(float(tab._cards["P"].entry.text()), 0)
 
+    def test_new_experiment_dialog_adds_power_and_split_dimensions(self):
+        dialog = ExperimentDialog(self.session.autocalc_request)
+        self.addCleanup(dialog.close)
+        for pair, values in zip(dialog.bounds, ((15, 65), (1.05, 1.6), (.5, .85))):
+            for entry, value in zip(pair, values):
+                entry.setText(str(value))
+        power_check, power_pair, _ = dialog.optional["power_kw"]
+        split_check, split_pair, _ = dialog.optional["split_rich"]
+        power_check.setChecked(True)
+        split_check.setChecked(True)
+        for entry, value in zip(power_pair, (8, 12)):
+            entry.setText(str(value))
+        for entry, value in zip(split_pair, (75, 100)):
+            entry.setText(str(value))
+        dialog.entries["initial"].setText("6")
+        dialog.entries["pool"].setText("2048")
+        dialog.entries["split"].setText("90")
+        dialog.approved.setChecked(True)
+        dialog.accept()
+        self.assertEqual(dialog.config.dimensions, 5)
+        self.assertEqual(dialog.config.variable_names[-2:], ("power_kw", "split_rich"))
+        self.assertEqual(dialog.config.bounds[-2:], ((8.0, 12.0), (.75, 1.0)))
+        self.assertEqual(dialog.config.candidate_pool_size, 2048)
+
+    def test_power_dimension_round_trips_through_controller_window(self):
+        settings = SearchConfig(
+            10, ((.15, .65), (1.05, 1.6), (.5, .85), (8, 12)),
+            initial_points=5, window_seconds=5, optimise_power=True,
+            candidate_pool_size=128)
+        self.controller.create(Path(self.directory.name) / "power.fcbo.json", settings)
+        point = [.3, 1.2, .7, 11]
+        self.controller.experiment.add_trial({"point": point, "method": "test"})
+        self.targets = settings.targets(point)
+        self.publish(0)
+        self.controller.prepare_targets()
+        self.controller.start_window(True, True)
+        self.publish(2)
+        self.publish(5)
+        window = self.controller.finish_window()
+        self.assertEqual(len(settings.observed_vector(window)), 4)
+        self.assertAlmostEqual(window["power_kw"], 11)
+        self.controller.complete(100, 10, basis_confirmed=True)
+        self.assertIsNone(self.controller.experiment.pending)
+
     def test_pilot_can_be_physically_unassigned_for_measurement(self):
         del self.session.selection["P"]
         self.session._rebuild_assignments()
@@ -98,10 +143,14 @@ class QtOptimiserTests(unittest.TestCase):
     def test_nonzero_pilot_and_unconfirmed_window_rejected(self):
         with self.assertRaises(ValueError):
             self.controller.start_window()
-        self.publish(0, {"P": {"flow": 1.0, "sp": 1.0}})
-        with self.assertRaisesRegex(ValueError, "pilot"):
-            self.controller.start_window(True, True)
-        self.assertIsNone(self.controller.capture)
+        for gas in ("NH3", "H2", "CH4"):
+            with self.subTest(gas=gas):
+                self.session.selection["P"] = (gas, "Pilot")
+                self.session._rebuild_assignments()
+                self.publish(0, {"P": {"flow": 1.0, "sp": 1.0}})
+                with self.assertRaisesRegex(ValueError, "pilot"):
+                    self.controller.start_window(True, True)
+                self.assertIsNone(self.controller.capture)
         self.publish(0, {"P": {"flow": .01, "sp": .01}})
         with self.assertRaisesRegex(ValueError, "pilot"):
             self.controller.start_window(True, True)
