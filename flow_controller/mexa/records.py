@@ -241,6 +241,18 @@ def summarise(samples, start, end, minimum):
         raise ValueError("MEXA coverage does not reach the flow-window boundaries")
     no = [s.packet["no_ppm"] for s in selected]
     o2 = [s.packet["o2_percent"] for s in selected]
+    def statistics_for(values):
+        return {"count": len(values), "mean": statistics.mean(values),
+                "sd": statistics.stdev(values) if len(values) > 1 else None,
+                "min": min(values), "max": max(values)}
+
+    channel_statistics = {}
+    for key in CHANNEL_FIELDS:
+        values = [sample.packet.get(key) for sample in selected
+                  if sample.packet.get(key) is not None]
+        if values:
+            channel_statistics[key] = statistics_for(values)
+    cycles = statistics_for([sample.packet["cycle_s"] for sample in selected])
     return {"source_id": first["source_id"], "protocol": PROTOCOL,
             "first_seq": first["seq"], "last_seq": last["seq"], "samples": len(selected),
             "start": first["acquired_at"], "end": last["acquired_at"], "duration_s": duration,
@@ -249,7 +261,19 @@ def summarise(samples, start, end, minimum):
             "no_range": [min(no), max(no)], "o2_range": [min(o2), max(o2)],
             "log_path": selected[0].log_path, "basis": "dry_uncorrected",
             "validated": True, "simulated": False,
-            "averaging": "arithmetic channel means; oxygen correction of means; SEM unknown"}
+            "averaging": "arithmetic channel means; oxygen correction of means; SEM unknown",
+            "channel_statistics": channel_statistics,
+            "channel_statistics_basis": (
+                "NO/O2 validated for optimisation; other reported channels are informational "
+                "and not separately validated; missing values are excluded, never filled"),
+            "cycle_statistics_s": cycles,
+            "received_start": selected[0].received_at,
+            "received_end": selected[-1].received_at,
+            "states_seen": sorted({sample.packet["state"] for sample in selected}),
+            "alarms_seen": sorted({message for sample in selected
+                                   for message in sample.packet["alarms"]}),
+            "warnings_seen": sorted({message for sample in selected
+                                     for message in sample.packet["warnings"]})}
 
 
 class LiveWindow:

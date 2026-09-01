@@ -204,6 +204,7 @@ class OptimiserController(QObject):
             raise ValueError("Fresh flow telemetry is required. Start a new window after readings recover.")
         samples = self.session.latest_samples()  # never fall back to cached good data
         flows = {role: 0.0 for role in targets}
+        setpoints = {role: 0.0 for role in targets}
         for unit in self.session.assigned_units():
             pair = self.session.selection[unit]
             role = ROLE_MAP.get(tuple(pair))
@@ -219,7 +220,24 @@ class OptimiserController(QObject):
                 raise ValueError(f"Unit {unit} is not at the proposed condition. Re-settle before measuring.")
             if role in targets:
                 flows[role] = value
-        return stamp, flows
+                setpoints[role] = setpoint
+        return stamp, flows, setpoints
+
+    def _measurement_context(self):
+        """Return compact, read-only rig metadata for a condition boundary."""
+        snapshot = self.session.read_snapshot()
+        assigned_units = {unit for unit in snapshot["assignments"].values() if unit}
+        return {
+            "captured_at": snapshot.get("captured_at"),
+            "operating_mode": snapshot.get("combustion", {}).get("operating_mode"),
+            "poll_interval_s": snapshot.get("connection", {}).get("poll_interval_s"),
+            "units": {unit: snapshot.get("units", {}).get(unit)
+                      for unit in sorted(assigned_units)},
+            "declared_limits_slpm": snapshot.get("declared_limits", {}),
+            "prepared_targets_slpm": snapshot.get("combustion", {}).get(
+                "prepared_targets", {}),
+            "live_phi": snapshot.get("combustion", {}).get("live_phi", {}),
+        }
 
     def start_window(self, pilot_off=False, settled=False, *, live=False):
         self._require_idle()
@@ -230,7 +248,7 @@ class OptimiserController(QObject):
                 "unless this campaign has a selected response-delay calibration.")
         if self.experiment.pending.get("window"):
             raise ValueError("This test already has a completed window. Save its result or mark it invalid.")
-        stamp, flows = self._checked_readings(targets)
+        stamp, flows, setpoints = self._checked_readings(targets)
         baseline = self.session.mexa.checked_sample() if live else None
         delay = self.experiment.response_delay_seconds if live else 0.0
         if delay > 0:
@@ -244,15 +262,19 @@ class OptimiserController(QObject):
                 "response delay before the averaging window.")
             self.changed.emit()
             return
-        self._begin_window(stamp, flows, targets=targets, baseline=baseline)
+        self._begin_window(stamp, flows, setpoints=setpoints, targets=targets,
+                           baseline=baseline)
 
-    def _begin_window(self, stamp, flows, *, targets, baseline=None, delay=0.0,
+    def _begin_window(self, stamp, flows, *, setpoints, targets, baseline=None, delay=0.0,
                       response_run_id=None):
         """Start averaging after any response delay has elapsed."""
         live = baseline is not None
         mexa_capture = LiveWindow(baseline) if live else None
-        self.capture = MeasurementWindow(self.experiment.config, targets, self.session.assignments)
-        self.capture.add(stamp, flows)
+        flow_log = self.session.log_path if self.session.logging_active else None
+        self.capture = MeasurementWindow(
+            self.experiment.config, targets, self.session.assignments,
+            rig_context=self._measurement_context(), flow_audit_log=flow_log)
+        self.capture.add(stamp, flows, setpoints)
         self.mexa_capture = mexa_capture
         self._capture_delay = float(delay)
         self._response_run_id = response_run_id
@@ -264,14 +286,14 @@ class OptimiserController(QObject):
         if self.capture is None:
             return
         try:
-            stamp, flows = self._checked_readings(self.capture.targets)
+            stamp, flows, setpoints = self._checked_readings(self.capture.targets)
             if (self.capture.stamps and
                     (stamp - self.capture.stamps[-1]).total_seconds() > max(5, 3 * self.session.poll_interval_s)):
                 raise ValueError("A gap in flow telemetry interrupted the measurement.")
             if (self.capture.stamps and
                     (stamp - self.capture.stamps[0]).total_seconds() > 3600):
                 raise ValueError("The measurement exceeded the one-hour capture limit.")
-            self.capture.add(stamp, flows)
+            self.capture.add(stamp, flows, setpoints)
             if self.mexa_capture:
                 self.session.mexa.checked_sample()
             elapsed = (self.capture.stamps[-1] - self.capture.stamps[0]).total_seconds()
@@ -285,7 +307,7 @@ class OptimiserController(QObject):
         if self.capture is None:
             raise ValueError("Start a measurement window first.")
         self._checked_readings(self.capture.targets)
-        window = self.capture.finish()
+        window = self.capture.finish(end_context=self._measurement_context())
         if self.mexa_capture:
             self.session.mexa.checked_sample()
             window["mexa"] = self.mexa_capture.finish(window, self.experiment.config.window_seconds)
@@ -331,7 +353,7 @@ class OptimiserController(QObject):
         if self.settle_wait:
             try:
                 baseline = self.session.mexa.checked_sample()
-                stamp, flows = self._checked_readings(self.settle_wait["targets"])
+                stamp, flows, setpoints = self._checked_readings(self.settle_wait["targets"])
                 elapsed = self._clock() - self.settle_wait["started"]
                 remaining = max(0.0, self.settle_wait["delay_s"] - elapsed)
                 if remaining > 0:
@@ -342,7 +364,7 @@ class OptimiserController(QObject):
                 wait = self.settle_wait
                 self.settle_wait = None
                 self._begin_window(
-                    stamp, flows, targets=wait["targets"], baseline=baseline,
+                    stamp, flows, setpoints=setpoints, targets=wait["targets"], baseline=baseline,
                     delay=wait["delay_s"],
                     response_run_id=wait.get("response_run_id"))
             except ValueError as exc:
@@ -361,7 +383,8 @@ class OptimiserController(QObject):
             raise ValueError("Confirm these are uncorrected dry averages from the saved window.")
         value = self._require_experiment().complete(no_ppm, o2_percent, no_sem, notes)
         self.draft.clear()
-        self._say(f"Saved: {value:.3f} ppm NO at {self.experiment.config.reference_o2:g}% O2. "
+        self._say(f"Saved result and condition log: {value:.3f} ppm NO at "
+                  f"{self.experiment.config.reference_o2:g}% O2. "
                   "This is not a total-NOx or combustion-efficiency measurement.")
         self.changed.emit()
 
@@ -376,7 +399,8 @@ class OptimiserController(QObject):
         value = experiment.complete(measurement["no_ppm"], measurement["o2_percent"],
                                     notes=notes, from_mexa=True)
         self.draft.clear()
-        self._say(f"Saved MEXA result: {value:.3f} ppm NO at {experiment.config.reference_o2:g}% O2. "
+        self._say(f"Saved MEXA result and condition log: {value:.3f} ppm NO at "
+                  f"{experiment.config.reference_o2:g}% O2. "
                   "No burner commands sent.")
         self.changed.emit()
 
@@ -384,7 +408,8 @@ class OptimiserController(QObject):
         self._require_idle()
         self._require_experiment().invalidate(reason)
         self.draft.clear()
-        self._say("Test marked invalid and excluded from the model. Flows are unchanged.")
+        self._say("Test marked invalid, condition log saved, and point excluded from the model. "
+                  "Flows are unchanged.")
         self.changed.emit()
 
     def shutdown(self):

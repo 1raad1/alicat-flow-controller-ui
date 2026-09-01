@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 from flow_controller.mexa.protocol import (PEF_QUERY, ProtocolError, QUERIES, SerialReader,
                                            check_reply, decode_cycle, simulated_cycle)
-from flow_controller.mexa.records import (AuditLog, LiveWindow, ReceivedSample, epoch,
-                                          make_packet, utc_now, validate_packet)
+from flow_controller.mexa.records import (AuditLog, CHANNEL_FIELDS, LiveWindow, ReceivedSample,
+                                          epoch, make_packet, utc_now, validate_packet)
 from flow_controller.mexa.transport import (Lines, StreamClient, StreamServer, send_line,
                                             signature, validate_endpoint)
 from flow_controller.mexa.bridge import Bridge
@@ -217,6 +217,36 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(result["no_sd"], 1)
         with self.assertRaises(ValueError):
             capture.finish({"start": base.isoformat(), "end": (base + timedelta(seconds=5)).isoformat()}, 5)
+
+    def test_live_window_summarises_all_available_channels_as_informational(self):
+        source = str(uuid.uuid4())
+        base = datetime.now(timezone.utc)
+
+        def sample(seq, seconds):
+            item = packet(seq, source=source)
+            item["acquired_at"] = (base + timedelta(seconds=seconds)).isoformat()
+            for index, key in enumerate(CHANNEL_FIELDS):
+                item[key] = float(index + seq)
+            return ReceivedSample(item, utc_now(), time.monotonic(), "audit.jsonl")
+
+        with patch("flow_controller.mexa.records.time.time", return_value=base.timestamp()):
+            capture = LiveWindow(sample(1, -1))
+        for seq, seconds in ((2, 0), (3, 3), (4, 6)):
+            with patch("flow_controller.mexa.records.time.time",
+                       return_value=base.timestamp() + seconds):
+                capture.add(sample(seq, seconds))
+        result = capture.finish(
+            {"start": base.isoformat(), "end": (base + timedelta(seconds=6)).isoformat()}, 5)
+        self.assertEqual(set(result["channel_statistics"]), set(CHANNEL_FIELDS))
+        for index, key in enumerate(CHANNEL_FIELDS):
+            with self.subTest(channel=key):
+                self.assertEqual(result["channel_statistics"][key], {
+                    "count": 3, "mean": float(index + 3), "sd": 1.0,
+                    "min": float(index + 2), "max": float(index + 4),
+                })
+        self.assertIn("NO/O2 validated for optimisation",
+                      result["channel_statistics_basis"])
+        self.assertIn("informational", result["channel_statistics_basis"])
 
     def test_live_window_rejects_duplicate_gap_source_change_and_alarm(self):
         for fields in ({"seq": 1}, {"seq": 3}, {"seq": 2, "source_id": str(uuid.uuid4())},

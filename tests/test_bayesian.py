@@ -1,6 +1,7 @@
 """Numerical and persistence tests; no device connections."""
 
 from copy import deepcopy
+import csv
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
@@ -195,6 +196,119 @@ class ExperimentTests(unittest.TestCase):
         self.assertIsNone(result.pending)
         self.assertEqual(result.trials[0]["result"]["no_ppm"], 100)
         self.assertAlmostEqual(result.trials[0]["window"]["observed_point"][0], .3)
+
+    def test_completed_and_invalid_trials_freeze_complete_condition_logs(self):
+        completed_window = window_for(self.config, self.point)
+        self.experiment.add_trial({"point": self.point, "method": "test", "seed": 17})
+        self.experiment.record_window(completed_window)
+        self.experiment.complete(100, 10, 2, "complete")
+        completed = self.experiment.trials[0]
+        log = completed["condition_log"]
+        self.assertEqual(log["schema"], 1)
+        self.assertEqual(log["outcome"], "completed")
+        self.assertEqual(log["suggestion"]["point"], self.point)
+        self.assertEqual(log["suggestion"]["seed"], 17)
+        self.assertEqual(log["requested_condition"]["variable_names"],
+                         list(self.config.variable_names))
+        self.assertEqual(log["requested_condition"]["variables"],
+                         self.config.values(self.point))
+        self.assertEqual(log["requested_condition"]["target_flows_slpm"],
+                         completed_window["target_flows"])
+        self.assertEqual(log["measurement_window"], completed_window)
+        self.assertEqual(log["result"], completed["result"])
+
+        second = [.4, 1.3, .75]
+        invalid_window = window_for(self.config, second)
+        self.experiment.add_trial({"point": second, "method": "repeat", "repeat_of": 1})
+        self.experiment.record_window(invalid_window)
+        self.experiment.invalidate("unstable flame")
+        invalid = self.experiment.trials[1]
+        invalid_log = invalid["condition_log"]
+        self.assertEqual(invalid_log["schema"], 1)
+        self.assertEqual(invalid_log["outcome"], "invalid")
+        self.assertEqual(invalid_log["measurement_window"], invalid_window)
+        self.assertIsNone(invalid_log["result"])
+        self.assertEqual(invalid_log["invalid_reason"], "unstable flame")
+
+    def test_flow_statistics_and_complete_condition_log_are_exported(self):
+        window = window_for(self.config, self.point)
+        self.experiment.add_trial({"point": self.point, "method": "test",
+                                   "predicted_no": 90.0, "seed": 23})
+        self.experiment.record_window(window)
+        self.experiment.complete(100, 10)
+        reopened = Experiment.load(self.path)
+        saved = reopened.trials[0]["window"]["flow_statistics"]
+        saved_setpoints = reopened.trials[0]["window"]["setpoint_statistics"]
+        for role, target in window["target_flows"].items():
+            with self.subTest(role=role):
+                statistic = saved[role]
+                self.assertEqual(set(statistic), {
+                    "count", "target_slpm", "mean_slpm", "sd_slpm",
+                    "min_slpm", "max_slpm",
+                })
+                self.assertEqual(statistic["count"], 3)
+                self.assertAlmostEqual(statistic["target_slpm"], target)
+                self.assertAlmostEqual(statistic["mean_slpm"], target)
+                self.assertAlmostEqual(statistic["sd_slpm"], 0)
+                self.assertAlmostEqual(statistic["min_slpm"], target)
+                self.assertAlmostEqual(statistic["max_slpm"], target)
+                self.assertEqual(saved_setpoints[role], statistic)
+
+        path = self.path.with_suffix(".csv")
+        reopened.export_csv(path)
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["method"], "test")
+        self.assertEqual(row["suggestion_seed"], "23")
+        self.assertEqual(json.loads(row["flow_statistics_json"]), saved)
+        self.assertEqual(json.loads(row["setpoint_statistics_json"]), saved_setpoints)
+        self.assertEqual(json.loads(row["condition_log_json"]),
+                         reopened.trials[0]["condition_log"])
+
+    def test_legacy_completed_trial_without_condition_log_still_loads(self):
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window_for(self.config, self.point))
+        self.experiment.complete(100, 10)
+        data = deepcopy(self.experiment.data)
+        del data["trials"][0]["condition_log"]
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.trials[0]["status"], "completed")
+        self.assertNotIn("condition_log", reopened.trials[0])
+
+    def test_load_rejects_tampered_condition_log(self):
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window_for(self.config, self.point))
+        self.experiment.complete(100, 10)
+        data = deepcopy(self.experiment.data)
+        data["trials"][0]["condition_log"]["requested_condition"]["variables"][0] = .5
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Condition log"):
+            Experiment.load(self.path)
+
+    def test_response_calibration_summary_is_frozen_without_raw_samples(self):
+        self.store_response_conditions()
+        run = self.experiment.record_response_run(self.response_run(delay=5))
+        window = window_for(self.config, self.point)
+        window.update(pre_window_delay_s=5, response_run_id=run["id"],
+                      total_observation_s=window["duration_s"] + 5)
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window)
+        self.experiment.complete(100, 10)
+        summary = deepcopy(self.experiment.trials[0]["condition_log"]["response_calibration"])
+        self.assertNotIn("raw_samples", summary)
+        self.assertEqual(summary["raw_sample_count"], 3)
+        self.assertRegex(summary["raw_samples_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(summary["conditions"],
+                         self.experiment.data["analyser_response"]["conditions"])
+
+        data = deepcopy(self.experiment.data)
+        data["analyser_response"]["runs"][0]["caveat"] = "updated campaign history"
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.trials[0]["condition_log"]["response_calibration"], summary)
+        self.assertNotEqual(reopened.data["analyser_response"]["runs"][0]["caveat"],
+                            summary["caveat"])
 
     def test_new_campaign_has_empty_analyser_response_and_legacy_files_load(self):
         self.assertEqual(self.experiment.data["analyser_response"],

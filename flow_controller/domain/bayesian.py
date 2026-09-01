@@ -8,6 +8,8 @@ Parameter bounds and flow ceilings are known constraints, not learned safety.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
+import json
 import math
 import warnings
 
@@ -234,12 +236,14 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     lower, span = bounds[:, 0], bounds[:, 1] - bounds[:, 0]
     pool = qmc.Sobol(dimensions, scramble=True, seed=seed).random_base2(
         int(math.ceil(math.log2(pool_size))))
+    sobol_count = len(pool)
     completed = [t for t in trials if t["status"] == "completed"]
     if completed:
         best = min(completed, key=lambda t: t["result"]["corrected_no"])
         centre = (np.asarray(best["point"]) - lower) / span
         pool = np.vstack((pool, np.clip(
             centre + rng.normal(0, .08, (128, dimensions)), 0, 1)))
+    generated_count = len(pool)
     tried = np.array([(np.asarray(t["point"]) - lower) / span for t in trials])
     if len(tried):
         distance = np.linalg.norm(pool[:, None, :] - tried[None, :, :], axis=2).min(axis=1)
@@ -253,13 +257,34 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     if not feasible:
         raise ValueError("No candidate in this sampling pool fits the current flow ceilings. Review bounds and limits.")
     pool = np.asarray(feasible)
+    training_payload = [{
+        "id": trial.get("id"),
+        "observed": config.observed_vector(trial["window"]),
+        "corrected_no": trial["result"]["corrected_no"],
+        "corrected_sem": trial["result"].get("corrected_sem"),
+    } for trial in completed]
+    provenance = {
+        "algorithm_version": "fcbo-sobol-maximin-v1",
+        "seed": int(seed),
+        "candidate_pool_requested": int(pool_size),
+        "sobol_candidate_count": int(sobol_count),
+        "candidate_pool_generated": int(generated_count),
+        "candidate_count_feasible": int(len(pool)),
+        "flow_ceilings_slpm": {str(role): finite(value, f"Flow ceiling for {role}")
+                               for role, value in (limits or {}).items()},
+        "training_trial_count": len(completed),
+        "training_data_sha256": hashlib.sha256(json.dumps(
+            training_payload, sort_keys=True, allow_nan=False,
+            separators=(",", ":")).encode("utf-8")).hexdigest(),
+    }
     if len(completed) < config.initial_points:
         if len(tried):
             scores = np.linalg.norm(pool[:, None, :] - tried[None, :, :], axis=2).min(axis=1)
             index = int(np.argmax(scores))
         else:
             index = int(np.argmin(np.linalg.norm(pool - .5, axis=1)))
-        return {"point": (lower + pool[index] * span).tolist(), "method": "Space-filling initial design"}
+        return {"point": (lower + pool[index] * span).tolist(),
+                "method": "Space-filling initial design", **provenance}
 
     x = np.array([config.observed_vector(t["window"]) for t in completed])
     x = (x - lower) / span
@@ -275,8 +300,20 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         gp.fit(x, (y - centre) / scale)
         acquisition, mean, std = noisy_expected_improvement(gp, np.unique(x, axis=0), pool, rng)
     index = int(np.argmax(acquisition))
+    provenance.update({
+        "algorithm_version": "fcbo-matern52-nei-v1",
+        "fitted_kernel": str(gp.kernel_),
+        "signal_variance": float(gp.kernel_.k1.k1.constant_value),
+        "matern_length_scales": np.atleast_1d(
+            gp.kernel_.k1.k2.length_scale).astype(float).tolist(),
+        "white_noise_level": float(gp.kernel_.k2.noise_level),
+        "response_centre_ppm": centre,
+        "response_scale_ppm": scale,
+        "monte_carlo_draws": 128,
+    })
     return {"point": (lower + pool[index] * span).tolist(),
             "method": "Bayesian noisy expected improvement",
             "predicted_no": float(mean[index] * scale + centre),
             "latent_sd": float(std[index] * scale),
-            "expected_improvement": float(acquisition[index] * scale)}
+            "expected_improvement": float(acquisition[index] * scale),
+            **provenance}

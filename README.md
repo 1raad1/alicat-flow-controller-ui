@@ -320,13 +320,32 @@ noise and accepts an optional per-test NO standard error. O2 uncertainty and
 systematic calibration bias are not propagated. Suggestions respect the declared
 search region and current flow ceilings; no flame-safety boundary is learned.
 
-Experiment changes are written atomically after each suggestion, completed
-window and result. **Open** resumes a saved campaign, including a pending test,
-without loading target fields or applying flows. An unfinished capture is not
-resumed after closing the app. Typed measurement text is not durable until
-**Save result**; it does survive an appearance refresh. The history identifies
-the lowest observed corrected NO, not a certified global minimum. Repeat
-promising points and reference conditions to check reproducibility and drift.
+The `.fcbo.json` campaign is the authoritative record. Experiment changes are
+written atomically after each suggestion, completed window and result. Every
+newly completed or invalid condition receives a schema-1 `condition_log` inside
+that JSON. A condition log is a self-contained per-condition audit record: it
+freezes the trial and suggestion provenance, requested variables and target
+flows, separate controller-setpoint and measured-flow statistics, assignments,
+rig contexts and audit-log path, all available MEXA channel statistics and
+receiver provenance, the corrected result or invalid reason, and the response
+calibration summary used for that window.
+Auxiliary MEXA channels are informational and are not separately validated.
+The calibration summary stores the raw sample count and SHA-256 digest rather
+than copying its high-frequency raw samples.
+
+CSV export is an on-demand view of the campaign. It includes flattened
+provenance fields, JSON cells for nested values and a full compact
+`condition_log_json` cell. Raw high-frequency flow and MEXA data remain in their
+separate audit files; keep them alongside the authoritative campaign JSON when
+sample-level reconstruction is needed. A continuous flow-file path is present
+only when the app's flow logger was active during that window.
+
+**Open** resumes a saved campaign, including a pending test, without loading
+target fields or applying flows. An unfinished capture is not resumed after
+closing the app. Typed measurement text is not durable until **Save result**; it
+does survive an appearance refresh. The history identifies the lowest observed
+corrected NO, not a certified global minimum. Repeat promising points and
+reference conditions to check reproducibility and drift.
 
 The model runs in a background worker so fitting does not block the Qt control
 interface. Campaigns are limited to 500 tests. The implementation uses
