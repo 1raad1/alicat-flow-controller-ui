@@ -66,7 +66,7 @@ def auto_calc(request, config=FULL_RQL, calculator=None):
     nh3_frac = 1.0 - h2_frac
 
     # Volume fractions -> mass fractions, so the heating values apply.
-    # Use the same 25 °C standard-volume convention as measured-power
+    # Use the same Alicat default-STP densities as measured-power
     # reconstruction, so requested and observed power are inverse operations.
     rho_mix = nh3_frac * DENSITY['NH3'] + h2_frac * DENSITY['H2']
     m_nh3 = nh3_frac * DENSITY['NH3'] / rho_mix

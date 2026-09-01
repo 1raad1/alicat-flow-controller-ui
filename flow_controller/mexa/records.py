@@ -13,6 +13,7 @@ import statistics
 import time
 import uuid
 
+from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 
 PROTOCOL = "mexa584l-horiba-v1-readonly"
 MAX_AGE = 5.0
@@ -193,7 +194,7 @@ class ReceivedSample:
                 return "Validate the serial readings against the instrument before optimisation"
             if self.packet["basis"] != "dry_uncorrected":
                 return "Uncorrected dry NO/O2 basis has not been confirmed"
-            if self.packet["o2_percent"] >= 20.9:
+            if self.packet["o2_percent"] >= O2_CORRECTION_AIR_PERCENT:
                 return "O2 must be below 20.9% for oxygen correction"
         return ""
 

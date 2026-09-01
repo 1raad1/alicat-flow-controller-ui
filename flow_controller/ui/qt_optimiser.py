@@ -12,6 +12,7 @@ import pyqtgraph as pg
 
 from ..core.session import DEFAULT_LOG_DIR
 from ..domain.bayesian import SearchConfig, finite
+from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from . import qt_theme as theme
 from .qt_widgets import Card
 
@@ -102,7 +103,8 @@ class ExperimentDialog(QDialog):
             "The first three variables are always searched. Select power or fuel split only when "
             "they can be measured reliably and every value inside the bounds is approved."))
         layout.addWidget(note(
-            "Objective: dry NO × (20.9 − reference O2) / (20.9 − measured O2). "
+            f"Objective: dry NO × ({O2_CORRECTION_AIR_PERCENT:g} − reference O2) / "
+            f"({O2_CORRECTION_AIR_PERCENT:g} − measured O2). "
             "Use uncorrected dry analyser readings. NO is not total NOx; NH3 slip, "
             "N2O and combustion efficiency are not measured or constrained here."))
         self.approved = QCheckBox("Search region and transition procedure checked\n"
@@ -225,7 +227,7 @@ class OptimiserPane(Card):
         self.inputs = {}
         for key, title, placeholder in (
             ("no", "Raw dry NO (ppm)", "Window average, 0–5000"),
-            ("o2", "Dry O2 (vol%)", "Same window, below 20.9"),
+            ("o2", "Dry O2 (vol%)", f"Same window, below {O2_CORRECTION_AIR_PERCENT:g}"),
             ("sem", "NO standard error (ppm)", "Optional; blank = unknown"),
             ("notes", "Notes", "Calibration, observations, limitations"),
         ):

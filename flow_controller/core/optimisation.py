@@ -15,6 +15,7 @@ import numpy as np
 
 from ..domain.bayesian import SearchConfig, corrected_no, finite
 from ..domain.combustion import CombustionCalculator
+from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from ..mexa.records import PROTOCOL, epoch, number
 
 
@@ -301,7 +302,8 @@ def validate_mexa_window(window, config):
             raise ValueError("Negative MEXA standard deviation")
         limits = data[key + "_range"]
         mean = data["no_ppm" if key == "no" else "o2_percent"]
-        if len(limits) != 2 or not 0 <= number(limits[0], "minimum") <= mean <= number(limits[1], "maximum") <= (5000 if key == "no" else 20.9):
+        ceiling = 5000 if key == "no" else O2_CORRECTION_AIR_PERCENT
+        if len(limits) != 2 or not 0 <= number(limits[0], "minimum") <= mean <= number(limits[1], "maximum") <= ceiling:
             raise ValueError("Invalid MEXA measurement range")
     if not isinstance(data["log_path"], str) or not data["log_path"]:
         raise ValueError("MEXA audit-log reference is missing")

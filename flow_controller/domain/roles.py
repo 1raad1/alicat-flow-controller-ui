@@ -6,6 +6,8 @@ sequence and the CSV columns.
 
 from __future__ import annotations
 
+from .gas_properties import DENSITY_KG_PER_M3, LHV_MJ_PER_KG
+
 #: Roles in display order, paired with the label an operator sees.
 ROLES = (
     ('nh3_rich', 'NH3 Stage 1'),
@@ -70,12 +72,13 @@ ROLE_MAP = {
 #: Lower heating values, MJ/kg, and densities at standard conditions, kg/m^3.
 #: Every supported pilot gas is already represented here, so pilot flow is
 #: included in the live power estimate by the same calculation as stage fuel.
-LHV_NH3 = 18.6
-LHV_H2 = 120.0
-LHV_CH4 = 50.0
-RHO_NH3 = 0.7069
-RHO_H2 = 0.0827
-RHO_CH4 = 0.6558
+LHV_NH3 = LHV_MJ_PER_KG['NH3']
+LHV_H2 = LHV_MJ_PER_KG['H2']
+LHV_CH4 = LHV_MJ_PER_KG['CH4']
+RHO_NH3 = DENSITY_KG_PER_M3['NH3']
+RHO_H2 = DENSITY_KG_PER_M3['H2']
+RHO_CH4 = DENSITY_KG_PER_M3['CH4']
+RHO_AIR = DENSITY_KG_PER_M3['Air']
 
 #: Gas colours are part of the vocabulary rather than the theme: an operator
 #: learns that hydrogen is blue, and it must not move when the theme does.

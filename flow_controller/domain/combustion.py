@@ -12,14 +12,10 @@ actually doing?  Four numbers come out of it --
 * **bulk velocity** at the inlet, which needs a diameter the software cannot
   know and the operator has to declare.
 
-All flows are volumetric and referenced to the same standard conditions the
-mass flow controllers are calibrated in, so a ratio of two of them is a ratio
-of two mole counts and no density enters into it.  Densities only appear where
-a *mass* is genuinely wanted -- the heating values are per kilogram, and the
-mass air/fuel ratio is what a combustion text tabulates -- and both are derived
-from one molar volume rather than from the per-gas densities in
-:mod:`~flow_controller.domain.roles`, which were taken at slightly different
-temperatures and would make the two routes disagree in the third decimal.
+All flows are volumetric and referenced to Alicat's default standard
+conditions. A ratio of two flows is therefore a ratio of mole counts and no
+density enters into it. Density is used where mass or mass-based heating value
+is required, using the matching Alicat Gas Select reference values.
 
 Nothing here reads a widget or a controller.  The session hands it numbers and
 gets numbers back, which is what lets a test check the physics without a rig.
@@ -30,7 +26,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from .roles import LHV_CH4, LHV_H2, LHV_NH3
+from .gas_properties import (
+    AIR_N2_FRACTION,
+    AIR_O2_FRACTION,
+    DENSITY_KG_PER_M3,
+    LHV_MJ_PER_KG,
+    LHV_MJ_PER_M3,
+)
 
 #: The fuels the rig burns, in the order they are displayed.
 FUELS = ('CH4', 'H2', 'NH3')
@@ -40,33 +42,31 @@ FUELS = ('CH4', 'H2', 'NH3')
 #:   2 H2 + O2     -> 2 H2O          (0.50 mol O2 / mol H2)
 #:   4 NH3 + 3 O2  -> 2 N2 + 6 H2O   (0.75 mol O2 / mol NH3)
 #: Oxygen balance for the combined CH4/H2/NH3 + air reaction
-#: (Note 8 Feb 2023):  0.21 * a = 2*CH4 + 0.5*H2 + 0.75*NH3
+#: Oxygen balance: O2_air * a = 2*CH4 + 0.5*H2 + 0.75*NH3
 O2_PER_FUEL = {'CH4': 2.00, 'H2': 0.50, 'NH3': 0.75}
 
 #: Mole fraction of O2 in dry air.
-O2_IN_AIR = 0.21
+O2_IN_AIR = AIR_O2_FRACTION
+
+#: Mole fraction of N2 in dry air; trace gases remain separate.
+N2_IN_AIR = AIR_N2_FRACTION
 
 #: g/mol.  Air is the usual dry-air average.
 MOLAR_MASS = {'CH4': 16.043, 'H2': 2.016, 'NH3': 17.031, 'Air': 28.965}
 
-#: Lower heating values, MJ/kg, keyed the way the flows are.
-LHV_MJ_PER_KG = {'CH4': LHV_CH4, 'H2': LHV_H2, 'NH3': LHV_NH3}
-
 #: Litres per mole at the reference conditions behind the "S" in SLPM.  Alicat
-#: standard litres are referenced to 25 C and one atmosphere, so that is the
-#: molar volume every conversion below uses.
+#: standard litres are referenced to 25 C and one atmosphere. Retained for
+#: compatibility; density and power use the explicit shared properties.
 STD_MOLAR_VOLUME_L = 24.465
 
 #: Thermal power per SLPM of each fuel, kW.  Precomputed because it is the
 #: inner term of a calculation that runs on every acquisition pass:
-#:   MJ/kg * g/mol = kJ/mol;  / (L/mol) = kJ/L;  / 60 s = kW per L/min.
-KW_PER_SLPM = {fuel: LHV_MJ_PER_KG[fuel] * MOLAR_MASS[fuel]
-               / STD_MOLAR_VOLUME_L / 60.0
+#:   (MJ/kg * kg/m^3) / 60 = kW per L/min.
+KW_PER_SLPM = {fuel: LHV_MJ_PER_KG[fuel] * DENSITY_KG_PER_M3[fuel] / 60.0
                for fuel in FUELS}
 
-#: Density of each gas at the same reference conditions, kg/m^3 -- which is
-#: g/L, which is why this is a plain division.
-DENSITY = {gas: mass / STD_MOLAR_VOLUME_L for gas, mass in MOLAR_MASS.items()}
+#: Explicit Gas Select densities at Alicat's default standard conditions.
+DENSITY = DENSITY_KG_PER_M3
 
 _INFINITIES = (float('inf'), float('-inf'))
 
@@ -261,6 +261,7 @@ class CombustionCalculator:
     O2_PER_NH3 = O2_PER_FUEL['NH3']
     O2_PER_H2 = O2_PER_FUEL['H2']
     O2_IN_AIR = O2_IN_AIR
+    N2_IN_AIR = N2_IN_AIR
 
     def stoich_air(self, nh3_flow, h2_flow, ch4_flow=0.0):
         return stoich_air_for(

@@ -257,6 +257,11 @@ The objective is oxygen-corrected dry **NO**, not total NOx or mass per energy:
 corrected_NO = raw_dry_NO * (20.9 - reference_O2) / (20.9 - measured_dry_O2)
 ```
 
+The 20.9% value is the separate [EPA oxygen-correction reporting
+convention](https://www.epa.gov/sites/default/files/2017-09/documents/10-6200.pdf).
+It is deliberately not replaced by the 20.9390% physical O2 mole fraction used
+in the combustion stoichiometry.
+
 This avoids optimising raw ppm merely by adding air. It does not measure NO2,
 NH3 slip, N2O or combustion efficiency. Confirm the MEXA sensor's calibration,
 sample conditioning and suitability for the NH3/H2 exhaust matrix before making
@@ -499,29 +504,52 @@ continues to calculate its equivalence-ratio columns.
 <details>
 <summary>Calculation reference</summary>
 
-Standard litres are referenced to 25 C and 1 atm, using a molar volume of
-`24.465 L/mol`. Dry air is treated as 21% oxygen by volume.
+SLPM uses Alicat's default standard conditions of **25 °C and 14.696 psia**.
+The basis follows Alicat's [default STP
+definition](https://www.alicat.com/support/what-is-mass-flow/), and the densities
+below are the exact values in the [Alicat Gas Select 5.0
+table](https://documents.alicat.com/specifications/Alicat_Preloaded-Gases-and-Properties_Rev0.pdf)
+for that same basis.
 
 | Constant | CH4 | H2 | NH3 | Air |
 | --- | ---: | ---: | ---: | ---: |
 | O2 demand, mol/mol fuel | 2.00 | 0.50 | 0.75 | - |
-| Molar mass, g/mol | 16.043 | 2.016 | 17.031 | 28.965 |
 | Lower heating value, MJ/kg | 50.0 | 120.0 | 18.6 | - |
-| Density at 25 C and 1 atm, kg/m3 | 0.656 | 0.082 | 0.696 | 1.184 |
-| Firing rate, kW/SLPM | 0.5465 | 0.1648 | 0.2158 | - |
+| Density at 25 °C and 14.696 psia, kg/m3 | 0.65688 | 0.08235 | 0.70352 | 1.18402 |
+| Derived volumetric LHV, MJ/m3 | 32.84400 | 9.88200 | 13.08547 | - |
+| Firing rate, kW/SLPM | 0.54740 | 0.16470 | 0.21809 | - |
+
+The mass-based LHVs remain 18.6 MJ/kg for NH3, 120 MJ/kg for H2, and
+50 MJ/kg for CH4. Volumetric LHV is derived as `density * mass LHV` on the
+same Alicat basis; it is not copied from spreadsheet columns that may use
+Nm3 or another reference temperature.
+
+The stoichiometric calculation uses the [NIST dry-air mole
+fractions](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=921756):
+O2 = 0.209390 and N2 = 0.780848. The remaining 0.009762 is argon, CO2, and
+other trace gases. N2 is recorded as a shared physical constant, but only the
+O2 fraction enters the current stoichiometric-air demand.
 
 Stoichiometric air and equivalence ratio are calculated from:
 
 ```text
-0.21 * air_stoich = 2.00*CH4 + 0.50*H2 + 0.75*NH3
+0.209390 * air_stoich = 2.00*CH4 + 0.50*H2 + 0.75*NH3
 phi = air_stoich / air_supplied
 ```
 
 Firing rate is the sum over all fuel streams:
 
 ```text
-power [kW] = sum(flow_fuel * LHV_fuel * molar_mass_fuel / (24.465 * 60))
+volumetric_LHV [MJ/m3] = density [kg/m3] * mass_LHV [MJ/kg]
+power [kW] = sum(flow_fuel [SLPM] * volumetric_LHV [MJ/m3] / 60)
 ```
+
+Do not combine a density or MJ/m3 value quoted at 0 °C (`Nm3`) with controller
+flows referenced to 25 °C. That mixes two standard-volume bases and biases
+mass flow, firing rate, and calculated targets. Check each controller's
+calibration sheet: its declared STP overrides Alicat's default. If any hardware
+uses a non-default basis, configure or change the software gas-property basis
+consistently before using these calculations.
 
 For a circular inlet with diameter `d` in millimetres, the app calculates its
 area. For a non-circular inlet, enter area `A` directly in square millimetres.

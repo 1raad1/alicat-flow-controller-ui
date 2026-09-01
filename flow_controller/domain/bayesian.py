@@ -13,10 +13,11 @@ import warnings
 
 import numpy as np
 
+from .gas_properties import O2_CORRECTION_AIR_PERCENT
 from .rql import AutoCalcRequest, auto_calc
 
 
-AIR_O2 = 20.9  # dry volume %, the fixed reporting convention
+AIR_O2 = O2_CORRECTION_AIR_PERCENT  # compatibility name: reporting convention
 BASE_VARIABLES = ("h2_fraction", "phi_stage1", "phi_overall")
 OPTIONAL_VARIABLES = ("power_kw", "split_rich")
 VARIABLE_LABELS = {
