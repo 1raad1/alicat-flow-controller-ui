@@ -15,6 +15,51 @@ import unittest
 
 from flow_controller.domain import combustion
 from flow_controller.domain.combustion import CombustionCalculator
+from flow_controller.domain.gas_properties import (
+    AIR_N2_FRACTION, AIR_O2_FRACTION, AIR_OTHER_FRACTION,
+    DENSITY_KG_PER_M3, LHV_MJ_PER_KG, LHV_MJ_PER_M3,
+    O2_CORRECTION_AIR_PERCENT, STANDARD_PRESSURE_PSIA,
+    STANDARD_TEMPERATURE_C,
+)
+from flow_controller.domain.rql import AutoCalcRequest, auto_calc
+
+
+class GasPropertyTests(unittest.TestCase):
+    def test_alicat_default_stp_and_densities_are_exact(self):
+        self.assertEqual(STANDARD_TEMPERATURE_C, 25.0)
+        self.assertEqual(STANDARD_PRESSURE_PSIA, 14.696)
+        self.assertEqual(DENSITY_KG_PER_M3, {
+            "NH3": 0.70352, "H2": 0.08235,
+            "CH4": 0.65688, "Air": 1.18402})
+        self.assertEqual(combustion.DENSITY, DENSITY_KG_PER_M3)
+
+    def test_combustion_air_and_emissions_conventions_remain_distinct(self):
+        self.assertEqual(AIR_O2_FRACTION, 0.209390)
+        self.assertEqual(AIR_N2_FRACTION, 0.780848)
+        self.assertAlmostEqual(AIR_OTHER_FRACTION, 0.009762, places=15)
+        self.assertEqual(combustion.O2_IN_AIR, AIR_O2_FRACTION)
+        self.assertEqual(combustion.N2_IN_AIR, AIR_N2_FRACTION)
+        self.assertEqual(O2_CORRECTION_AIR_PERCENT, 20.9)
+
+    def test_volumetric_lhv_is_derived_at_the_same_reference_basis(self):
+        self.assertEqual(LHV_MJ_PER_KG, {"NH3": 18.6, "H2": 120.0, "CH4": 50.0})
+        for fuel in combustion.FUELS:
+            self.assertEqual(
+                LHV_MJ_PER_M3[fuel],
+                LHV_MJ_PER_KG[fuel] * DENSITY_KG_PER_M3[fuel])
+
+    def test_requested_and_reconstructed_power_are_inverse_for_blends(self):
+        requested_kw = 10.0
+        for h2_fraction in (0.1, 0.3, 0.7, 0.9):
+            with self.subTest(h2_fraction=h2_fraction):
+                targets = auto_calc(AutoCalcRequest(
+                    power_kw=requested_kw, h2_fraction=h2_fraction,
+                    phi_stage1=1.1, phi_global=0.8, split_rich=0.7))
+                measured_kw = combustion.power_kw({
+                    "NH3": targets["nh3_rich"] + targets["nh3_lean"],
+                    "H2": targets["h2_rich"] + targets["h2_lean"],
+                })
+                self.assertAlmostEqual(measured_kw, requested_kw, places=12)
 
 
 class CombustionCalculatorTests(unittest.TestCase):
@@ -22,7 +67,8 @@ class CombustionCalculatorTests(unittest.TestCase):
         self.calculator = CombustionCalculator()
 
     def test_stoichiometric_air_includes_all_fuels(self):
-        expected = (0.75 * 2.0 + 0.5 * 3.0 + 2.0 * 1.0) / 0.21
+        expected = ((0.75 * 2.0 + 0.5 * 3.0 + 2.0 * 1.0)
+                    / AIR_O2_FRACTION)
         self.assertAlmostEqual(
             self.calculator.stoich_air(2.0, 3.0, 1.0), expected)
 
@@ -51,7 +97,7 @@ class FlowCleaningTests(unittest.TestCase):
 
     def test_numeric_strings_are_accepted(self):
         self.assertAlmostEqual(combustion.stoich_air_for({'H2': '2'}),
-                               0.5 * 2.0 / 0.21)
+                               0.5 * 2.0 / AIR_O2_FRACTION)
 
     def test_normalise_covers_every_fuel(self):
         self.assertEqual(set(combustion.normalise({'H2': 1.0})),
@@ -60,17 +106,16 @@ class FlowCleaningTests(unittest.TestCase):
 
 class PowerTests(unittest.TestCase):
     def test_power_per_slpm_matches_the_heating_values(self):
-        # MJ/kg * g/mol / (L/mol) / 60 s = kW per L/min.
+        # (MJ/kg * kg/m^3) / 60 = kW per L/min.
         for fuel in combustion.FUELS:
             expected = (combustion.LHV_MJ_PER_KG[fuel]
-                        * combustion.MOLAR_MASS[fuel]
-                        / combustion.STD_MOLAR_VOLUME_L / 60.0)
+                        * combustion.DENSITY[fuel] / 60.0)
             self.assertAlmostEqual(combustion.KW_PER_SLPM[fuel], expected)
 
     def test_methane_is_about_half_a_kilowatt_per_slpm(self):
         # A figure worth pinning: it is the one an operator can sanity-check
         # against the pilot without doing any arithmetic.
-        self.assertAlmostEqual(combustion.KW_PER_SLPM['CH4'], 0.5465, places=3)
+        self.assertEqual(combustion.KW_PER_SLPM['CH4'], 0.5474)
 
     def test_power_adds_the_fuels_up(self):
         power = combustion.power_kw({'CH4': 1.0, 'H2': 2.0, 'NH3': 3.0})
@@ -120,10 +165,9 @@ class EstimateTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.stoich_air, air)
         self.assertAlmostEqual(estimate.afr_volume, air)
         self.assertAlmostEqual(estimate.afr_stoich_volume, air)
-        self.assertAlmostEqual(estimate.afr_volume, 9.5238, places=4)
-        # The textbook figure for methane in air.
-        self.assertAlmostEqual(estimate.afr_stoich_mass, 17.19, places=2)
-        self.assertAlmostEqual(estimate.power_kw, 0.5465, places=3)
+        self.assertAlmostEqual(estimate.afr_volume, 9.5516, places=4)
+        self.assertAlmostEqual(estimate.afr_stoich_mass, 17.22, places=2)
+        self.assertEqual(estimate.power_kw, 0.5474)
         self.assertTrue(estimate.burning)
 
     def test_phi_matches_the_calculator_the_csv_uses(self):
@@ -141,9 +185,8 @@ class EstimateTests(unittest.TestCase):
         # answer is zero.
         self.assertEqual(estimate.afr_volume, 0.0)
         # The stoichiometric ratio is a property of the fuel, not of what is
-        # being supplied, so it stands even with the air shut -- 34.2 for
-        # hydrogen, which is the textbook figure.
-        self.assertAlmostEqual(estimate.afr_stoich_mass, 34.21, places=2)
+        # being supplied, so it stands even with the air shut.
+        self.assertAlmostEqual(estimate.afr_stoich_mass, 34.33, places=2)
         # The power is still real: the hydrogen is flowing whether or not
         # there is air to burn it in, which is a thing worth being able to see.
         self.assertGreater(estimate.power_kw, 0.0)

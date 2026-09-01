@@ -244,6 +244,14 @@ For the algorithms, equations, file format and code map, see the
 6. Suggest the next test. Use the **History** tab to inspect results, repeat
    a completed point, or export CSV. Repeating a point creates a separate test.
 
+The **NO response time** tab can store two settled live conditions and run one
+explicitly confirmed A-to-B transition. It measures the combined burner, flow,
+sample-line, analyser and acquisition response, then applies the selected result
+as a pre-averaging delay for later live MEXA windows. It does not alter the
+campaign's averaging duration, and cancellation does not return the rig to A or
+zero it. See [NO response-time calibration](docs/BAYESIAN_OPTIMISER_MANUAL.md#5-no-response-time-calibration)
+for the procedure, detector criteria, timing definitions and saved provenance.
+
 The optimiser requires one NH3 line, one H2 line and one air line in stage 1,
 plus stage-2 air. Stage-2 fuel lines are required when a fixed or proposed fuel
 split is below 100%. A pilot controller may remain assigned at zero or be unassigned.
@@ -256,6 +264,11 @@ The objective is oxygen-corrected dry **NO**, not total NOx or mass per energy:
 ```text
 corrected_NO = raw_dry_NO * (20.9 - reference_O2) / (20.9 - measured_dry_O2)
 ```
+
+The 20.9% value is the separate [EPA oxygen-correction reporting
+convention](https://www.epa.gov/sites/default/files/2017-09/documents/10-6200.pdf).
+It is deliberately not replaced by the 20.9390% physical O2 mole fraction used
+in the combustion stoichiometry.
 
 This avoids optimising raw ppm merely by adding air. It does not measure NO2,
 NH3 slip, N2O or combustion efficiency. Confirm the MEXA sensor's calibration,
@@ -307,13 +320,32 @@ noise and accepts an optional per-test NO standard error. O2 uncertainty and
 systematic calibration bias are not propagated. Suggestions respect the declared
 search region and current flow ceilings; no flame-safety boundary is learned.
 
-Experiment changes are written atomically after each suggestion, completed
-window and result. **Open** resumes a saved campaign, including a pending test,
-without loading target fields or applying flows. An unfinished capture is not
-resumed after closing the app. Typed measurement text is not durable until
-**Save result**; it does survive an appearance refresh. The history identifies
-the lowest observed corrected NO, not a certified global minimum. Repeat
-promising points and reference conditions to check reproducibility and drift.
+The `.fcbo.json` campaign is the authoritative record. Experiment changes are
+written atomically after each suggestion, completed window and result. Every
+newly completed or invalid condition receives a schema-1 `condition_log` inside
+that JSON. A condition log is a self-contained per-condition audit record: it
+freezes the trial and suggestion provenance, requested variables and target
+flows, separate controller-setpoint and measured-flow statistics, assignments,
+rig contexts and audit-log path, all available MEXA channel statistics and
+receiver provenance, the corrected result or invalid reason, and the response
+calibration summary used for that window.
+Auxiliary MEXA channels are informational and are not separately validated.
+The calibration summary stores the raw sample count and SHA-256 digest rather
+than copying its high-frequency raw samples.
+
+CSV export is an on-demand view of the campaign. It includes flattened
+provenance fields, JSON cells for nested values and a full compact
+`condition_log_json` cell. Raw high-frequency flow and MEXA data remain in their
+separate audit files; keep them alongside the authoritative campaign JSON when
+sample-level reconstruction is needed. A continuous flow-file path is present
+only when the app's flow logger was active during that window.
+
+**Open** resumes a saved campaign, including a pending test, without loading
+target fields or applying flows. An unfinished capture is not resumed after
+closing the app. Typed measurement text is not durable until **Save result**; it
+does survive an appearance refresh. The history identifies the lowest observed
+corrected NO, not a certified global minimum. Repeat promising points and
+reference conditions to check reproducibility and drift.
 
 The model runs in a background worker so fitting does not block the Qt control
 interface. Campaigns are limited to 500 tests. The implementation uses
@@ -499,29 +531,52 @@ continues to calculate its equivalence-ratio columns.
 <details>
 <summary>Calculation reference</summary>
 
-Standard litres are referenced to 25 C and 1 atm, using a molar volume of
-`24.465 L/mol`. Dry air is treated as 21% oxygen by volume.
+SLPM uses Alicat's default standard conditions of **25 °C and 14.696 psia**.
+The basis follows Alicat's [default STP
+definition](https://www.alicat.com/support/what-is-mass-flow/), and the densities
+below are the exact values in the [Alicat Gas Select 5.0
+table](https://documents.alicat.com/specifications/Alicat_Preloaded-Gases-and-Properties_Rev0.pdf)
+for that same basis.
 
 | Constant | CH4 | H2 | NH3 | Air |
 | --- | ---: | ---: | ---: | ---: |
 | O2 demand, mol/mol fuel | 2.00 | 0.50 | 0.75 | - |
-| Molar mass, g/mol | 16.043 | 2.016 | 17.031 | 28.965 |
 | Lower heating value, MJ/kg | 50.0 | 120.0 | 18.6 | - |
-| Density at 25 C and 1 atm, kg/m3 | 0.656 | 0.082 | 0.696 | 1.184 |
-| Firing rate, kW/SLPM | 0.5465 | 0.1648 | 0.2158 | - |
+| Density at 25 °C and 14.696 psia, kg/m3 | 0.65688 | 0.08235 | 0.70352 | 1.18402 |
+| Derived volumetric LHV, MJ/m3 | 32.84400 | 9.88200 | 13.08547 | - |
+| Firing rate, kW/SLPM | 0.54740 | 0.16470 | 0.21809 | - |
+
+The mass-based LHVs remain 18.6 MJ/kg for NH3, 120 MJ/kg for H2, and
+50 MJ/kg for CH4. Volumetric LHV is derived as `density * mass LHV` on the
+same Alicat basis; it is not copied from spreadsheet columns that may use
+Nm3 or another reference temperature.
+
+The stoichiometric calculation uses the [NIST dry-air mole
+fractions](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=921756):
+O2 = 0.209390 and N2 = 0.780848. The remaining 0.009762 is argon, CO2, and
+other trace gases. N2 is recorded as a shared physical constant, but only the
+O2 fraction enters the current stoichiometric-air demand.
 
 Stoichiometric air and equivalence ratio are calculated from:
 
 ```text
-0.21 * air_stoich = 2.00*CH4 + 0.50*H2 + 0.75*NH3
+0.209390 * air_stoich = 2.00*CH4 + 0.50*H2 + 0.75*NH3
 phi = air_stoich / air_supplied
 ```
 
 Firing rate is the sum over all fuel streams:
 
 ```text
-power [kW] = sum(flow_fuel * LHV_fuel * molar_mass_fuel / (24.465 * 60))
+volumetric_LHV [MJ/m3] = density [kg/m3] * mass_LHV [MJ/kg]
+power [kW] = sum(flow_fuel [SLPM] * volumetric_LHV [MJ/m3] / 60)
 ```
+
+Do not combine a density or MJ/m3 value quoted at 0 °C (`Nm3`) with controller
+flows referenced to 25 °C. That mixes two standard-volume bases and biases
+mass flow, firing rate, and calculated targets. Check each controller's
+calibration sheet: its declared STP overrides Alicat's default. If any hardware
+uses a non-default basis, configure or change the software gas-property basis
+consistently before using these calculations.
 
 For a circular inlet with diameter `d` in millimetres, the app calculates its
 area. For a non-circular inlet, enter area `A` directly in square millimetres.
