@@ -6,6 +6,12 @@ variable controls and the boundaries between calculation, operator approval and
 actuation. Code links point to the implementation at the time this manual was
 written; use the named symbol if later edits move a line.
 
+Published-source citations identify the established technique or reporting
+practice on which a section is based. They do not imply that a paper validates
+this particular burner, analyser, search region or software implementation.
+Unless a paragraph says otherwise, numerical tolerances, persistence counts,
+timeouts and safety gates are application-specific engineering choices.
+
 ## 1. Purpose and operating boundary
 
 The optimiser searches for low dry NO, corrected to a fixed dry-O2 reference,
@@ -398,6 +404,14 @@ uncertainty and systematic analyser/calibration bias are not propagated. The
 objective is corrected NO concentration, not total NOx, NO2, NH3 slip, N2O,
 combustion efficiency or emissions per unit energy.
 
+Oxygen-reference normalization and the need to state dry/wet basis and the
+reporting species are discussed for industrial combustion measurements by
+Baukal and Eleazer [[R1](#ref-r1)]. Their paper concerns NOx reporting and also
+warns that conventional oxygen correction can be misleading for
+oxygen-enhanced combustion. This program applies the conventional dilution
+correction to its measured dry **NO** channel; the citation does not turn that
+channel into total NOx or a mass-per-energy emission factor.
+
 Window validation recomputes the observed condition from saved mean flows and
 checks all selected-variable bounds at
 [`optimisation.py:569`](../flow_controller/core/optimisation.py#L569) to
@@ -420,6 +434,14 @@ burner. This distinction is stated by the detector itself at
 and in the response-test interface at
 [`qt_optimiser.py:283`](../flow_controller/ui/qt_optimiser.py#L283) to
 [`qt_optimiser.py:291`](../flow_controller/ui/qt_optimiser.py#L291).
+
+Gas-analyser studies distinguish transport delay from analyser rise time and
+show that sample tubing, connectors, internal gas exchange and acquisition
+cycles can change the observed response [[R2](#ref-r2), [R3](#ref-r3)]. The
+program therefore labels its result as the response of the complete
+experimental path. That classification is an application of the published
+measurement concepts, not a claim that either paper studied this MEXA/burner
+arrangement.
 
 The streamed channel used by this test is **NO**, meaning nitric oxide in ppm.
 It is not total NOx. The controller passes `packet["no_ppm"]` to the detector at
@@ -612,6 +634,9 @@ to [`analyser_response.py:385`](../flow_controller/domain/analyser_response.py#L
 The constants are at
 [`analyser_response.py:29`](../flow_controller/domain/analyser_response.py#L29)
 to [`analyser_response.py:34`](../flow_controller/domain/analyser_response.py#L34).
+The six-sample minimum, 20 s window, 5% bands and absolute ppm floors are local
+acceptance criteria. They were not taken from the cited response-time papers
+and should be reassessed if the analyser rate, noise or experiment changes.
 
 For $p\in\{0.1,0.5,0.9\}$, the crossing level is
 
@@ -627,6 +652,20 @@ $y_{0.9}$. The signed comparison works for rising and falling responses. The
 $$
 t_{10\text{-}90}=t_{90}-t_{10}.
 $$
+
+Step-response work commonly reports a 90% response point and, in some fields,
+the 10-to-90% rise interval. Horsley et al. explicitly use a 10-to-90% gas-
+analyser rise time and show that sampling-system changes affect it
+[[R3](#ref-r3)]. In this program, `t10_s`, `t50_s` and `t90_s` are each measured
+from the command, while `rise_10_90_s` is the separate difference
+$t_{90}-t_{10}$; those definitions must not be interchanged.
+
+ISO 8178-1 defines gas-system delay, transformation and response points at 10%,
+50% and 90%, with rise time $t_{90}-t_{10}$ [[R12](#ref-r12)]. Its reference
+input is a rapid gas change at the sampling probe. This program instead uses a
+combustion-condition command that may include a controller ramp, so its reported
+times use related percentile vocabulary but are **not** an ISO 8178-1 analyser
+response test.
 
 Crossing detection is implemented at
 [`analyser_response.py:432`](../flow_controller/domain/analyser_response.py#L432)
@@ -705,6 +744,9 @@ to [`analyser_response.py:145`](../flow_controller/domain/analyser_response.py#L
 using the criteria at
 [`analyser_response.py:38`](../flow_controller/domain/analyser_response.py#L38)
 to [`analyser_response.py:41`](../flow_controller/domain/analyser_response.py#L41).
+The 1.25 margin, upward 5 s rounding and 5-to-3600 s bounds are conservative
+program settings, not constants supplied by a response-time paper or analyser
+standard.
 
 ### Use in future optimiser windows
 
@@ -823,11 +865,16 @@ for the established operator recovery procedure.
 ## 6. Initial space-filling design
 
 With no previous recordings, `suggest()` creates a scrambled **Sobol sequence**:
-a deterministic low-discrepancy sequence designed to cover a multi-dimensional
-box more evenly than independent random draws. Scrambling randomises that
-sequence while retaining its coverage properties. The first
+a deterministic low-discrepancy sequence constructed for equidistribution over
+a multi-dimensional box. Scrambling randomises that sequence while retaining
+its digital-net coverage properties. The first
 $2^{\lceil\log_2 n\rceil}$ points form the candidate pool, where $n$ is the
 requested pool size and $\lceil\cdot\rceil$ means round upward to an integer.
+Sobol' introduced the underlying low-discrepancy sequence [[R4](#ref-r4)], and
+Owen analysed randomized scrambling of Sobol' and related digital nets
+[[R5](#ref-r5)]. Those papers establish the sequence and scrambling ideas; using
+the points as a finite feasible candidate pool, then applying the centre and
+maximin rules below, is this program's experimental-design policy.
 This rounding and generation are implemented at
 [`bayesian.py:235`](../flow_controller/domain/bayesian.py#L235) and
 [`bayesian.py:236`](../flow_controller/domain/bayesian.py#L236).
@@ -894,6 +941,15 @@ $$
 u_{ij}=\frac{x_{ij}-l_j}{h_j-l_j}.
 $$
 
+Stochastic-process surrogates for expensive response functions were developed
+in the computer-experiment literature [[R6](#ref-r6)]. Jones, Schonlau and Welch
+combined a kriging/GP-style surrogate with expected improvement in Efficient
+Global Optimization [[R7](#ref-r7)]. The present application extends that
+general expensive-black-box framework to noisy physical combustion tests; the
+papers do not establish the physical safety or validity of this search region.
+Williams and Rasmussen give the standard GP conditioning equations for
+predictive mean and variance in their Eqs. 1–2 [[R10](#ref-r10)].
+
 Implemented at [`bayesian.py:264`](../flow_controller/domain/bayesian.py#L264)
 and [`bayesian.py:265`](../flow_controller/domain/bayesian.py#L265).
 
@@ -927,6 +983,17 @@ noise; and $\delta_{u,u'}$ is 1 when its two arguments refer to the same
 observation and 0 otherwise. The kernel classes and numerical bounds are
 selected at [`bayesian.py:269`](../flow_controller/domain/bayesian.py#L269) and
 [`bayesian.py:270`](../flow_controller/domain/bayesian.py#L270).
+
+Snoek, Larochelle and Adams give the ARD Matérn-5/2 covariance in this form in
+their Section 3.1 and Eq. 5, and motivate it as a less extremely smooth
+alternative to the squared-exponential kernel for practical Bayesian
+optimisation [[R8](#ref-r8)]. This program uses
+that covariance family and separate length scales, but optimises point estimates
+of its kernel hyperparameters; it does not implement their fully Bayesian
+hyperparameter marginalisation. Handcock and Stein give a primary statistical
+treatment of the general Matérn covariance family in their Section 3
+[[R11](#ref-r11)]; the polynomial-exponential form above is its
+smoothness-$5/2$ specialization.
 
 The distance uses **automatic relevance determination (ARD)**, meaning each
 input dimension has its own fitted length scale:
@@ -1006,6 +1073,14 @@ observation as exact. **Noisy expected improvement (NEI)** instead averages EI
 over uncertainty in the earlier measurements. A **latent value** is the GP's
 inferred noise-free corrected NO at an input, rather than a noisy analyser
 observation.
+
+The analytic EI criterion follows the Efficient Global Optimization treatment
+of Jones, Schonlau and Welch [[R7](#ref-r7)]. Letham et al. derive noisy EI by
+integrating over posterior uncertainty in the latent values of noisy earlier
+observations in Sections 3.2–4 [[R9](#ref-r9)]. This implementation uses that
+posterior-integration idea for a sequential, unconstrained objective, with 128
+ordinary Monte Carlo draws and a finite feasible candidate pool. It does not
+reproduce Letham et al.'s constrained or quasi-Monte Carlo algorithm in full.
 
 This is a minimisation problem: lower corrected NO is better. NEI therefore
 balances **exploitation**, proposing a condition with a low posterior-mean NO,
@@ -1111,7 +1186,9 @@ $$
 where $\Phi$ is the standard-normal cumulative distribution function (CDF),
 the probability that a standard-normal variable is no greater than its
 argument, and $\varphi$ is the standard-normal probability density function
-(PDF). The `ndtr` call implements $\Phi$ and the exponential term implements
+(PDF). This closed-form expression is the minimisation form of Eq. 15 in Jones,
+Schonlau and Welch [[R7](#ref-r7)]. The `ndtr` call
+implements $\Phi$ and the exponential term implements
 $\varphi$ at [`bayesian.py:202`](../flow_controller/domain/bayesian.py#L202) and
 [`bayesian.py:212`](../flow_controller/domain/bayesian.py#L212). The noisy
 expected improvement is the Monte Carlo mean
@@ -1209,7 +1286,73 @@ The implementation has no automatic statistical stopping rule. The operator
 decides whether the expected improvement, uncertainty, repeats and experimental
 budget justify another trial.
 
-## 12. Verification map
+## 12. Literature and standards basis
+
+<a id="ref-r1"></a>**R1.** C. E. Baukal and P. B. Eleazer, “Quantifying NOx
+for Industrial Combustion Processes,” *Journal of the Air & Waste Management
+Association*, 48(1), 52–58, 1998.
+[doi:10.1080/10473289.1998.10463664](https://doi.org/10.1080/10473289.1998.10463664).
+
+<a id="ref-r2"></a>**R2.** M. Takriti, P. M. Wynn, D. M. O. Elias, S. E.
+Ward, S. Oakley and N. P. McNamara, “Mobile methane measurements: effects of
+instrument specifications on data interpretation, reproducibility, and
+isotopic precision,” *Atmospheric Environment*, 246, 118067, 2021.
+[doi:10.1016/j.atmosenv.2020.118067](https://doi.org/10.1016/j.atmosenv.2020.118067).
+
+<a id="ref-r3"></a>**R3.** A. Horsley, K. Macleod, R. Gupta, N. Goddard and
+N. Bell, “Enhanced Photoacoustic Gas Analyser Response Time and Impact on
+Accuracy at Fast Ventilation Rates during Multiple Breath Washout,” *PLOS ONE*,
+9(6), e98487, 2014.
+[doi:10.1371/journal.pone.0098487](https://doi.org/10.1371/journal.pone.0098487).
+
+<a id="ref-r4"></a>**R4.** I. M. Sobol', “On the distribution of points in a
+cube and the approximate evaluation of integrals,” *USSR Computational
+Mathematics and Mathematical Physics*, 7(4), 86–112, 1967.
+[doi:10.1016/0041-5553(67)90144-9](https://doi.org/10.1016/0041-5553(67)90144-9).
+
+<a id="ref-r5"></a>**R5.** A. B. Owen, “Scrambling Sobol' and
+Niederreiter–Xing Points,” *Journal of Complexity*, 14(4), 466–489, 1998.
+[doi:10.1006/jcom.1998.0487](https://doi.org/10.1006/jcom.1998.0487).
+
+<a id="ref-r6"></a>**R6.** J. Sacks, W. J. Welch, T. J. Mitchell and H. P.
+Wynn, “Design and Analysis of Computer Experiments,” *Statistical Science*,
+4(4), 409–423, 1989.
+[doi:10.1214/ss/1177012413](https://doi.org/10.1214/ss/1177012413).
+
+<a id="ref-r7"></a>**R7.** D. R. Jones, M. Schonlau and W. J. Welch,
+“Efficient Global Optimization of Expensive Black-Box Functions,” *Journal of
+Global Optimization*, 13, 455–492, 1998.
+[doi:10.1023/A:1008306431147](https://doi.org/10.1023/A:1008306431147).
+
+<a id="ref-r8"></a>**R8.** J. Snoek, H. Larochelle and R. P. Adams,
+“Practical Bayesian Optimization of Machine Learning Algorithms,” *Advances in
+Neural Information Processing Systems 25*, 2012.
+[Official paper](https://proceedings.neurips.cc/paper/2012/hash/05311655a15b75fab86956663e1819cd-Abstract.html).
+
+<a id="ref-r9"></a>**R9.** B. Letham, B. Karrer, G. Ottoni and E. Bakshy,
+“Constrained Bayesian Optimization with Noisy Experiments,” *Bayesian
+Analysis*, 14(2), 495–519, 2019.
+[doi:10.1214/18-BA1110](https://doi.org/10.1214/18-BA1110).
+
+<a id="ref-r10"></a>**R10.** C. K. I. Williams and C. E. Rasmussen,
+“Gaussian Processes for Regression,” *Advances in Neural Information Processing
+Systems 8*, 514–520, 1996.
+[Official paper](https://proceedings.neurips.cc/paper_files/paper/1995/hash/7cce53cf90577442771720a370c3c723-Abstract.html).
+
+<a id="ref-r11"></a>**R11.** M. S. Handcock and M. L. Stein, “A Bayesian
+Analysis of Kriging,” *Technometrics*, 35(4), 403–410, 1993.
+[doi:10.1080/00401706.1993.10485354](https://doi.org/10.1080/00401706.1993.10485354).
+
+<a id="ref-r12"></a>**R12.** ISO 8178-1:2020, *Reciprocating internal
+combustion engines — Exhaust emission measurement — Part 1: Test-bed
+measurement systems of gaseous and particulate emissions*, fourth edition,
+2020. [Official standard record](https://www.iso.org/standard/79330.html).
+
+These sources support the named general methods and reporting concepts. The
+code links throughout the manual remain the authority for the exact equations,
+thresholds and workflow implemented by this program.
+
+## 13. Verification map
 
 Numerical and persistence coverage is in
 [`tests/test_bayesian.py`](../tests/test_bayesian.py). It includes legacy-file
