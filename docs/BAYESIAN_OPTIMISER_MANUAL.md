@@ -452,6 +452,14 @@ first point, distance from the centre vector $(0.5,\ldots,0.5)$ is minimised at
 occupy their attempted location but are never assigned a fabricated emissions
 result and never enter the Gaussian-process fit.
 
+This space-filling rule is used while the number of completed tests is less
+than the configured initial-design size. During that period the program does
+not fit the Matérn GP or calculate NEI. The branch and returned method are
+implemented at [`bayesian.py:256`](../flow_controller/domain/bayesian.py#L256)
+to [`bayesian.py:262`](../flow_controller/domain/bayesian.py#L262). The initial
+tests therefore establish coverage of the search space before the optimiser
+has enough recordings to make model-based proposals.
+
 The configured pool size is rounded upward to the next power of two for Sobol
 generation. Once completed data exist, 128 extra candidates are sampled near
 the best observed point. A denser pool provides better numerical coverage but
@@ -518,6 +526,48 @@ $d$ initial scales to `Matern` at
 scale permits rapid variation along that coordinate; a long fitted scale
 indicates a smoother or weakly identified effect over the declared range.
 
+The Matérn part of the kernel is a covariance, or similarity, between two
+operating conditions. It does **not** directly state the expected difference
+between their corrected-NO values. A large Matérn covariance says that the
+underlying NO responses at the two normalized conditions are expected to be
+strongly related. A small covariance says that an observation at one condition
+provides less information about the other. Neither value by itself is a
+prediction of NO, an NO difference, or the next experiment.
+
+The GP combines the kernel relationships with **all** completed observations.
+For an unmeasured normalized condition $u_*$, its standardized posterior mean
+is
+
+$$
+\mu(u_*)=k_{*X}\boldsymbol{\beta},
+$$
+
+where $u_*$ is the candidate condition; $X$ is the matrix of normalized
+completed conditions; $k_{*X}$ is the covariance row between $u_*$ and every
+condition in $X$; $\boldsymbol{\beta}$ is the fitted vector of observation
+weights stored as `gp.alpha_` (the scikit-learn attribute name); and $\mu(u_*)$
+is the GP's posterior mean of the standardized corrected-NO response. This
+calculation is implemented at
+[`bayesian.py:188`](../flow_controller/domain/bayesian.py#L188) to
+[`bayesian.py:191`](../flow_controller/domain/bayesian.py#L191).
+
+The candidate's latent posterior variance is
+
+$$
+\sigma^2(u_*)=k(u_*,u_*)-v_*^T v_*,
+$$
+
+where $\sigma^2(u_*)$ is uncertainty about the underlying noise-free response;
+$k(u_*,u_*)$ is the fitted signal-kernel variance before conditioning on the
+data; $v_*$ is the triangular-solve vector produced from the training
+covariance; and the superscript $T$ denotes vector transpose. The triangular
+solve is at [`bayesian.py:190`](../flow_controller/domain/bayesian.py#L190), and the
+candidate variances are calculated at
+[`bayesian.py:195`](../flow_controller/domain/bayesian.py#L195). Thus the GP,
+rather than the Matérn covariance alone, produces the two quantities used by
+the acquisition calculation: predicted mean $\mu(u_*)$ and latent standard
+deviation $\sigma(u_*)=\sqrt{\sigma^2(u_*)}$.
+
 For a supplied corrected-NO SEM $s_i$ in ppm, the regressor receives a
 dimensionless per-observation variance
 
@@ -539,6 +589,23 @@ observation as exact. **Noisy expected improvement (NEI)** instead averages EI
 over uncertainty in the earlier measurements. A **latent value** is the GP's
 inferred noise-free corrected NO at an input, rather than a noisy analyser
 observation.
+
+This is a minimisation problem: lower corrected NO is better. NEI therefore
+balances **exploitation**, proposing a condition with a low posterior-mean NO,
+against **exploration**, proposing a condition whose uncertainty leaves a
+meaningful chance of a lower result. For example, suppose the GP reports:
+
+| Candidate | Posterior-mean corrected NO (ppm) | Latent standard deviation (ppm) |
+| --- | ---: | ---: |
+| A | 80 | 2 |
+| B | 74 | 4 |
+| C | 78 | 12 |
+
+Candidate B has the lowest predicted mean, while C has the greatest
+uncertainty. These two columns alone do not establish which candidate wins:
+the NEI calculation also integrates over the uncertain latent values at the
+baseline conditions. The detailed calculation below assigns the acquisition
+score.
 
 The latent posterior excludes the fitted WhiteKernel observation-noise term.
 Here a **posterior** is the GP distribution after conditioning on completed
@@ -638,7 +705,16 @@ $$
 
 The mean and non-negative clipping are implemented at
 [`bayesian.py:213`](../flow_controller/domain/bayesian.py#L213). The feasible
-candidate with the largest NEI is selected at
+candidate with the largest NEI is selected:
+
+$$
+u_{\mathrm{next}}=\arg\max_{u\in\mathcal F}NEI(u),
+$$
+
+where $u_{\mathrm{next}}$ is the next normalized operating condition;
+$\mathcal F$ is the finite set of feasible, untried candidates; $u$ is one
+candidate in that set; and $\arg\max$ means the candidate at which NEI is
+largest. This selection is implemented at
 [`bayesian.py:276`](../flow_controller/domain/bayesian.py#L276) and
 [`bayesian.py:277`](../flow_controller/domain/bayesian.py#L277). The displayed
 `predicted_no` is the latent posterior mean, `latent_sd` ($\sigma$ in the UI
@@ -646,6 +722,12 @@ description) is its latent standard deviation, and `expected_improvement` is
 NEI. All three are converted from the standardized model scale back to ppm at
 [`bayesian.py:278`](../flow_controller/domain/bayesian.py#L278) to
 [`bayesian.py:282`](../flow_controller/domain/bayesian.py#L282).
+
+Consequently, the program does not select the largest predicted NO, the
+largest Matérn-kernel value, the most distant condition, or necessarily the
+lowest posterior-mean NO. After initialization, it selects the feasible
+candidate with the largest NEI because that score represents the best current
+balance between possible lower NO and uncertainty.
 
 ## 8. Experiment records and export
 
