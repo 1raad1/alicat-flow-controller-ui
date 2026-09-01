@@ -244,6 +244,14 @@ For the algorithms, equations, file format and code map, see the
 6. Suggest the next test. Use the **History** tab to inspect results, repeat
    a completed point, or export CSV. Repeating a point creates a separate test.
 
+The **NO response time** tab can store two settled live conditions and run one
+explicitly confirmed A-to-B transition. It measures the combined burner, flow,
+sample-line, analyser and acquisition response, then applies the selected result
+as a pre-averaging delay for later live MEXA windows. It does not alter the
+campaign's averaging duration, and cancellation does not return the rig to A or
+zero it. See [NO response-time calibration](docs/BAYESIAN_OPTIMISER_MANUAL.md#5-no-response-time-calibration)
+for the procedure, detector criteria, timing definitions and saved provenance.
+
 The optimiser requires one NH3 line, one H2 line and one air line in stage 1,
 plus stage-2 air. Stage-2 fuel lines are required when a fixed or proposed fuel
 split is below 100%. A pilot controller may remain assigned at zero or be unassigned.

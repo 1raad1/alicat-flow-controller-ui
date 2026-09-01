@@ -1,13 +1,15 @@
-"""Qt orchestration for manual experiments. This module never sends setpoints."""
+"""Qt orchestration for Bayesian measurements and their analyser delay."""
 
 from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime
+import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from .analyser_response_controller import AnalyserResponseController
 from .optimisation import Experiment, MeasurementWindow, FLOW_ABS_TOL, FLOW_REL_TOL
 from ..domain.bayesian import finite, suggest
 from ..domain.roles import ROLE_MAP
@@ -38,17 +40,22 @@ class OptimiserController(QObject):
     progress = Signal(str)
     targets_ready = Signal(object)
 
-    def __init__(self, session, parent=None):
+    def __init__(self, session, parent=None, *, clock=time.monotonic):
         super().__init__(parent)
         self.session = session
         self.experiment = None
         self.worker = None
         self.capture = None
         self.mexa_capture = None
+        self.settle_wait = None
+        self._capture_delay = 0.0
+        self._response_run_id = None
+        self._clock = clock
         self.live_mode = False
         self.draft = {}
         self.expanded = False
-        self.last_message = "Create or open an experiment. No flow commands are sent by this panel."
+        self.last_message = "Bayesian suggestions never send commands; the response test requires confirmation."
+        self.response = AnalyserResponseController(session, self, self)
         session.samples_updated.connect(self._sample)
         session.mexa.sample_received.connect(self._mexa_sample)
         session.mexa.interrupted.connect(self._mexa_interrupted)
@@ -88,7 +95,8 @@ class OptimiserController(QObject):
         self.changed.emit()
 
     def _require_idle(self):
-        if self.busy or self.capture:
+        response = getattr(self, "response", None)
+        if self.busy or self.capture or self.settle_wait or (response and response.active):
             raise ValueError("Finish the calculation or measurement window first.")
 
     def _require_experiment(self):
@@ -217,14 +225,37 @@ class OptimiserController(QObject):
         self._require_idle()
         targets = self._pending_targets()
         if not pilot_off or not settled:
-            raise ValueError("Confirm pilot off and burner/analyser settled before starting.")
+            raise ValueError(
+                "Confirm pilot off and stable burner/flows. The analyser must already be settled "
+                "unless this campaign has a selected response-delay calibration.")
         if self.experiment.pending.get("window"):
             raise ValueError("This test already has a completed window. Save its result or mark it invalid.")
         stamp, flows = self._checked_readings(targets)
-        mexa_capture = LiveWindow(self.session.mexa.checked_sample()) if live else None
+        baseline = self.session.mexa.checked_sample() if live else None
+        delay = self.experiment.response_delay_seconds if live else 0.0
+        if delay > 0:
+            run = self.experiment.selected_response_run or {}
+            self.settle_wait = {
+                "started": self._clock(), "delay_s": delay,
+                "targets": dict(targets), "response_run_id": run.get("id"),
+            }
+            self._say(
+                f"MEXA receiver logging continues. Waiting {delay:g} s calibrated "
+                "response delay before the averaging window.")
+            self.changed.emit()
+            return
+        self._begin_window(stamp, flows, targets=targets, baseline=baseline)
+
+    def _begin_window(self, stamp, flows, *, targets, baseline=None, delay=0.0,
+                      response_run_id=None):
+        """Start averaging after any response delay has elapsed."""
+        live = baseline is not None
+        mexa_capture = LiveWindow(baseline) if live else None
         self.capture = MeasurementWindow(self.experiment.config, targets, self.session.assignments)
         self.capture.add(stamp, flows)
         self.mexa_capture = mexa_capture
+        self._capture_delay = float(delay)
+        self._response_run_id = response_run_id
         self._say("Capturing flows and new MEXA samples. Keep the pilot off and condition steady."
                   if live else "Capturing flows. Average raw dry NO and O2 over the same window.")
         self.changed.emit()
@@ -258,9 +289,15 @@ class OptimiserController(QObject):
         if self.mexa_capture:
             self.session.mexa.checked_sample()
             window["mexa"] = self.mexa_capture.finish(window, self.experiment.config.window_seconds)
+        if self._capture_delay:
+            window["pre_window_delay_s"] = self._capture_delay
+            window["response_run_id"] = self._response_run_id
+            window["total_observation_s"] = self._capture_delay + window["duration_s"]
         self.experiment.record_window(window)
         self.capture = None
         self.mexa_capture = None
+        self._capture_delay = 0.0
+        self._response_run_id = None
         self._say("Window saved with MEXA means. Review the result and confirm the reporting basis."
                   if window.get("mexa") else "Window saved. Enter its matching uncorrected dry NO and O2 averages.")
         self.changed.emit()
@@ -269,11 +306,14 @@ class OptimiserController(QObject):
     def cancel_window(self, reason="Window discarded. Re-settle before starting another window."):
         self.capture = None
         self.mexa_capture = None
+        self.settle_wait = None
+        self._capture_delay = 0.0
+        self._response_run_id = None
         self._say(reason)
         self.changed.emit()
 
     def _configuration_changed(self, *_args):
-        if self.capture:
+        if self.capture or self.settle_wait:
             self.cancel_window("Window discarded because the rig configuration or run state changed.")
 
     def _mexa_sample(self, sample):
@@ -284,10 +324,30 @@ class OptimiserController(QObject):
                 self.cancel_window(f"Window discarded: {exc}")
 
     def _mexa_interrupted(self, reason):
-        if self.mexa_capture:
+        if self.mexa_capture or self.settle_wait:
             self.cancel_window(f"Window discarded: {reason}")
 
     def _check_live_freshness(self):
+        if self.settle_wait:
+            try:
+                baseline = self.session.mexa.checked_sample()
+                stamp, flows = self._checked_readings(self.settle_wait["targets"])
+                elapsed = self._clock() - self.settle_wait["started"]
+                remaining = max(0.0, self.settle_wait["delay_s"] - elapsed)
+                if remaining > 0:
+                    self.progress.emit(
+                        f"Response delay: {remaining:.0f} s remaining before averaging; "
+                        "transient MEXA data remain in the receiver log.")
+                    return
+                wait = self.settle_wait
+                self.settle_wait = None
+                self._begin_window(
+                    stamp, flows, targets=wait["targets"], baseline=baseline,
+                    delay=wait["delay_s"],
+                    response_run_id=wait.get("response_run_id"))
+            except ValueError as exc:
+                self.cancel_window(f"Window discarded during response delay: {exc}")
+            return
         if self.mexa_capture:
             try:
                 self.session.mexa.checked_sample()
@@ -334,5 +394,7 @@ class OptimiserController(QObject):
                 return False
         self.capture = None
         self.mexa_capture = None
+        self.settle_wait = None
+        self.response.shutdown()
         self._freshness_timer.stop()
         return True

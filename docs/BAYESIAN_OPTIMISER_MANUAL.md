@@ -27,19 +27,19 @@ included in the Stage 1 and global live combustion balances in
 excludes pilot flow from its NH3/H2 search mixture: every assigned pilot line
 must read zero before a measurement window can start. That check is implemented
 by `_checked_readings()` in
-[`optimiser_controller.py:187`](../flow_controller/core/optimiser_controller.py#L187).
+[`optimiser_controller.py:195`](../flow_controller/core/optimiser_controller.py#L195).
 
 The separation is visible in the controller:
 
 - suggestion calculation runs in a background worker at
-  [`optimiser_controller.py:17`](../flow_controller/core/optimiser_controller.py#L17);
+  [`optimiser_controller.py:19`](../flow_controller/core/optimiser_controller.py#L19);
 - `ask()` requests and saves one proposal at
-  [`optimiser_controller.py:103`](../flow_controller/core/optimiser_controller.py#L103);
+  [`optimiser_controller.py:111`](../flow_controller/core/optimiser_controller.py#L111);
 - `prepare_targets()` fills fields without sending commands at
-  [`optimiser_controller.py:171`](../flow_controller/core/optimiser_controller.py#L171);
+  [`optimiser_controller.py:179`](../flow_controller/core/optimiser_controller.py#L179);
 - capture and completion require separate operator actions at
-  [`optimiser_controller.py:216`](../flow_controller/core/optimiser_controller.py#L216)
-  and [`optimiser_controller.py:298`](../flow_controller/core/optimiser_controller.py#L298).
+  [`optimiser_controller.py:224`](../flow_controller/core/optimiser_controller.py#L224)
+  and [`optimiser_controller.py:358`](../flow_controller/core/optimiser_controller.py#L358).
 
 ## 2. Search variables
 
@@ -330,19 +330,19 @@ $$
 $$
 
 The comparison is implemented at
-[`optimisation.py:335`](../flow_controller/core/optimisation.py#L335) to
-[`optimisation.py:338`](../flow_controller/core/optimisation.py#L338). The
+[`optimisation.py:636`](../flow_controller/core/optimisation.py#L636) to
+[`optimisation.py:639`](../flow_controller/core/optimisation.py#L639). The
 window requires at least three fresh flow passes and the configured duration;
 those checks are at
-[`optimisation.py:343`](../flow_controller/core/optimisation.py#L343) to
-[`optimisation.py:346`](../flow_controller/core/optimisation.py#L346) and
-[`optimisation.py:262`](../flow_controller/core/optimisation.py#L262) to
-[`optimisation.py:264`](../flow_controller/core/optimisation.py#L264).
+[`optimisation.py:644`](../flow_controller/core/optimisation.py#L644) to
+[`optimisation.py:647`](../flow_controller/core/optimisation.py#L647) and
+[`optimisation.py:553`](../flow_controller/core/optimisation.py#L553) to
+[`optimisation.py:555`](../flow_controller/core/optimisation.py#L555).
 
 The arithmetic mean of each flow is converted back into observed H2 fraction,
 stage-1 phi, overall phi and thermal power at
-[`optimisation.py:226`](../flow_controller/core/optimisation.py#L226) to
-[`optimisation.py:236`](../flow_controller/core/optimisation.py#L236). Here the
+[`optimisation.py:517`](../flow_controller/core/optimisation.py#L517) to
+[`optimisation.py:527`](../flow_controller/core/optimisation.py#L527). Here the
 subscript `obs` means reconstructed from the averaged measured flows. In
 particular,
 
@@ -351,9 +351,9 @@ x_{H2,obs}=\frac{\dot V_{H2,1}+\dot V_{H2,2}}
 {\dot V_{NH3,1}+\dot V_{NH3,2}+\dot V_{H2,1}+\dot V_{H2,2}}.
 $$
 
-Implemented at [`optimisation.py:229`](../flow_controller/core/optimisation.py#L229),
-[`optimisation.py:230`](../flow_controller/core/optimisation.py#L230), and
-[`optimisation.py:233`](../flow_controller/core/optimisation.py#L233). Observed
+Implemented at [`optimisation.py:520`](../flow_controller/core/optimisation.py#L520),
+[`optimisation.py:521`](../flow_controller/core/optimisation.py#L521), and
+[`optimisation.py:524`](../flow_controller/core/optimisation.py#L524). Observed
 Stage 1 fuel split is
 
 $$
@@ -361,8 +361,8 @@ s_{obs}=\frac{\dot V_{NH3,1}+\dot V_{H2,1}}
 {\dot V_{NH3,1}+\dot V_{H2,1}+\dot V_{NH3,2}+\dot V_{H2,2}},
 $$
 
-implemented at [`optimisation.py:239`](../flow_controller/core/optimisation.py#L239)
-to [`optimisation.py:246`](../flow_controller/core/optimisation.py#L246). The model
+implemented at [`optimisation.py:530`](../flow_controller/core/optimisation.py#L530)
+to [`optimisation.py:537`](../flow_controller/core/optimisation.py#L537). The model
 uses these observed values rather than assuming that requested values were
 reached exactly. `SearchConfig.observed_vector()` assembles the model input at
 [`bayesian.py:138`](../flow_controller/domain/bayesian.py#L138).
@@ -400,10 +400,427 @@ combustion efficiency or emissions per unit energy.
 
 Window validation recomputes the observed condition from saved mean flows and
 checks all selected-variable bounds at
-[`optimisation.py:249`](../flow_controller/core/optimisation.py#L249). This makes
+[`optimisation.py:569`](../flow_controller/core/optimisation.py#L569) to
+[`optimisation.py:580`](../flow_controller/core/optimisation.py#L580). This makes
 the saved flow record the source of the model coordinates.
 
-## 5. Initial space-filling design
+## 5. NO response-time calibration
+
+### What the test measures
+
+The **NO response time** tab measures the response of the complete experimental
+measurement path to a commanded combustion-condition change. That path includes
+the flow-controller transition, burner response, transport through the sample
+line, sample conditioning, MEXA processing and network acquisition. It is not an
+intrinsic analyser specification. To measure analyser-only response, apply a
+known calibration-gas step directly at the analyser inlet without changing the
+burner. This distinction is stated by the detector itself at
+[`analyser_response.py:1`](../flow_controller/domain/analyser_response.py#L1) to
+[`analyser_response.py:5`](../flow_controller/domain/analyser_response.py#L5)
+and in the response-test interface at
+[`qt_optimiser.py:283`](../flow_controller/ui/qt_optimiser.py#L283) to
+[`qt_optimiser.py:291`](../flow_controller/ui/qt_optimiser.py#L291).
+
+The streamed channel used by this test is **NO**, meaning nitric oxide in ppm.
+It is not total NOx. The controller passes `packet["no_ppm"]` to the detector at
+[`analyser_response_controller.py:267`](../flow_controller/core/analyser_response_controller.py#L267)
+to [`analyser_response_controller.py:280`](../flow_controller/core/analyser_response_controller.py#L280),
+and the saved record identifies the source as the validated live MEXA NO stream
+at [`analyser_response_controller.py:344`](../flow_controller/core/analyser_response_controller.py#L344)
+to [`analyser_response_controller.py:349`](../flow_controller/core/analyser_response_controller.py#L349).
+
+### Operating workflow
+
+Create or open a campaign, connect and monitor the controllers, and enable the
+received MEXA audit log. Then use the **NO response time** tab:
+
+1. Establish a settled live condition A and select **Store live as A**.
+2. Establish a different settled live condition B and select **Store live as B**.
+3. Return the rig to condition A and allow every flow to settle.
+4. Select **Start A → B response test**. Read the displayed transition, including
+   each direct-step or ramp policy, and confirm it explicitly.
+5. Leave the condition undisturbed while the program records the baseline,
+   commands B, confirms the B flows and detects the final NO plateau.
+
+The buttons and result panel are created at
+[`qt_optimiser.py:295`](../flow_controller/ui/qt_optimiser.py#L295) to
+[`qt_optimiser.py:333`](../flow_controller/ui/qt_optimiser.py#L333), and the
+confirmation dialog is at
+[`qt_optimiser.py:335`](../flow_controller/ui/qt_optimiser.py#L335) to
+[`qt_optimiser.py:350`](../flow_controller/ui/qt_optimiser.py#L350).
+
+A stored condition is a snapshot of settled target flows, measured flows,
+controller assignments, capture time and, when available, the corresponding
+flow-calculation request. Snapshot capture and tracking checks are implemented
+at [`analyser_response_controller.py:106`](../flow_controller/core/analyser_response_controller.py#L106)
+to [`analyser_response_controller.py:142`](../flow_controller/core/analyser_response_controller.py#L142).
+Storing either endpoint clears selection of an earlier calibration because that
+calibration belongs to the old A-to-B transition; persistence is implemented at
+[`optimisation.py:148`](../flow_controller/core/optimisation.py#L148) to
+[`optimisation.py:156`](../flow_controller/core/optimisation.py#L156).
+
+Start is refused unless both conditions use the same assignments, at least one
+target differs, the current rig has returned to A, live flow data are fresh and
+the operator has confirmed the displayed transition. These checks are at
+[`analyser_response_controller.py:147`](../flow_controller/core/analyser_response_controller.py#L147)
+to [`analyser_response_controller.py:181`](../flow_controller/core/analyser_response_controller.py#L181)
+and [`analyser_response_controller.py:218`](../flow_controller/core/analyser_response_controller.py#L218)
+to [`analyser_response_controller.py:241`](../flow_controller/core/analyser_response_controller.py#L241).
+
+Condition B is not sent until the detector has accepted a stable baseline
+spanning at least 15 s. The command then uses the existing
+`FlowSession.set_role_setpoint()` path at
+[`analyser_response_controller.py:243`](../flow_controller/core/analyser_response_controller.py#L243)
+to [`analyser_response_controller.py:264`](../flow_controller/core/analyser_response_controller.py#L264).
+That path retains the controller assignment, command ceiling, zero lock and
+configured ramp behaviour at
+[`session.py:1392`](../flow_controller/core/session.py#L1392) to
+[`session.py:1429`](../flow_controller/core/session.py#L1429). The final queue
+also rechecks the ceiling and blocks nonzero commands while an operator or
+watchdog zero lock is active at
+[`session.py:1335`](../flow_controller/core/session.py#L1335) to
+[`session.py:1360`](../flow_controller/core/session.py#L1360).
+
+This is only a sharp step when the affected line is permitted to move directly.
+If a ramp rate is configured, the software applies that ramp; if ramping is
+declared off for a ramp-controlled role, the confirmation identifies a direct
+step. The displayed policy is assembled at
+[`analyser_response_controller.py:160`](../flow_controller/core/analyser_response_controller.py#L160)
+to [`analyser_response_controller.py:181`](../flow_controller/core/analyser_response_controller.py#L181),
+and configured ramps are executed at
+[`session.py:2029`](../flow_controller/core/session.py#L2029) to
+[`session.py:2062`](../flow_controller/core/session.py#L2062). A ramped test
+therefore includes the commanded ramp duration and is not equivalent to an
+instantaneous-input response test.
+
+During the commanded transition, the program also enforces the frozen A-to-B
+**transition envelope**. For role $i$, let $q_{i,A}$ and $q_{i,B}$ be the stored
+A and B targets in SLPM and define
+
+$$
+\epsilon_i=\max\left(0.05\ \mathrm{SLPM},
+0.03\max(|q_{i,A}|,|q_{i,B}|)\right).
+$$
+
+Here $\epsilon_i$ is the allowed telemetry tolerance for the complete move.
+Both measured flow $q_i$ and reported setpoint $SP_i$ must satisfy
+
+$$
+\min(q_{i,A},q_{i,B})-\epsilon_i
+\leq q_i,SP_i\leq
+\max(q_{i,A},q_{i,B})+\epsilon_i.
+$$
+
+The frozen-envelope calculation and comparison are implemented at
+[`analyser_response_controller.py:200`](../flow_controller/core/analyser_response_controller.py#L200)
+to [`analyser_response_controller.py:216`](../flow_controller/core/analyser_response_controller.py#L216).
+Each fresh flow update applies that check at
+[`analyser_response_controller.py:300`](../flow_controller/core/analyser_response_controller.py#L300)
+to [`analyser_response_controller.py:309`](../flow_controller/core/analyser_response_controller.py#L309).
+If any affected or unchanged role leaves the confirmed range, the response run
+is cancelled rather than treating the excursion as part of the approved test.
+
+### Baseline calculations and departure detection
+
+For a window containing $n$ accepted NO samples, let $t_i$ be acquisition time
+in seconds and $y_i$ be NO in ppm for sample $i$. Let $\bar t$ and $\bar y$ be
+their arithmetic means. The detector calculates the baseline mean, sample
+standard deviation and least-squares slope:
+
+$$
+\bar y=\frac{1}{n}\sum_{i=1}^{n}y_i,
+$$
+
+$$
+s=\sqrt{\frac{1}{n-1}\sum_{i=1}^{n}(y_i-\bar y)^2},
+$$
+
+$$
+m=\frac{\sum_{i=1}^{n}(t_i-\bar t)(y_i-\bar y)}
+{\sum_{i=1}^{n}(t_i-\bar t)^2}.
+$$
+
+Here $n$ is the sample count, $s$ is sample standard deviation in ppm and $m$
+is the fitted NO drift in ppm s$^{-1}$. The mean, sample-SD and slope statements
+are implemented at
+[`analyser_response.py:160`](../flow_controller/domain/analyser_response.py#L160)
+to [`analyser_response.py:170`](../flow_controller/domain/analyser_response.py#L170).
+
+The rolling baseline may retain up to 30 s of readings, but it cannot pass until
+it contains at least six samples spanning 15 s. It is stable when
+
+$$
+|m|T_A\leq
+\max\left(1\ \mathrm{ppm},\ 0.02\max(|\bar y_A|,10\ \mathrm{ppm})\right),
+$$
+
+where $T_A$ is baseline span in seconds and $\bar y_A$ is baseline mean NO in
+ppm. The fixed criteria are declared at
+[`analyser_response.py:19`](../flow_controller/domain/analyser_response.py#L19)
+to [`analyser_response.py:28`](../flow_controller/domain/analyser_response.py#L28),
+and the rolling-window and drift checks are at
+[`analyser_response.py:319`](../flow_controller/domain/analyser_response.py#L319)
+to [`analyser_response.py:334`](../flow_controller/domain/analyser_response.py#L334).
+
+After commanding B, a sample departs from baseline when its difference from
+$\bar y_A$ reaches the signed threshold
+
+$$
+D_A=\max\left(2\ \mathrm{ppm},\ 4s_A,\;
+0.02\max(|\bar y_A|,10\ \mathrm{ppm})\right),
+$$
+
+where $D_A$ is the departure threshold in ppm and $s_A$ is the baseline sample
+SD in ppm. The threshold is implemented at
+[`analyser_response.py:225`](../flow_controller/domain/analyser_response.py#L225)
+to [`analyser_response.py:234`](../flow_controller/domain/analyser_response.py#L234).
+The detector requires three consecutive samples beyond $+D_A$ or three beyond
+$-D_A$. It records the first sample of that sustained run as the detected-change
+time. A reversal or a return inside the threshold resets the streak. This logic
+is at [`analyser_response.py:336`](../flow_controller/domain/analyser_response.py#L336)
+to [`analyser_response.py:357`](../flow_controller/domain/analyser_response.py#L357).
+
+### Final plateau and crossing times
+
+Let $\bar y_B$, $s_B$, $m_B$ and $T_B$ be the mean, sample SD, slope and time
+span of the final trailing window. The window must contain at least six samples
+and span the full 20 s. Its **signed amplitude** is
+
+$$
+\Delta=\bar y_B-\bar y_A,
+$$
+
+where positive $\Delta$ is a rising response and negative $\Delta$ is a falling
+response. The amplitude must exceed $D_A$ and have the same sign as the sustained
+departure. The final drift and SD bands are
+
+$$
+B_m=\max(1.5\ \mathrm{ppm},0.05|\Delta|),\qquad
+B_s=\max(1\ \mathrm{ppm},0.05|\Delta|).
+$$
+
+Here $B_m$ is the maximum allowed change attributable to final-window slope and
+$B_s$ is the maximum allowed final-window sample SD. The plateau passes only if
+
+$$
+|m_B|T_B\leq B_m\qquad\text{and}\qquad s_B\leq B_s.
+$$
+
+The trailing-window, amplitude and acceptance statements are implemented at
+[`analyser_response.py:361`](../flow_controller/domain/analyser_response.py#L361)
+to [`analyser_response.py:385`](../flow_controller/domain/analyser_response.py#L385).
+The constants are at
+[`analyser_response.py:29`](../flow_controller/domain/analyser_response.py#L29)
+to [`analyser_response.py:34`](../flow_controller/domain/analyser_response.py#L34).
+
+For $p\in\{0.1,0.5,0.9\}$, the crossing level is
+
+$$
+y_p=\bar y_A+p\Delta.
+$$
+
+The reported $t_{10}$, $t_{50}$ and $t_{90}$ are command-to-crossing times for
+the first three-sample sustained crossings of $y_{0.1}$, $y_{0.5}$ and
+$y_{0.9}$. The signed comparison works for rising and falling responses. The
+10-to-90% rise time is
+
+$$
+t_{10\text{-}90}=t_{90}-t_{10}.
+$$
+
+Crossing detection is implemented at
+[`analyser_response.py:432`](../flow_controller/domain/analyser_response.py#L432)
+to [`analyser_response.py:440`](../flow_controller/domain/analyser_response.py#L440),
+and elapsed and rise-time calculation is at
+[`analyser_response.py:393`](../flow_controller/domain/analyser_response.py#L393)
+to [`analyser_response.py:401`](../flow_controller/domain/analyser_response.py#L401).
+Crossing times are quantised by the MEXA sampling interval.
+
+The **stability onset**, `stable_window_start`, is the first sample of the
+accepted final 20 s window. It is not the time at which the software can first
+confirm stability. Confirmation becomes available only at `stable_window_end`,
+after the complete window has elapsed and passed its tests. Both timestamps and
+the command-to-stability value are stored at
+[`analyser_response.py:415`](../flow_controller/domain/analyser_response.py#L415)
+to [`analyser_response.py:424`](../flow_controller/domain/analyser_response.py#L424).
+
+Final stability is not considered until condition B's measured flow and
+setpoint for every stored role remain within
+
+$$
+\max(0.05\ \mathrm{SLPM},0.03|q_{i,B}|)
+$$
+
+for three seconds, where $q_{i,B}$ is role $i$'s stored B target. The tolerance
+comparison is at
+[`analyser_response_controller.py:183`](../flow_controller/core/analyser_response_controller.py#L183)
+to [`analyser_response_controller.py:198`](../flow_controller/core/analyser_response_controller.py#L198),
+and the three-second hold gate is at
+[`analyser_response_controller.py:314`](../flow_controller/core/analyser_response_controller.py#L314)
+to [`analyser_response_controller.py:324`](../flow_controller/core/analyser_response_controller.py#L324).
+The detector receives permission to accept a plateau only after this gate at
+[`analyser_response_controller.py:277`](../flow_controller/core/analyser_response_controller.py#L277)
+to [`analyser_response_controller.py:280`](../flow_controller/core/analyser_response_controller.py#L280).
+
+### Timing meanings and recommended delay
+
+The saved timings have different reference points:
+
+- **Detection delay**, `command_to_change_s`, runs from the B command time to
+  the first sample of the sustained departure.
+- **Command-to-stable time**, `command_to_stable_s`, runs from the B command to
+  `stable_window_start`.
+- **Flow-to-stable time**, `flow_to_stable_s`, runs from the start of the
+  accepted three-second settled-flow hold to `stable_window_start`, with
+  negative values clipped to zero.
+- **Confirmation time** occurs at `stable_window_end`. It is later than stability
+  onset by the accepted final-window span and is not used as the recommended
+  pre-averaging delay.
+
+These result fields are assigned at
+[`analyser_response.py:415`](../flow_controller/domain/analyser_response.py#L415)
+to [`analyser_response.py:424`](../flow_controller/domain/analyser_response.py#L424),
+while the flow-relative timing is added at
+[`analyser_response.py:118`](../flow_controller/domain/analyser_response.py#L118)
+to [`analyser_response.py:145`](../flow_controller/domain/analyser_response.py#L145).
+
+Let $t_s$ be `stable_window_start`, $t_f$ be `flow_reached_at`, and $\delta t$
+be the median interval between accepted MEXA samples, all in seconds. Let
+$\lceil z\rceil_5=5\lceil z/5\rceil$ mean round $z$ upward to the next multiple
+of 5 s. The selected delay is
+
+$$
+t_{delay}=\min\left(3600,\max\left(5,
+\left\lceil1.25\max\bigl(\max(0,t_s-t_f),\delta t\bigr)\right\rceil_5
+\right)\right).
+$$
+
+Here $t_{delay}$ is the recommended pre-averaging delay; 1.25 is a margin
+factor; $\max(0,t_s-t_f)$ is flow-to-stable time; and $\delta t$ prevents a
+recommendation shorter than the measurement's time resolution before the
+margin is applied. The raw value is rounded upward in 5 s increments and bounded
+to 5 through 3600 s. The exact calculation is implemented at
+[`analyser_response.py:130`](../flow_controller/domain/analyser_response.py#L130)
+to [`analyser_response.py:145`](../flow_controller/domain/analyser_response.py#L145),
+using the criteria at
+[`analyser_response.py:38`](../flow_controller/domain/analyser_response.py#L38)
+to [`analyser_response.py:41`](../flow_controller/domain/analyser_response.py#L41).
+
+### Use in future optimiser windows
+
+A successful run is selected for that campaign. For a future **live** MEXA
+window, total observation time is
+
+$$
+t_{total}=t_{pre-delay}+t_{averaging},
+$$
+
+where $t_{pre-delay}$ is the selected response calibration's recommended delay
+and $t_{averaging}$ is the campaign's configured averaging-window duration. The
+averaging duration is not lengthened or replaced. These properties are calculated
+at [`optimisation.py:199`](../flow_controller/core/optimisation.py#L199) to
+[`optimisation.py:213`](../flow_controller/core/optimisation.py#L213).
+
+When a live window starts, the controller waits through $t_{pre-delay}$ before
+constructing `LiveWindow` and `MeasurementWindow`. It rechecks the MEXA link and
+flow tracking throughout the wait, then starts the unchanged averaging window.
+This sequence is implemented at
+[`optimiser_controller.py:224`](../flow_controller/core/optimiser_controller.py#L224)
+to [`optimiser_controller.py:260`](../flow_controller/core/optimiser_controller.py#L260)
+and [`optimiser_controller.py:330`](../flow_controller/core/optimiser_controller.py#L330)
+to [`optimiser_controller.py:350`](../flow_controller/core/optimiser_controller.py#L350).
+
+Transient samples received during the delay remain in the receiver's JSONL and
+CSV audit logs, whose write path is at
+[`records.py:123`](../flow_controller/mexa/records.py#L123) to
+[`records.py:151`](../flow_controller/mexa/records.py#L151). They are excluded
+from the optimiser NO/O2 mean because `LiveWindow` is created only after the
+delay. Its accepted samples and arithmetic channel means are implemented at
+[`records.py:232`](../flow_controller/mexa/records.py#L232) to
+[`records.py:290`](../flow_controller/mexa/records.py#L290). Manual-input windows
+do not use the automatic delay because `start_window()` assigns zero delay unless
+live capture is selected at
+[`optimiser_controller.py:224`](../flow_controller/core/optimiser_controller.py#L224)
+to [`optimiser_controller.py:247`](../flow_controller/core/optimiser_controller.py#L247).
+
+The campaign JSON retains conditions A and B, all retained response runs, the
+selected-run ID, criteria, timings, baseline/final statistics, source ID,
+receiver-log provenance and accepted raw NO samples. Record construction and
+persistence are at
+[`analyser_response_controller.py:328`](../flow_controller/core/analyser_response_controller.py#L328)
+to [`analyser_response_controller.py:366`](../flow_controller/core/analyser_response_controller.py#L366)
+and [`optimisation.py:163`](../flow_controller/core/optimisation.py#L163) to
+[`optimisation.py:204`](../flow_controller/core/optimisation.py#L204). Each live
+trial window also stores `pre_window_delay_s`, `response_run_id` and
+`total_observation_s` at
+[`optimiser_controller.py:284`](../flow_controller/core/optimiser_controller.py#L284)
+to [`optimiser_controller.py:300`](../flow_controller/core/optimiser_controller.py#L300).
+CSV export includes those fields plus the MEXA source, sequence range, sample
+count, channel SDs and receiver audit-log path at
+[`optimisation.py:270`](../flow_controller/core/optimisation.py#L270) to
+[`optimisation.py:319`](../flow_controller/core/optimisation.py#L319).
+
+### Rejection, timeout and cancellation
+
+Every accepted response sample must retain the same non-empty source ID, advance
+its sequence by exactly one, have a strictly increasing timestamp with no gap
+over 5 s, and contain finite NO from 0 to 5000 ppm. A run is limited to 4000
+samples. These detector checks are at
+[`analyser_response.py:290`](../flow_controller/domain/analyser_response.py#L290)
+to [`analyser_response.py:312`](../flow_controller/domain/analyser_response.py#L312),
+with limits declared at
+[`analyser_response.py:35`](../flow_controller/domain/analyser_response.py#L35)
+to [`analyser_response.py:37`](../flow_controller/domain/analyser_response.py#L37).
+The controller additionally requires a valid, non-simulated, validated, dry,
+uncorrected live reading and the same receiver log. The MEXA validity and basis
+checks are at [`records.py:179`](../flow_controller/mexa/records.py#L179) to
+[`records.py:199`](../flow_controller/mexa/records.py#L199), and the response
+controller applies them at
+[`analyser_response_controller.py:267`](../flow_controller/core/analyser_response_controller.py#L267)
+to [`analyser_response_controller.py:298`](../flow_controller/core/analyser_response_controller.py#L298).
+
+The baseline phase is limited to 120 s. This is the maximum time allowed to
+obtain the stable 15 s baseline; it is not a measured response time. The limit
+is declared at
+[`analyser_response_controller.py:19`](../flow_controller/core/analyser_response_controller.py#L19)
+and [`analyser_response_controller.py:20`](../flow_controller/core/analyser_response_controller.py#L20),
+started with the baseline at
+[`analyser_response_controller.py:218`](../flow_controller/core/analyser_response_controller.py#L218)
+to [`analyser_response_controller.py:241`](../flow_controller/core/analyser_response_controller.py#L241),
+and enforced at
+[`analyser_response_controller.py:380`](../flow_controller/core/analyser_response_controller.py#L380)
+to [`analyser_response_controller.py:393`](../flow_controller/core/analyser_response_controller.py#L393).
+
+After B is commanded, the response phase has its own 900 s timeout. It is
+declared at
+[`analyser_response.py:35`](../flow_controller/domain/analyser_response.py#L35)
+to [`analyser_response.py:37`](../flow_controller/domain/analyser_response.py#L37)
+and enforced at
+[`analyser_response.py:242`](../flow_controller/domain/analyser_response.py#L242)
+to [`analyser_response.py:249`](../flow_controller/domain/analyser_response.py#L249).
+Loss of valid MEXA data, fresh flow telemetry or flow tracking also discards the
+run. Assignment, mode, connection, monitoring, communication, sequence, flow
+ceiling, ramp-policy or zero-operation changes cancel it through the signal
+guards at
+[`analyser_response_controller.py:51`](../flow_controller/core/analyser_response_controller.py#L51)
+to [`analyser_response_controller.py:60`](../flow_controller/core/analyser_response_controller.py#L60)
+and [`analyser_response_controller.py:380`](../flow_controller/core/analyser_response_controller.py#L380)
+to [`analyser_response_controller.py:401`](../flow_controller/core/analyser_response_controller.py#L401).
+
+Cancellation stops and discards the measurement state. It deliberately sends no
+automatic return-to-A command and does not zero the rig. This avoids introducing
+an unreviewed recovery transition; it also means the operator remains responsible
+for the physical condition after a partial or completed A-to-B move. The warning
+is explicit in the start dialog at
+[`qt_optimiser.py:341`](../flow_controller/ui/qt_optimiser.py#L341) to
+[`qt_optimiser.py:350`](../flow_controller/ui/qt_optimiser.py#L350), and cancel
+behaviour is implemented at
+[`analyser_response_controller.py:403`](../flow_controller/core/analyser_response_controller.py#L403)
+to [`analyser_response_controller.py:416`](../flow_controller/core/analyser_response_controller.py#L416).
+The ordinary ramp, manual setpoint, zero and emergency controls remain available
+for the established operator recovery procedure.
+
+## 6. Initial space-filling design
 
 With no previous recordings, `suggest()` creates a scrambled **Sobol sequence**:
 a deterministic low-discrepancy sequence designed to cover a multi-dimensional
@@ -465,7 +882,7 @@ generation. Once completed data exist, 128 extra candidates are sampled near
 the best observed point. A denser pool provides better numerical coverage but
 does not add experimental information.
 
-## 6. Gaussian-process surrogate
+## 7. Gaussian-process surrogate
 
 A **Gaussian process (GP) surrogate** is a probability model over possible
 response functions. It supplies a predicted corrected NO and uncertainty at
@@ -581,7 +998,7 @@ then squared and given the $10^{-8}$ numerical floor at
 [`bayesian.py:271`](../flow_controller/domain/bayesian.py#L271). The separate
 `WhiteKernel` fits residual noise not supplied by the per-test SEM values.
 
-## 7. Noisy expected improvement
+## 8. Noisy expected improvement
 
 **Expected improvement (EI)** scores a candidate by the expected amount that
 its objective will beat the current best value. Ordinary EI treats the best
@@ -729,14 +1146,14 @@ lowest posterior-mean NO. After initialization, it selects the feasible
 candidate with the largest NEI because that score represents the best current
 balance between possible lower NO and uncertainty.
 
-## 8. Experiment records and export
+## 9. Experiment records and export
 
 An experiment is stored as `.fcbo.json`. New campaigns use schema version 2;
 the loader also accepts legacy schema-1 campaigns. The file contains immutable campaign
 configuration, ordered trials, requested coordinates, measurement-window mean
 flows, reconstructed observed coordinates, raw analyser means, corrected NO,
 uncertainty metadata and provenance. `Experiment` loads and validates the
-record at [`optimisation.py:50`](../flow_controller/core/optimisation.py#L50).
+record at [`optimisation.py:55`](../flow_controller/core/optimisation.py#L55).
 
 Changes are written to a temporary file, flushed and atomically replaced, so a
 failed write retains the previous complete snapshot. Only one trial may be
@@ -744,12 +1161,12 @@ pending. A completed trial must have a valid saved window and internally
 consistent NO correction.
 
 CSV export starts at
-[`optimisation.py:178`](../flow_controller/core/optimisation.py#L178). It writes
+[`optimisation.py:270`](../flow_controller/core/optimisation.py#L270). It writes
 requested and observed power and split values separately. Operator notes that
 begin like spreadsheet formulas are prefixed to prevent formula execution when
 the CSV is opened.
 
-## 9. Choosing the dimensionality
+## 10. Choosing the dimensionality
 
 Adding a variable expands the region the optimiser must cover. Four nominal
 levels correspond to 64 combinations in three dimensions, 256 in four and
@@ -774,7 +1191,7 @@ the initial design and candidate pool when broad bounds, interactions or short
 length scales make the response harder to resolve. Reserve experiments for
 reference-condition repeats and confirmation of the apparent optimum.
 
-## 10. Interpretation and stopping
+## 11. Interpretation and stopping
 
 The history's lowest corrected NO is the lowest observation, not a certified
 global minimum. Before accepting a result:
@@ -792,7 +1209,7 @@ The implementation has no automatic statistical stopping rule. The operator
 decides whether the expected improvement, uncertainty, repeats and experimental
 budget justify another trial.
 
-## 11. Verification map
+## 12. Verification map
 
 Numerical and persistence coverage is in
 [`tests/test_bayesian.py`](../tests/test_bayesian.py). It includes legacy-file

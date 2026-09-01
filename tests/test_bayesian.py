@@ -155,6 +155,36 @@ class ExperimentTests(unittest.TestCase):
         self.experiment = Experiment.create(self.path, self.config)
         self.point = [.3, 1.2, .7]
 
+    def response_condition(self, offset=0):
+        return {
+            "target_flows": {"nh3_rich": 2.0 + offset, "rich_air": 10.0 + offset},
+            "measured_flows": {"nh3_rich": 2.01 + offset, "rich_air": 10.02 + offset},
+            "assignments": {"nh3_rich": "A", "rich_air": "B"},
+            "captured_at": "2026-08-27T12:00:00+00:00",
+            "request": {"point": [.3, 1.2, .7], "operator": "test"},
+        }
+
+    def response_run(self, *, successful=True, delay=12.5):
+        samples = [
+            {"timestamp": 100.0, "elapsed_s": -1.0, "no_ppm": 100.0,
+             "seq": 1, "phase": "baseline", "flow_stable": True},
+            {"timestamp": 101.0, "elapsed_s": 0.0, "no_ppm": 99.0,
+             "seq": 2, "phase": "response", "flow_stable": False},
+            {"timestamp": 102.0, "elapsed_s": 1.0, "no_ppm": 80.0,
+             "seq": 3, "phase": "response", "flow_stable": True},
+        ]
+        return {"successful": successful, "source_id": "mexa-source",
+                "recommended_delay_s": delay, "command_to_change_s": .5,
+                "command_to_stable_s": 10.0, "flow_to_stable_s": 2.0,
+                "t10_s": .6, "t50_s": 2.0, "t90_s": 8.0,
+                "rise_10_90_s": 7.4, "baseline_no_ppm": 100.0,
+                "final_no_ppm": 80.0, "criteria": {"band_ppm": 2.0},
+                "caveat": "Synthetic fixture", "raw_samples": samples}
+
+    def store_response_conditions(self):
+        self.experiment.set_response_condition("A", self.response_condition())
+        self.experiment.set_response_condition("B", self.response_condition(1))
+
     def test_round_trip_pending_window_and_completed_result(self):
         trial = self.experiment.add_trial({"point": self.point, "method": "test"})
         self.assertEqual(Experiment.load(self.path).pending["id"], trial["id"])
@@ -165,6 +195,116 @@ class ExperimentTests(unittest.TestCase):
         self.assertIsNone(result.pending)
         self.assertEqual(result.trials[0]["result"]["no_ppm"], 100)
         self.assertAlmostEqual(result.trials[0]["window"]["observed_point"][0], .3)
+
+    def test_new_campaign_has_empty_analyser_response_and_legacy_files_load(self):
+        self.assertEqual(self.experiment.data["analyser_response"],
+                         {"conditions": {"A": None, "B": None},
+                          "runs": [], "selected_run_id": None})
+        self.assertEqual(self.experiment.response_delay_seconds, 0)
+        self.assertEqual(self.experiment.total_live_logging_seconds,
+                         self.config.window_seconds)
+        data = deepcopy(self.experiment.data)
+        del data["analyser_response"]
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        legacy = Experiment.load(self.path)
+        self.assertIsNone(legacy.response_condition("A"))
+        self.assertIsNone(legacy.selected_response_run)
+        self.assertEqual(legacy.response_delay_seconds, 0)
+
+    def test_response_result_round_trip_delay_and_condition_invalidation(self):
+        self.store_response_conditions()
+        result = self.response_run(delay=5)
+        result["t10_s"] = None
+        stored = self.experiment.record_response_run(result)
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.selected_response_run["id"], stored["id"])
+        self.assertEqual(reopened.response_delay_seconds, 5)
+        self.assertEqual(reopened.total_live_logging_seconds, 10)
+        copy = reopened.response_condition("a")
+        copy["target_flows"]["nh3_rich"] = 999
+        self.assertNotEqual(copy, reopened.response_condition("A"))
+        reopened.set_response_condition("B", self.response_condition(2))
+        self.assertIsNone(reopened.selected_response_run)
+        self.assertEqual(reopened.response_delay_seconds, 0)
+        self.assertEqual(len(reopened.data["analyser_response"]["runs"]), 1)
+
+    def test_unsuccessful_response_run_is_retained_but_not_selected(self):
+        self.store_response_conditions()
+        run = self.experiment.record_response_run(self.response_run(successful=False))
+        self.assertIsNone(self.experiment.selected_response_run)
+        self.assertEqual(self.experiment.data["analyser_response"]["runs"][0]["id"], run["id"])
+
+    def test_response_history_is_bounded_to_latest_twenty_runs(self):
+        self.store_response_conditions()
+        first = self.experiment.record_response_run(self.response_run())
+        latest = None
+        for index in range(20):
+            latest = self.experiment.record_response_run(self.response_run(delay=12.5 + index))
+        runs = self.experiment.data["analyser_response"]["runs"]
+        self.assertEqual(len(runs), 20)
+        self.assertNotIn(first["id"], {run["id"] for run in runs})
+        self.assertEqual(self.experiment.selected_response_run["id"], latest["id"])
+
+    def test_response_history_retains_runs_referenced_by_saved_trials(self):
+        self.store_response_conditions()
+        referenced = self.experiment.record_response_run(self.response_run(delay=5))
+        window = window_for(self.config, self.point)
+        window.update(pre_window_delay_s=5, response_run_id=referenced["id"],
+                      total_observation_s=window["duration_s"] + 5)
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window)
+        self.experiment.complete(100, 10)
+        for index in range(20):
+            self.experiment.record_response_run(self.response_run(delay=10 + index))
+        identifiers = {run["id"] for run in self.experiment.data["analyser_response"]["runs"]}
+        self.assertIn(referenced["id"], identifiers)
+        self.assertEqual(len(identifiers), 20)
+        self.assertEqual(
+            Experiment.load(self.path).trials[0]["window"]["response_run_id"],
+            referenced["id"])
+
+    def test_response_persistence_rejects_malformed_and_oversized_data(self):
+        bad = self.response_condition()
+        bad["measured_flows"].pop("rich_air")
+        with self.assertRaises(ValueError):
+            self.experiment.set_response_condition("A", bad)
+        bad = self.response_condition()
+        bad["target_flows"]["nh3_rich"] = float("nan")
+        with self.assertRaises(ValueError):
+            self.experiment.set_response_condition("A", bad)
+        bad["target_flows"]["nh3_rich"] = True
+        with self.assertRaises(ValueError):
+            self.experiment.set_response_condition("A", bad)
+        self.store_response_conditions()
+        bad_run = self.response_run()
+        bad_run["raw_samples"][1]["no_ppm"] = float("inf")
+        with self.assertRaises(ValueError):
+            self.experiment.record_response_run(bad_run)
+        oversized = self.response_run()
+        oversized["caveat"] = "x" * 4001
+        with self.assertRaises(ValueError):
+            self.experiment.record_response_run(oversized)
+        too_many = self.response_run()
+        too_many["raw_samples"] = [dict(
+            timestamp=float(i + 1), elapsed_s=float(i), no_ppm=1.0, seq=i + 1,
+            phase="response") for i in range(4001)]
+        with self.assertRaises(ValueError):
+            self.experiment.record_response_run(too_many)
+
+    def test_load_rejects_invalid_selected_response_and_deep_metadata(self):
+        self.store_response_conditions()
+        self.experiment.record_response_run(self.response_run())
+        data = deepcopy(self.experiment.data)
+        data["analyser_response"]["selected_run_id"] = "missing"
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            Experiment.load(self.path)
+        data = deepcopy(self.experiment.data)
+        data["analyser_response"]["runs"][0]["criteria"] = {
+            "a": {"b": {"c": {"d": {"e": {"f": 1}}}}}}
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            Experiment.load(self.path)
 
     def test_single_pending_and_invalid_not_zero(self):
         self.experiment.add_trial({"point": self.point, "method": "test"})
@@ -205,6 +345,34 @@ class ExperimentTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8-sig")
         self.assertIn("corrected_no_ppm", text)
         self.assertIn("'=formula", text)
+
+    def test_window_response_metadata_validates_and_exports(self):
+        self.store_response_conditions()
+        run = self.experiment.record_response_run(self.response_run(delay=12.5))
+        window = window_for(self.config, self.point)
+        window.update(pre_window_delay_s=12.5, response_run_id=run["id"],
+                      total_observation_s=window["duration_s"] + 12.5)
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window)
+        self.experiment.complete(100, 10)
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.trials[0]["window"]["response_run_id"], run["id"])
+        path = self.path.with_suffix(".csv")
+        reopened.export_csv(path)
+        header, row = path.read_text(encoding="utf-8-sig").splitlines()[:2]
+        self.assertIn("pre_window_delay_s,response_run_id,total_observation_s", header)
+        self.assertIn(f"12.5,{run['id']},17.5", row)
+
+    def test_window_response_metadata_rejects_inconsistent_total(self):
+        window = window_for(self.config, self.point)
+        window.update(pre_window_delay_s=12.5, total_observation_s=5)
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        with self.assertRaises(ValueError):
+            self.experiment.record_window(window)
+        window = window_for(self.config, self.point)
+        window["response_run_id"] = "unknown"
+        with self.assertRaises(ValueError):
+            self.experiment.record_window(window)
 
     def test_legacy_three_variable_file_loads_without_new_config_fields(self):
         data = deepcopy(self.experiment.data)

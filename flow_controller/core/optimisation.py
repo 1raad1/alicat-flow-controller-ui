@@ -16,6 +16,7 @@ import numpy as np
 from ..domain.bayesian import SearchConfig, corrected_no, finite
 from ..domain.combustion import CombustionCalculator
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
+from ..domain.roles import ROLES
 from ..mexa.records import PROTOCOL, epoch, number
 
 
@@ -24,6 +25,10 @@ SUPPORTED_SCHEMAS = (1, SCHEMA)
 MAX_TRIALS = 500
 FLOW_REL_TOL = .03
 FLOW_ABS_TOL = .05  # SLPM measurement acceptance, NOT a safety threshold
+MAX_RESPONSE_RUNS = 20
+MAX_RESPONSE_SAMPLES = 4000
+MAX_STORED_FLOW = 1_000_000.0
+RESPONSE_ROLES = frozenset(key for key, _label in ROLES)
 
 
 def now_iso():
@@ -60,6 +65,8 @@ class Experiment:
             raise ValueError("That experiment file already exists. Open it or choose a new name.")
         data = {"schema": SCHEMA, "id": str(uuid.uuid4()), "created_at": now_iso(),
                 "config": config.to_dict(), "trials": [],
+                "analyser_response": {"conditions": {"A": None, "B": None},
+                                      "runs": [], "selected_run_id": None},
                 "objective": "dry NO ppm corrected to fixed O2; not total NOx",
                 "pilot": "off during measurements"}
         atomic_save(path, data)
@@ -75,6 +82,7 @@ class Experiment:
             if data["schema"] not in SUPPORTED_SCHEMAS:
                 raise ValueError("Unsupported experiment file version.")
             experiment = cls(path, data)
+            validate_analyser_response(data.get("analyser_response"))
             trials = data["trials"]
             if not isinstance(trials, list) or len(trials) > MAX_TRIALS:
                 raise ValueError("Invalid trial list.")
@@ -94,6 +102,11 @@ class Experiment:
                 pending += trial["status"] == "pending"
                 if trial.get("window") is not None:
                     validate_window(trial["window"], experiment.config)
+                    run_id = trial["window"].get("response_run_id")
+                    response = data.get("analyser_response") or {}
+                    if run_id is not None and not any(
+                            run.get("id") == run_id for run in response.get("runs", [])):
+                        raise ValueError("Measurement window refers to an unknown analyser-response run.")
                 if trial["status"] == "completed":
                     validate_window(trial["window"], experiment.config)
                     result = trial["result"]
@@ -125,6 +138,80 @@ class Experiment:
         atomic_save(self.path, data)
         self.data = data
 
+    def _response_copy(self):
+        data = deepcopy(self.data)
+        response = data.setdefault(
+            "analyser_response",
+            {"conditions": {"A": None, "B": None}, "runs": [], "selected_run_id": None})
+        return data, response
+
+    def set_response_condition(self, label, snapshot):
+        """Store condition A or B and invalidate calibration for the old transition."""
+        label = response_condition_label(label)
+        validate_response_condition(snapshot)
+        data, response = self._response_copy()
+        response["conditions"][label] = deepcopy(snapshot)
+        response["selected_run_id"] = None
+        validate_analyser_response(response)
+        self._commit(data)
+
+    def response_condition(self, label):
+        label = response_condition_label(label)
+        response = self.data.get("analyser_response") or {}
+        return deepcopy((response.get("conditions") or {}).get(label))
+
+    def record_response_run(self, result):
+        """Append a completed detector run and select it when it was successful."""
+        data, response = self._response_copy()
+        if any(response["conditions"].get(label) is None for label in ("A", "B")):
+            raise ValueError("Store analyser-response conditions A and B before recording a run.")
+        run = deepcopy(result)
+        run.setdefault("id", str(uuid.uuid4()))
+        run.setdefault("recorded_at", now_iso())
+        run.setdefault("successful", True)
+        validate_response_run(run)
+        if any(existing["id"] == run["id"] for existing in response["runs"]):
+            raise ValueError("Duplicate analyser-response run ID.")
+        response["runs"].append(run)
+        referenced = {
+            trial.get("window", {}).get("response_run_id")
+            for trial in data.get("trials", []) if trial.get("window")
+        } - {None}
+        if len(referenced) >= MAX_RESPONSE_RUNS and run["id"] not in referenced:
+            raise ValueError(
+                "This campaign already references the maximum number of response calibrations.")
+        retained = [item for item in response["runs"] if item["id"] in referenced]
+        retained_ids = {item["id"] for item in retained}
+        for item in reversed(response["runs"]):
+            if item["id"] not in retained_ids and len(retained) < MAX_RESPONSE_RUNS:
+                retained.append(item)
+                retained_ids.add(item["id"])
+        response["runs"] = sorted(
+            retained, key=lambda item: response["runs"].index(item))
+        if run["successful"]:
+            response["selected_run_id"] = run["id"]
+        elif response.get("selected_run_id") not in {item["id"] for item in response["runs"]}:
+            response["selected_run_id"] = None
+        validate_analyser_response(response)
+        self._commit(data)
+        return deepcopy(run)
+
+    @property
+    def selected_response_run(self):
+        response = self.data.get("analyser_response") or {}
+        selected = response.get("selected_run_id")
+        return deepcopy(next((run for run in response.get("runs", [])
+                              if run.get("id") == selected), None))
+
+    @property
+    def response_delay_seconds(self):
+        run = self.selected_response_run
+        return 0.0 if run is None else float(run["recommended_delay_s"])
+
+    @property
+    def total_live_logging_seconds(self):
+        return self.response_delay_seconds + self.config.window_seconds
+
     def add_trial(self, suggestion):
         if self.pending:
             raise ValueError("Complete or mark the pending test invalid before another suggestion.")
@@ -146,6 +233,11 @@ class Experiment:
 
     def record_window(self, window):
         validate_window(window, self.config)
+        run_id = window.get("response_run_id")
+        response = self.data.get("analyser_response") or {}
+        if run_id is not None and not any(
+                run.get("id") == run_id for run in response.get("runs", [])):
+            raise ValueError("Measurement window refers to an unknown analyser-response run.")
         data, trial = self._pending_copy()
         trial["window"] = deepcopy(window)
         self._commit(data)
@@ -185,6 +277,7 @@ class Experiment:
                       "observed_h2_fraction", "observed_phi_stage1", "observed_phi_overall",
                       "observed_power_kw", "observed_split_rich",
                       "window_start", "window_end", "notes",
+                      "pre_window_delay_s", "response_run_id", "total_observation_s",
                       "measurement_source", "mexa_source_id", "mexa_first_seq", "mexa_last_seq",
                       "mexa_sample_count", "mexa_no_sd", "mexa_o2_sd", "mexa_audit_log"]
             writer = csv.DictWriter(handle, fieldnames=fields)
@@ -215,12 +308,210 @@ class Experiment:
                     "observed_power_kw": window.get("power_kw"),
                     "observed_split_rich": window.get("split_rich"),
                     "window_start": window.get("start"), "window_end": window.get("end"),
+                    "pre_window_delay_s": window.get("pre_window_delay_s", 0),
+                    "response_run_id": window.get("response_run_id"),
+                    "total_observation_s": window.get("total_observation_s", window.get("duration_s")),
                     "notes": note, "measurement_source": result.get("source", "manual"),
                     "mexa_source_id": mexa.get("source_id"),
                     "mexa_first_seq": mexa.get("first_seq"), "mexa_last_seq": mexa.get("last_seq"),
                     "mexa_sample_count": mexa.get("samples"), "mexa_no_sd": mexa.get("no_sd"),
                     "mexa_o2_sd": mexa.get("o2_sd"), "mexa_audit_log": mexa.get("log_path"),
                 })
+
+
+def response_condition_label(label):
+    if not isinstance(label, str) or label.upper() not in ("A", "B"):
+        raise ValueError("Analyser-response condition must be A or B.")
+    return label.upper()
+
+
+def _bounded_json(value, name, *, max_depth=5, max_items=40_000, max_bytes=2_000_000):
+    """Reject unbounded, non-JSON or non-finite metadata before it reaches a campaign."""
+    remaining = [max_items]
+
+    def visit(item, depth):
+        remaining[0] -= 1
+        if remaining[0] < 0 or depth > max_depth:
+            raise ValueError(f"{name} is too large or deeply nested.")
+        if item is None or isinstance(item, bool):
+            return
+        if isinstance(item, (int, float)):
+            finite(item, name)
+            return
+        if isinstance(item, str):
+            if len(item) > 4000:
+                raise ValueError(f"{name} contains an oversized string.")
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child, depth + 1)
+            return
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str) or not key or len(key) > 128:
+                    raise ValueError(f"{name} contains an invalid key.")
+                visit(child, depth + 1)
+            return
+        raise ValueError(f"{name} contains a value that cannot be stored as JSON.")
+
+    visit(value, 0)
+    try:
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not valid finite JSON.") from exc
+    if len(encoded.encode("utf-8")) > max_bytes:
+        raise ValueError(f"{name} is too large.")
+
+
+def _stored_number(value, name):
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a finite JSON number.")
+    return finite(value, name)
+
+
+def _iso_timestamp(value, name):
+    if not isinstance(value, str) or not value or len(value) > 80:
+        raise ValueError(f"{name} must be an ISO timestamp.")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO timestamp.") from exc
+
+
+def validate_response_condition(snapshot):
+    if not isinstance(snapshot, dict):
+        raise ValueError("Analyser-response condition must be a snapshot object.")
+    allowed = {"target_flows", "measured_flows", "assignments", "captured_at", "request"}
+    if not set(snapshot) <= allowed:
+        raise ValueError("Analyser-response condition contains unknown fields.")
+    targets = snapshot.get("target_flows")
+    measured = snapshot.get("measured_flows")
+    assignments = snapshot.get("assignments")
+    if not all(isinstance(item, dict) for item in (targets, measured, assignments)):
+        raise ValueError("Response-condition flows and assignments must be objects.")
+    roles = set(targets)
+    if not roles or roles != set(measured) or roles != set(assignments):
+        raise ValueError("Response-condition target, measured and assignment roles must match.")
+    if not roles <= RESPONSE_ROLES or any(not isinstance(role, str) or not role for role in roles):
+        raise ValueError("Response condition contains an unknown controller role.")
+    for role in roles:
+        for collection, description in ((targets, "target"), (measured, "measured")):
+            value = _stored_number(collection[role], f"Response-condition {description} flow")
+            if not 0 <= value <= MAX_STORED_FLOW:
+                raise ValueError("Response-condition flow is outside the storage range.")
+        unit = assignments[role]
+        if not isinstance(unit, str) or not unit.strip() or len(unit) > 128:
+            raise ValueError("Response-condition assignment must name a controller unit.")
+    if len(set(assignments.values())) != len(assignments):
+        raise ValueError("A controller unit cannot be assigned to two response-condition roles.")
+    _iso_timestamp(snapshot.get("captured_at"), "Response-condition capture time")
+    if "request" in snapshot:
+        if not isinstance(snapshot["request"], dict):
+            raise ValueError("Response-condition request metadata must be an object.")
+        _bounded_json(snapshot["request"], "Response-condition request metadata",
+                      max_depth=3, max_items=100, max_bytes=16_000)
+
+
+def validate_response_run(run):
+    if not isinstance(run, dict):
+        raise ValueError("Analyser-response run must be an object.")
+    _bounded_json(run, "Analyser-response run")
+    for key in ("id", "source_id"):
+        if not isinstance(run.get(key), str) or not run[key].strip() or len(run[key]) > 128:
+            raise ValueError(f"Analyser-response {key} is invalid.")
+    for key in ("source", "provenance", "algorithm_version"):
+        if key in run and (not isinstance(run[key], str) or not run[key].strip()
+                           or len(run[key]) > 512):
+            raise ValueError(f"Analyser-response {key} is invalid.")
+    _iso_timestamp(run.get("recorded_at"), "Analyser-response recording time")
+    if type(run.get("successful")) is not bool:
+        raise ValueError("Analyser-response successful flag must be Boolean.")
+    timings = ("recommended_delay_s", "command_to_change_s", "command_to_stable_s",
+               "flow_to_stable_s")
+    values = {}
+    for key in timings:
+        values[key] = _stored_number(run.get(key), key)
+        if not 0 <= values[key] <= 3600:
+            raise ValueError("Analyser-response timing is outside 0 to 3600 seconds.")
+    if values["command_to_change_s"] > values["command_to_stable_s"]:
+        raise ValueError("NO cannot stabilise before its detected change.")
+    for key in ("t10_s", "t50_s", "t90_s", "rise_10_90_s"):
+        if key in run and run[key] is not None and not 0 <= _stored_number(run[key], key) <= 3600:
+            raise ValueError(f"{key} is outside 0 to 3600 seconds.")
+    for key in ("baseline_no_ppm", "final_no_ppm", "baseline_sd_ppm", "final_sd_ppm"):
+        if key in run:
+            value = _stored_number(run[key], key)
+            ceiling = 5000 if not key.endswith("sd_ppm") else 5000
+            if not 0 <= value <= ceiling:
+                raise ValueError(f"{key} is outside the analyser range.")
+    if "criteria" in run and not isinstance(run["criteria"], dict):
+        raise ValueError("Analyser-response criteria must be an object.")
+    if "caveat" in run and (not isinstance(run["caveat"], str) or len(run["caveat"]) > 4000):
+        raise ValueError("Analyser-response caveat is invalid.")
+    samples = run.get("raw_samples")
+    if not isinstance(samples, list) or not 3 <= len(samples) <= MAX_RESPONSE_SAMPLES:
+        raise ValueError("Analyser-response run must contain 3 to 4000 raw samples.")
+    previous_stamp = previous_elapsed = None
+    previous_seq = None
+    saw_baseline = saw_response = False
+    allowed_sample = {"timestamp", "elapsed_s", "no_ppm", "seq", "phase", "flow_stable"}
+    for sample in samples:
+        if not isinstance(sample, dict) or set(sample) - allowed_sample:
+            raise ValueError("Invalid analyser-response raw sample shape.")
+        if not {"timestamp", "elapsed_s", "no_ppm", "seq", "phase"} <= set(sample):
+            raise ValueError("Analyser-response raw sample is incomplete.")
+        stamp = _stored_number(sample["timestamp"], "Sample timestamp")
+        elapsed = _stored_number(sample["elapsed_s"], "Sample elapsed time")
+        no_ppm = _stored_number(sample["no_ppm"], "Sample NO")
+        seq = sample["seq"]
+        if (not 0 <= stamp <= 100_000_000_000 or not -3600 <= elapsed <= 3600
+                or not 0 <= no_ppm <= 5000 or type(seq) is not int or seq < 1):
+            raise ValueError("Analyser-response raw sample is outside its valid range.")
+        if sample["phase"] not in ("baseline", "response"):
+            raise ValueError("Analyser-response sample phase must be baseline or response.")
+        if sample["phase"] == "baseline":
+            if saw_response or elapsed > 0:
+                raise ValueError("Baseline response samples must precede the command.")
+            saw_baseline = True
+        else:
+            if elapsed < 0:
+                raise ValueError("Response samples cannot precede the command.")
+            saw_response = True
+        if "flow_stable" in sample and type(sample["flow_stable"]) is not bool:
+            raise ValueError("Analyser-response flow_stable must be Boolean.")
+        if (previous_stamp is not None
+                and (stamp <= previous_stamp or elapsed <= previous_elapsed or seq <= previous_seq)):
+            raise ValueError("Analyser-response sample timestamps and sequence must advance.")
+        previous_stamp, previous_elapsed, previous_seq = stamp, elapsed, seq
+    if not saw_baseline or not saw_response:
+        raise ValueError("Analyser-response samples must cover baseline and response phases.")
+
+
+def validate_analyser_response(response):
+    if response is None:  # schema-1/2 campaigns created before response calibration
+        return
+    if not isinstance(response, dict) or set(response) != {"conditions", "runs", "selected_run_id"}:
+        raise ValueError("Invalid analyser-response campaign data.")
+    conditions = response["conditions"]
+    if not isinstance(conditions, dict) or set(conditions) != {"A", "B"}:
+        raise ValueError("Analyser-response conditions must contain A and B.")
+    for snapshot in conditions.values():
+        if snapshot is not None:
+            validate_response_condition(snapshot)
+    runs = response["runs"]
+    if not isinstance(runs, list) or len(runs) > MAX_RESPONSE_RUNS:
+        raise ValueError("Invalid analyser-response run history.")
+    identifiers = set()
+    for run in runs:
+        validate_response_run(run)
+        if run["id"] in identifiers:
+            raise ValueError("Duplicate analyser-response run ID.")
+        identifiers.add(run["id"])
+    selected = response["selected_run_id"]
+    if selected is not None:
+        matches = [run for run in runs if run["id"] == selected]
+        if len(matches) != 1 or not matches[0]["successful"]:
+            raise ValueError("Selected analyser-response run is missing or unsuccessful.")
 
 
 def observed_condition(flows):
@@ -265,6 +556,16 @@ def validate_window(window, config):
     duration = (datetime.fromisoformat(window["end"]) - datetime.fromisoformat(window["start"])).total_seconds()
     if abs(duration - window["duration_s"]) > .001:
         raise ValueError("Measurement timestamps disagree with the recorded duration.")
+    delay = finite(window.get("pre_window_delay_s", 0), "Pre-window response delay")
+    if not 0 <= delay <= 3600:
+        raise ValueError("Pre-window response delay is outside 0 to 3600 seconds.")
+    run_id = window.get("response_run_id")
+    if run_id is not None and (not isinstance(run_id, str) or not run_id or len(run_id) > 128):
+        raise ValueError("Invalid analyser-response run reference.")
+    total = finite(window.get("total_observation_s", window["duration_s"] + delay),
+                   "Total observation duration")
+    if not window["duration_s"] <= total <= 7200 or abs(total - window["duration_s"] - delay) > .001:
+        raise ValueError("Total observation duration must equal response delay plus measurement window.")
     point, power = observed_condition(window["mean_flows"])
     split = observed_split(window["mean_flows"])
     if (not np.allclose(point, window["observed_point"], atol=1e-8, rtol=1e-8)

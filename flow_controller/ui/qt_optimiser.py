@@ -151,8 +151,9 @@ class ExperimentDialog(QDialog):
 class OptimiserPane(Card):
     def __init__(self, controller, parent=None):
         super().__init__("Bayesian optimiser", collapsed=not controller.expanded,
-                         help_text="Live/manual NO/O2 experiments. Suggestions never actuate the rig. "
-                         "A noisy Matérn Gaussian process proposes one test at a time after the initial design.",
+                         help_text="Live/manual NO/O2 experiments. Bayesian suggestions never actuate the rig. "
+                         "The separate response test commands its confirmed A-to-B transition through the normal "
+                         "setpoint and ramp safety path.",
                          parent=parent)
         self.controller = controller
         self._trial_id = None
@@ -168,12 +169,14 @@ class OptimiserPane(Card):
         self.add(self.tabs)
         self._build_test()
         self._build_history()
+        self._build_response()
         self.status = note(controller.last_message)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.add(self.status)
         controller.changed.connect(self.refresh)
         controller.message.connect(self.status.setText)
         controller.progress.connect(self.status.setText)
+        controller.response.changed.connect(self.refresh)
         self.refresh()
 
     def _expanded(self, expanded):
@@ -207,7 +210,8 @@ class OptimiserPane(Card):
         layout.addWidget(note("Review all fields, then apply through the existing controls. "
                               "Switch off the pilot using your established procedure."))
         self.pilot = QCheckBox("Pilot is off throughout this measurement")
-        self.settled = QCheckBox("Burner and analyser settled\n(including sample-line delay)")
+        self.settled = QCheckBox(
+            "Burner and flows are settled; analyser is settled or a calibrated delay is available")
         layout.addWidget(self.pilot)
         layout.addWidget(self.settled)
         self.live = QCheckBox("Capture NO/O2 automatically from the MEXA network link")
@@ -275,6 +279,75 @@ class OptimiserPane(Card):
                               "reference conditions; this does not prove a global minimum."))
         layout.addStretch(1)
         self.tabs.addTab(page, "History")
+
+    def _build_response(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(note(
+            "Store two settled live flow conditions. Start first records a stable NO baseline at A, then "
+            "commands B through the existing setpoint/ramp rules and waits for a sustained NO change and "
+            "stable plateau. This measures the combined burner, sample-line and analyser path. An "
+            "analyser-only test requires a calibration-gas step at its inlet."))
+        grid = QGridLayout()
+        self.response_labels = {}
+        self.response_store_buttons = {}
+        for row, label_name in enumerate(("A", "B")):
+            title = QLabel(f"Condition {label_name}")
+            title.setObjectName("SectionLabel")
+            grid.addWidget(title, row, 0)
+            description = note("Not stored.")
+            description.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(description, row, 1)
+            button = QPushButton(f"Store live as {label_name}")
+            button.clicked.connect(
+                lambda _checked=False, label=label_name: self._run(
+                    lambda: self.controller.response.store_condition(label)))
+            grid.addWidget(button, row, 2)
+            self.response_labels[label_name] = description
+            self.response_store_buttons[label_name] = button
+        layout.addLayout(grid)
+        line = QHBoxLayout()
+        self.response_start_button = QPushButton("Start A → B response test")
+        self.response_start_button.setProperty("variant", "accent")
+        self.response_start_button.clicked.connect(self._start_response)
+        self.response_cancel_button = QPushButton("Cancel response test")
+        self.response_cancel_button.clicked.connect(
+            lambda _checked=False: self.controller.response.cancel())
+        line.addWidget(self.response_start_button)
+        line.addWidget(self.response_cancel_button)
+        layout.addLayout(line)
+        self.response_result = note("No completed response calibration.")
+        self.response_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.response_result)
+        self.response_status = note(self.controller.response.last_message)
+        self.response_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.response_status)
+        self.controller.response.message.connect(self.response_status.setText)
+        self.controller.response.progress.connect(self.response_status.setText)
+        layout.addWidget(note(
+            "For future live optimiser windows, the selected calibration is used as a pre-averaging "
+            "delay. Transient readings remain in the receiver audit log but are excluded from the "
+            "Bayesian NO/O2 mean."))
+        layout.addStretch(1)
+        self.tabs.addTab(page, "NO response time")
+
+    def _start_response(self):
+        try:
+            transition = self.controller.response.transition_text()
+        except (ValueError, OSError) as exc:
+            self.response_status.setText(str(exc))
+            return
+        answer = QMessageBox.warning(
+            self, "Start live A-to-B response test?",
+            "This action will command condition B after a 15 s stable NO baseline at A. "
+            "It does not automatically return to A or zero the rig if cancelled. Verify that the "
+            "entire transition is approved and that the normal recovery controls are available.\n\n"
+            + transition,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._run(lambda: self.controller.response.start(confirmed=True))
 
     def _switch_ok(self):
         experiment = self.controller.experiment
@@ -359,8 +432,9 @@ class OptimiserPane(Card):
                 entry.setText(str(c.draft.get(key, "")))
             for box in (self.pilot, self.settled, self.basis):
                 box.setChecked(False)
-        busy = c.busy
-        capturing = c.capture is not None
+        response_active = c.response.active
+        busy = c.busy or response_active
+        capturing = c.capture is not None or c.settle_wait is not None
         window = pending.get("window") if pending else None
         mexa = (window or {}).get("mexa")
         self.live.setEnabled(bool(pending and not capturing and not window and not busy))
@@ -371,7 +445,7 @@ class OptimiserPane(Card):
         self.ask_button.setEnabled(bool(experiment and not pending and not busy))
         self.load_button.setEnabled(bool(pending and not busy and not capturing and not window))
         self.start_button.setEnabled(bool(pending and not busy and not capturing and not window))
-        self.finish_button.setEnabled(capturing)
+        self.finish_button.setEnabled(c.capture is not None)
         self.cancel_button.setEnabled(capturing)
         self.save_button.setEnabled(bool(window and not capturing and not busy))
         self.invalid_button.setEnabled(bool(pending and not capturing and not busy))
@@ -401,7 +475,35 @@ class OptimiserPane(Card):
             f"{window['start']} → {window['end']}"
             + (f"\nMEXA: {mexa['samples']} samples · NO SD {mexa['no_sd']:.3g} ppm · "
                f"O2 SD {mexa['o2_sd']:.3g}%" if mexa else "") if window else
-            ("Window capture in progress." if capturing else "No measurement window saved."))
+            ("Waiting through the calibrated analyser-response delay before averaging."
+             if c.settle_wait else
+             ("Window capture in progress." if c.capture else "No measurement window saved.")))
+        can_store_response = bool(experiment and not busy and not capturing)
+        for button in self.response_store_buttons.values():
+            button.setEnabled(can_store_response)
+        conditions = {}
+        for label_name in ("A", "B"):
+            condition = c.response.condition(label_name)
+            conditions[label_name] = condition
+            if condition:
+                flows = " · ".join(
+                    f"{key} {value:g}" for key, value in condition["target_flows"].items())
+                self.response_labels[label_name].setText(
+                    f"{condition['captured_at']}\n{flows} SLPM")
+            else:
+                self.response_labels[label_name].setText("Not stored.")
+        self.response_start_button.setEnabled(bool(
+            all(conditions.values()) and not busy and not capturing))
+        self.response_cancel_button.setEnabled(response_active)
+        run = experiment.selected_response_run if experiment else None
+        self.response_result.setText(
+            "No completed response calibration." if not run else
+            f"Selected response: change {run['command_to_change_s']:.1f} s · "
+            f"stable {run['command_to_stable_s']:.1f} s from command · "
+            f"{run['flow_to_stable_s']:.1f} s after B flow stability\n"
+            f"Pre-averaging delay {run['recommended_delay_s']:g} s · averaging "
+            f"{experiment.config.window_seconds:g} s · total live observation "
+            f"{experiment.total_live_logging_seconds:g} s")
         selected = self.history.currentItem()
         selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
         self.history.clear()
