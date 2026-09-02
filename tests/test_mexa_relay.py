@@ -3,9 +3,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import csv
-from contextlib import redirect_stderr
 import importlib.util
-import io
 import ipaddress
 import json
 import os
@@ -32,7 +30,7 @@ from mexa_bridge.protocol import simulated_cycle
 from mexa_bridge.records import CHANNEL_FIELDS, MAX_LINE, make_packet
 from mexa_bridge.relay import (RelayPublisher, RelayReceiver, decode, encode, quiet_logger,
                                         receive, send, validate_relay_url)
-from mexa_bridge.relay_server import RelayService, main, server_tls
+from mexa_bridge.relay_server import RelayService
 from mexa_bridge.transport import signature
 from flow_controller.ui.qt_mexa import MexaTab
 
@@ -122,13 +120,17 @@ class RelayConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RelayReceiver("wss://relay.example/mexa", SHARED_KEY, SHARED_KEY, lambda p: None, lambda *s: None)
 
-    def test_public_plaintext_binding_rejected_without_explicit_private_proxy_flag(self):
-        with self.assertRaises(ValueError):
-            server_tls("0.0.0.0", None, None)
-        with self.assertRaises(ValueError):
-            server_tls("127.0.0.1", "cert-only", None)
-        self.assertIsNone(server_tls("127.0.0.1", None, None))
-        self.assertIsNone(server_tls("0.0.0.0", None, None, True))
+    def test_built_in_relay_cannot_bind_outside_numeric_loopback(self):
+        async def check():
+            service = RelayService(PUBLISH_KEY, RECEIVE_KEY)
+            for host in ("0.0.0.0", "192.0.2.10", "::", "localhost"):
+                with self.subTest(host=host), self.assertRaises(ValueError):
+                    await service.start(host, 0)
+            # TLS is useful for client verification tests, not an escape from
+            # the built-in relay's loopback-only boundary.
+            with self.assertRaises(ValueError):
+                await service.start("0.0.0.0", 0, ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER))
+        asyncio.run(check())
 
     def test_messages_are_bounded_and_do_not_echo_untrusted_text(self):
         for raw in (b"bytes", "[]", "not-json", "[" * 5000, "x" * (MAX_LINE + 1)):
@@ -137,38 +139,25 @@ class RelayConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             encode({"payload": "x" * MAX_LINE})
 
-    def test_local_launcher_mode_cannot_expose_plaintext_on_network(self):
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
-            main(["--local-test", "--host", "0.0.0.0"])
-        self.assertEqual(caught.exception.code, 2)
-
-    def test_reader_and_server_packages_have_required_files_and_no_runtime_data(self):
+    def test_reader_package_has_transports_but_no_standalone_host_or_runtime_data(self):
         from build_mexa_package import build
         with tempfile.TemporaryDirectory() as directory:
-            for relay in (False, True):
-                archive_path = Path(directory) / ("relay.zip" if relay else "bridge.zip")
-                build(archive_path, relay=relay)
-                prefix = "MEXA-584L-relay/" if relay else "MEXA-584L-bridge/"
-                with zipfile.ZipFile(archive_path) as archive:
-                    self.assertIsNone(archive.testzip())
-                    names = archive.namelist()
-                    for name in ("mexa_bridge/relay.py", "mexa_bridge/relay_server.py",
-                                 "docs/MEXA_RELAY.md", "run_mexa_relay_local.bat"):
-                        self.assertIn(prefix + name, names)
-                    self.assertFalse(any(name.endswith((".csv", ".jsonl", ".exe", ".pem", ".env")) for name in names))
-                    if relay:
-                        self.assertNotIn(prefix + "mexa_bridge/app.py", names)
-                        self.assertIn(prefix + "requirements-relay.txt", names)
-                        self.assertIn(prefix + "CACHYOS_START_HERE.md", names)
-                        self.assertIn(prefix + "mexa_bridge/relay_host.py", names)
-                        for name in ("install_relay_host.sh", "run_relay_host.sh"):
-                            self.assertNotIn(b"\r", archive.read(prefix + name))
-                            self.assertEqual(archive.getinfo(prefix + name).external_attr >> 16 & 0o777, 0o755)
-                    else:
-                        self.assertIn(prefix + "mexa_bridge/app.py", names)
-                        self.assertIn(b"websockets", archive.read(prefix + "requirements-mexa.txt"))
-                with self.assertRaises(FileExistsError):
-                    build(archive_path, relay=relay)
+            archive_path = Path(directory) / "bridge.zip"
+            build(archive_path)
+            prefix = "MEXA-584L-bridge/"
+            with zipfile.ZipFile(archive_path) as archive:
+                self.assertIsNone(archive.testzip())
+                names = archive.namelist()
+                for name in ("mexa_bridge/relay.py", "mexa_bridge/transport.py", "mexa_bridge/app.py",
+                             "docs/MEXA_SETUP.md", "docs/MEXA_QUICK_TUNNEL.md"):
+                    self.assertIn(prefix + name, names)
+                for name in ("mexa_bridge/relay_server.py", "mexa_bridge/relay_host.py",
+                             "run_mexa_relay_local.bat", "requirements-relay.txt", "CACHYOS_START_HERE.md"):
+                    self.assertNotIn(prefix + name, names)
+                self.assertFalse(any(name.endswith((".csv", ".jsonl", ".exe", ".pem", ".env")) for name in names))
+                self.assertIn(b"websockets", archive.read(prefix + "requirements-mexa.txt"))
+            with self.assertRaises(FileExistsError):
+                build(archive_path)
 
 
 class RelayProtocolTests(unittest.TestCase):
@@ -387,19 +376,28 @@ class RelayQtTests(unittest.TestCase):
         self.controller = MexaController()
         self.addCleanup(self.controller.shutdown)
 
-    def test_relay_controls_enabled_only_for_selected_mode(self):
+    def test_wormhole_and_lan_controls_enabled_only_for_selected_mode(self):
         window, tab = BridgeWindow(), MexaTab(self.controller)
         self.addCleanup(window.close)
         self.addCleanup(tab.close)
-        for widget in (window, tab):
-            self.assertFalse(widget.relay_url.isEnabled())
-            self.assertTrue(widget.host.isEnabled())
-            widget.transport.setCurrentIndex(1)
-            self.assertTrue(widget.relay_url.isEnabled())
-            self.assertTrue(widget.relay_key.isEnabled())
-            self.assertFalse(widget.host.isEnabled())
-            self.assertFalse(widget.port.isEnabled())
+        window.transport.setCurrentIndex(window.transport.findData("lan"))
+        self.assertFalse(window.relay_url.isEnabled())
+        self.assertTrue(window.host.isEnabled())
+        window.transport.setCurrentIndex(window.transport.findData("relay"))
+        self.assertTrue(window.relay_url.isEnabled())
+        self.assertTrue(window.relay_key.isEnabled())
+        self.assertFalse(window.host.isEnabled())
+        self.assertFalse(window.port.isEnabled())
         self.assertIn("no local TCP listener", window.listener_label.text())
+        self.assertEqual(tab.transport.count(), 2)
+        self.assertEqual(tab.transport.currentData(), "host")
+        self.assertFalse(hasattr(tab, "relay_url"))
+        self.assertFalse(hasattr(tab, "relay_key"))
+        self.assertFalse(hasattr(tab, "tunnel_provider"))
+        self.assertFalse(tab.host.isEnabled())
+        tab.transport.setCurrentIndex(tab.transport.findData("lan"))
+        self.assertTrue(tab.host.isEnabled())
+        self.assertTrue(tab.port.isEnabled())
 
     def test_bridge_and_receiver_relay_logs_no_lan_listener_and_recovery(self):
         source_dir = Path(self.directory.name) / "source"
@@ -500,7 +498,10 @@ class RelayTLSTests(unittest.TestCase):
             cert_path, key_path = Path(directory) / "cert.pem", Path(directory) / "key.pem"
             cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
             key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-            relay = RunningRelay(context=server_tls("127.0.0.1", str(cert_path), str(key_path)))
+            server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_context.minimum_version = ssl.TLSVersion.TLSv1_2
+            server_context.load_cert_chain(str(cert_path), str(key_path))
+            relay = RunningRelay(context=server_context)
             try:
                 statuses = []
                 rejected = RelayReceiver(relay.url, RECEIVE_KEY, SHARED_KEY, lambda p: self.fail("Untrusted TLS accepted"), lambda ready, s: statuses.append(s))

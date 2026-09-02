@@ -32,14 +32,13 @@ class MexaController(QObject):
         self._receiving = False
         self.temporary_host = None
         self.host_status = HostStatus()
-        self.host_provider = "wormhole"
         self._host_generation = 0
         self._host_pending = None
         self._temporary_local_url = ""
         self.status = "MEXA disconnected"
         self.link_status = "Network: disconnected"
         self.settings = {"host": "127.0.0.1", "port": 61234, "token": "", "directory": "", "save_logs": True,
-                         "transport": "lan", "relay_url": "", "relay_key": ""}
+                         "transport": "host", "relay_url": "", "relay_key": ""}
         self._incoming.connect(self._receive, Qt.ConnectionType.QueuedConnection)
         self._status.connect(self._set_status, Qt.ConnectionType.QueuedConnection)
         self._host_update.connect(self._host_changed, Qt.ConnectionType.QueuedConnection)
@@ -48,21 +47,17 @@ class MexaController(QObject):
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
-    def start_temporary_host(self, token, directory=None, *, save_logs=True, executable="", provider="wormhole"):
+    def start_temporary_host(self, token, directory=None, *, save_logs=True, executable=""):
         if self.client is not None or self.temporary_host is not None:
             raise ValueError("Disconnect MEXA and stop the current temporary relay first")
         validate_key(token)
         if save_logs and not str(directory or "").strip():
             raise ValueError("Choose a received-data log directory or turn off receiver logging")
-        if provider not in ("wormhole", "cloudflare"):
-            raise ValueError("Choose Wormhole or Cloudflare as the tunnel provider")
-        self.host_provider = provider
         self._host_generation += 1
         generation = self._host_generation
         self._host_pending = (token, directory, save_logs)
         self.host_status = HostStatus("starting", "Preparing temporary relay…")
-        self.temporary_host = QuickTunnelHost(lambda status: self._host_update.emit(generation, status), executable,
-                                              provider=provider)
+        self.temporary_host = QuickTunnelHost(lambda status: self._host_update.emit(generation, status), executable)
         self.changed.emit()
         self.temporary_host.start()
 
@@ -115,7 +110,7 @@ class MexaController(QObject):
             raise ValueError("Disconnect the current MEXA link first")
         generation = self.generation + 1
         if transport not in ("lan", "relay"):
-            raise ValueError("Choose Direct LAN or Internet relay")
+            raise ValueError("Choose Direct LAN or the built-in Wormhole relay")
         callbacks = (lambda packet: self._incoming.emit(generation, packet),
                      lambda ready, text: self._status.emit(generation, ready, text))
         client = (RelayReceiver(relay_url, relay_key, token, *callbacks) if transport == "relay"

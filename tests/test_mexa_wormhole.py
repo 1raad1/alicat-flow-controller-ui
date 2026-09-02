@@ -1,4 +1,4 @@
-"""Wormhole provider tests: fake child and synthetic loopback data only."""
+"""Wormhole helper tests: fake child and synthetic loopback data only."""
 import hashlib
 import io
 import json
@@ -41,7 +41,7 @@ class WormholeHelperTests(unittest.TestCase):
         self.assertEqual(wormhole.tunnel_event("6:49PM INF status changed status=reconnecting"), ("disconnected", ""))
 
     def test_command_has_no_inspector_login_custom_domain_or_credentials(self):
-        self.assertEqual(wormhole.helper_command("C:/Program Files/wormhole.exe", "unused.yml", 43123),
+        self.assertEqual(wormhole.helper_command("C:/Program Files/wormhole.exe", 43123),
                          ["C:/Program Files/wormhole.exe", "http", "43123", "--headless", "--no-inspect"])
         with patch.dict(os.environ, {"WORMHOLE_TOKEN": "secret", "wormhole_key": "secret"}):
             self.assertFalse(any(name.upper().startswith("WORMHOLE_") for name in helper_environment()))
@@ -107,11 +107,9 @@ class WormholeHelperTests(unittest.TestCase):
                 self.download(directory, stop=stop)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
-    def test_invalid_manual_path_and_unknown_provider_rejected(self):
+    def test_invalid_manual_path_rejected(self):
         with self.assertRaises(HostError):
             wormhole.prepare_helper("relative.exe", threading.Event(), lambda message: None)
-        with self.assertRaises(HostError):
-            QuickTunnelHost(lambda status: None, provider="unknown")
 
 
 class WormholeLifecycleTests(unittest.TestCase):
@@ -127,7 +125,7 @@ class WormholeLifecycleTests(unittest.TestCase):
 
     def start_host(self, timeout=2):
         statuses = []
-        host = QuickTunnelHost(statuses.append, provider="wormhole", startup_timeout=timeout)
+        host = QuickTunnelHost(statuses.append, startup_timeout=timeout)
         self.addCleanup(lambda: host.stop(wait=True))
         host.start()
         return host, statuses
@@ -181,22 +179,23 @@ class WormholeLifecycleTests(unittest.TestCase):
             self.assertIn(expected, host.status.message)
             self.assertNotIn("secret-value", str(statuses))
 
-    def test_provider_ui_defaults_to_wormhole_and_resets_consent_and_helper(self):
+    def test_ui_has_only_wormhole_and_lan_with_explicit_hosting_consent(self):
         controller = MexaController()
         self.addCleanup(controller.shutdown)
         tab = MexaTab(controller)
         self.addCleanup(tab.close)
-        tab.transport.setCurrentIndex(2)
-        self.assertEqual(tab.tunnel_provider.currentData(), "wormhole")
+        self.assertEqual(tab.transport.currentData(), "host")
+        self.assertEqual({tab.transport.itemData(i) for i in range(tab.transport.count())}, {"host", "lan"})
+        self.assertFalse(hasattr(tab, "tunnel_provider"))
+        self.assertFalse(hasattr(controller, "host_provider"))
         self.assertIn("443", tab.connection_help.text())
-        self.assertNotIn("7844", tab.connection_help.text())
-        tab.host_consent.setChecked(True)
-        tab.helper_path.setText("C:/selected/wormhole.exe")
-        tab.tunnel_provider.setCurrentIndex(1)
+        self.assertIn("Wormhole", tab.host_consent.text())
         self.assertFalse(tab.host_consent.isChecked())
-        self.assertEqual(tab.helper_path.text(), "")
-        self.assertIn("Cloudflare", tab.host_consent.text())
-        self.assertIn("7844", tab.connection_help.text())
+        self.assertFalse(tab.start_host.isEnabled())
+        tab.transport.setCurrentIndex(tab.transport.findData("lan"))
+        self.assertTrue(tab.host.isEnabled())
+        tab.transport.setCurrentIndex(tab.transport.findData("host"))
+        self.assertFalse(tab.host.isEnabled())
         self.assertFalse(tab.start_host.isEnabled())
 
     def test_controller_auto_connects_and_logs_invalid_channels_without_hardware(self):
@@ -204,15 +203,15 @@ class WormholeLifecycleTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         tab = MexaTab(controller)
         self.addCleanup(tab.close)
-        tab.transport.setCurrentIndex(2)
+        tab.transport.setCurrentIndex(tab.transport.findData("host"))
         tab.host_consent.setChecked(True)
         tab.token.setText(SHARED)
         with tempfile.TemporaryDirectory() as directory:
             tab.directory.setText(directory)
             tab._start_host()
             self.assertTrue(wait_for(lambda: controller.client is not None))
-            self.assertEqual(controller.temporary_host.provider, "wormhole")
-            self.assertFalse(tab.tunnel_provider.isEnabled())
+            self.assertFalse(hasattr(controller.temporary_host, "provider"))
+            self.assertFalse(tab.transport.isEnabled())
             from mexa_bridge.protocol import simulated_cycle
             cycle = simulated_cycle(1)
             cycle.update(no_ppm=-2, valid=False, alarms=["no_out_of_range"], rpm=2400,

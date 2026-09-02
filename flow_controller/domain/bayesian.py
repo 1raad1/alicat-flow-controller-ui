@@ -51,7 +51,7 @@ class SearchConfig:
     bounds: tuple[tuple[float, float], ...]
     split_rich: float = 1.0
     reference_o2: float = 15.0
-    initial_points: int = 16
+    initial_points: int | None = None
     window_seconds: float = 30.0
     optimise_power: bool = False
     optimise_split: bool = False
@@ -72,6 +72,8 @@ class SearchConfig:
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false.")
         dimensions = 3 + self.optimise_power + self.optimise_split
+        if self.initial_points is None:
+            object.__setattr__(self, "initial_points", dimensions + 1)
         if (isinstance(self.initial_points, bool)
                 or not isinstance(self.initial_points, int)
                 or not dimensions + 1 <= self.initial_points <= 100):

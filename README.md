@@ -28,9 +28,7 @@ The desktop interface is built with PySide6 and Qt.
 | Record or replay a run | [Sequences](#sequences) |
 | Search for low NO with live or manual MEXA readings | [Bayesian optimiser](#bayesian-optimiser) |
 | Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
-| Stream through a separate internet relay | [Relay setup and hosting](docs/MEXA_RELAY.md) |
-| Host a temporary tunnel from the flow-controller app | [Quick Tunnel setup](docs/MEXA_QUICK_TUNNEL.md) |
-| Host the relay on a CachyOS home PC | [Small host program and setup](CACHYOS_START_HERE.md) |
+| Connect through Wormhole from the flow-controller app | [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
@@ -221,8 +219,12 @@ For the algorithms, equations, file format and code map, see the
    This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
    present. Every assigned pilot fuel line must be off during measurements.
 2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
-   initial-design size (default 16 completed tests), candidate-pool size and
-   minimum averaging window (default 30 seconds). The initial design must contain
+   initial-design size (default 4, 5 or 6 completed tests for 3, 4 or 5 variables),
+   candidate-pool size and minimum averaging window (default 30 seconds).
+   **Use current O₂**, beside the
+   reference field, copies one fresh, validated, uncorrected dry MEXA reading;
+   receiver logging must be enabled. You can edit it before saving. It does not
+   follow later readings or change burner flows. The initial design must contain
    at least one more completed test than the number of variables. Save a new
    `.fcbo.json` experiment. These settings are fixed for the campaign; use a new
    file to change them.
@@ -467,23 +469,21 @@ flow CSV retain these channels, status/option flags and raw replies. Missing
 sensors stay blank. The analyser's automotive AFR/lambda do not replace the
 NH3/H2 flow-based phi calculation; the optimiser still uses only NO/O2.
 
-The flow app can **Host temporary relay on this PC** from its MEXA tab. It
-starts a private relay and a Wormhole tunnel, then connects the receiver
-locally. Copy the temporary URL and publisher key into the analyser bridge.
-The Windows x64 helper is downloaded and SHA-256 checked on first use, or you
-can select an official executable. No home server or port forwarding is needed.
-Wormhole uses approved outbound HTTPS/WSS 443 on both PCs. Cloudflare Quick
-Tunnel remains an alternative and needs outbound TCP 7844 from the flow PC.
-Temporary tunnels have no uptime guarantee. See
-[temporary relay setup](docs/MEXA_QUICK_TUNNEL.md) before publishing data.
+The MEXA tab offers **Wormhole (temporary hosting on this PC)** and **Direct LAN**.
+Wormhole starts an internal loopback relay and a pinned Wormhole v0.2.1 helper;
+the receiver connects locally. Copy the temporary URL and publisher key into
+the analyser bridge's **Wormhole (outbound WSS)** fields. The older **Internet
+relay (outbound WSS)** label works unchanged. The Windows x64 helper is
+downloaded and SHA-256 checked on first use, or you can select an official
+executable. No third PC, hosting account, domain or port forwarding is needed.
 
-Both MEXA apps also offer **Internet relay (outbound WSS)** alongside Direct LAN.
-With a separate approved relay, neither lab PC listens for incoming connections.
-The host forwards the measurements over TLS; publisher/receiver
-access keys are separate from the shared measurement key. The repository
-includes the server, not a hosted URL. Local logging, invalid-data rejection
-and live-capture safeguards are unchanged. See [relay setup](docs/MEXA_RELAY.md)
-for deployment, key handling and outage behaviour.
+Wormhole requires approved outbound HTTPS/WSS 443 on both PCs and has no
+uptime guarantee. Its provider can see forwarded measurements and the publisher
+key because it terminates TLS. Confirm IT and data-transfer approval before
+use. Direct LAN remains the backup on a trusted, approved network. Local
+logging, invalid-data rejection and live-capture safeguards are unchanged.
+See [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) for consent, key handling and
+outage behaviour, or [MEXA setup](docs/MEXA_SETUP.md) for Direct LAN.
 
 Column names include gas, zone, and unit. The header is fixed when logging
 starts, so assignments cannot change while the file is open. Failed readings
@@ -631,12 +631,12 @@ run.py              source-tree launcher
 
 The analyser bridge lives outside `flow_controller/`. The flow app imports its
 measurement records and receiver transports, not the bridge window or serial
-reader. The bridge and relay ZIPs contain no flow-controller code or optimiser
-dependencies. Build them independently:
+reader. The bridge ZIP contains no flow-controller code, optimiser dependencies
+or relay-hosting tools. The relay runs inside the flow app, not on the analyser
+PC. Build the standalone bridge with:
 
 ```powershell
 python build_mexa_package.py dist/MEXA-584L-bridge.zip
-python build_mexa_package.py dist/MEXA-584L-relay.zip --relay
 ```
 
 Use a new destination filename for each build. Existing ZIPs are never replaced.

@@ -6,12 +6,13 @@ logs independently. Keep the reader
 running to acquire and stream data. The original HORIBA application must stay
 closed while the reader uses the analyser's COM port.
 
-For a temporary internet connection test, choose **Host temporary relay on this
-PC** in the flow app and **Internet relay (outbound WSS)** in the analyser bridge.
-See [Quick Tunnel setup](MEXA_QUICK_TUNNEL.md). Use this only where UCL permits the
-tunnel and data transfer. For a separate approved server, choose Internet relay
-in both apps; see [relay setup and hosting](MEXA_RELAY.md).
-The IPv4/TCP instructions below apply to **Direct LAN** mode only.
+Choose **Wormhole (temporary hosting on this PC)** in the flow app and **Wormhole
+(outbound WSS)** in the analyser bridge for the internet route. The flow app
+runs its own loopback relay and pinned Wormhole helper; no third PC is needed.
+Older bridges labelled **Internet relay (outbound WSS)** work unchanged.
+See [Wormhole setup](MEXA_QUICK_TUNNEL.md). Use this only where UCL permits the
+tunnel and data transfer. **Direct LAN** is the backup for a trusted, approved
+network. The IPv4/TCP instructions below apply to Direct LAN only.
 
 Hardware validation is not complete. Automated tests use synthetic data and
 fake serial replies. The read protocol was recovered from the supplied HORIBA
@@ -22,8 +23,8 @@ software performs itself.
 ## Install on the analyser PC
 
 Already using the 28 August `MEXA-584L-bridge-wormhole.zip`? Keep that installation.
-The package separation and flow-meter connection fixes do not change its serial
-commands, measurement format, or network authentication. New receiver-side
+This flow-app update does not change its serial commands, measurement format,
+or network authentication. New receiver-side
 summary fields are calculated on the flow-controller PC. You do not need to
 reinstall the bridge for those changes.
 
@@ -90,10 +91,14 @@ stop the reader, repeat the required instrument checks, confirm validation and
 restart. Re-settle before starting a new optimiser window. Starting/stopping
 the reader does not itself return the analyser to MEAS or STANDBY.
 
-## Connect the flow-controller PC
+## Connect with Direct LAN
+
+For Wormhole, follow [Wormhole setup](MEXA_QUICK_TUNNEL.md) instead. The logging,
+measurement and validation guidance below applies to both modes.
 
 1. Restart the updated flow-controller application when safe for the rig.
-2. Open **MEXA analyser**. Enter the analyser PC's IPv4 address, the same port,
+2. Open **MEXA analyser** and select **Direct LAN** in both apps.
+   Enter the analyser PC's IPv4 address, the same port,
    and the copied shared key. **Save received MEXA logs on this PC** is on
    by default; choose a folder, or turn it off if you only need the display
    or combined flow CSV. Live optimiser capture requires it to be on.
@@ -180,7 +185,7 @@ retains all fresh channel values in its `mexa_reported_` columns, alongside
 `mexa_o2_percent` columns remain blank for invalid data. Live optimisation
 continues to reject those records.
 
-For a Direct LAN connection timeout (relay diagnostics are in the [relay guide](MEXA_RELAY.md)):
+For a Direct LAN connection timeout (Wormhole diagnostics are in the [Wormhole guide](MEXA_QUICK_TUNNEL.md)):
 
 1. Check that the bridge is started. Its listener label shows the bound address
    and port. `127.0.0.1` only accepts a receiver on the same PC. Use the analyser
@@ -239,12 +244,13 @@ wired lab network. If needed, an approved isolated wired link can carry the
 measurements while Wi-Fi is used separately. Do not enable Internet Connection
 Sharing, bridge networks, create a hotspot, disable the firewall, or install a
 tunnel to work around UCL policy. The app does not change firewall rules or
-network adapters; its optional Quick Tunnel must be permitted by UCL.
+network adapters; its optional Wormhole tunnel must be permitted by UCL.
 
-If no direct route can be approved, use the separate [internet relay](MEXA_RELAY.md)
-with an approved hosting endpoint. Both PCs connect outward on WSS, usually port
-443. This still needs outbound access permitted by IT. Enable source logging to
-retain readings during outages. Offline log import is not implemented.
+If no direct route can be approved, ask IT whether the app's
+[Wormhole route](MEXA_QUICK_TUNNEL.md) is permitted. Both PCs connect outward on
+port 443; the relay runs inside the flow app. Do not use it to evade network
+policy. Enable source logging to retain readings during outages. Offline log
+import is not implemented.
 
 ## Validate before experimental use
 

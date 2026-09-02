@@ -98,13 +98,31 @@ In **New Bayesian experiment**:
    model chooses points. A **candidate pool** is the finite set of possible
    points scored during one call to the optimiser; it is a numerical search
    set, not experimental data.
-6. Enter the O2 reference and measurement-window duration.
+6. Enter the O2 reference, or click **Use current O₂** beside that field to copy
+   the latest eligible analyser reading. Enter the measurement-window duration.
 7. Confirm the reporting basis and the independently checked operating region.
 
 The dynamic dialog is implemented at
 [`qt_optimiser.py:41`](../flow_controller/ui/qt_optimiser.py#L41), with conversion
 from percentages to fractions at
-[`qt_optimiser.py:126`](../flow_controller/ui/qt_optimiser.py#L126).
+[`qt_optimiser.py:151`](../flow_controller/ui/qt_optimiser.py#L151).
+
+**Use current O₂** copies one reading, not a time average. Let the chosen
+baseline condition settle before using it. The reading must be fresh, real
+(not simulated), validated and reported on an uncorrected dry basis, with
+receiver logging enabled. If it fails these checks, the dialog shows an error
+and leaves the reference unchanged. The copy and its acquisition time are
+displayed by
+[`qt_optimiser.py:175`](../flow_controller/ui/qt_optimiser.py#L175), using the
+existing sample checks at
+[`mexa_controller.py:195`](../flow_controller/core/mexa_controller.py#L195).
+
+You can edit the copied value or click again before saving. The dialog passes
+the field into `reference_o2` (the reporting oxygen percentage for the campaign)
+at [`qt_optimiser.py:166`](../flow_controller/ui/qt_optimiser.py#L166). Saving fixes
+this value for the campaign; later readings do not update it. The button sends
+no flow commands and performs no calibration; measured O2 still varies with
+each test condition.
 
 Here $d$ is the number of selected search variables, so it is 3, 4, or 5. The
 program requires at least $d+1$ completed initial points. This validation rule
@@ -432,8 +450,8 @@ burner. This distinction is stated by the detector itself at
 [`analyser_response.py:1`](../flow_controller/domain/analyser_response.py#L1) to
 [`analyser_response.py:5`](../flow_controller/domain/analyser_response.py#L5)
 and in the response-test interface at
-[`qt_optimiser.py:283`](../flow_controller/ui/qt_optimiser.py#L283) to
-[`qt_optimiser.py:291`](../flow_controller/ui/qt_optimiser.py#L291).
+[`qt_optimiser.py:326`](../flow_controller/ui/qt_optimiser.py#L326) to
+[`qt_optimiser.py:334`](../flow_controller/ui/qt_optimiser.py#L334).
 
 Gas-analyser studies distinguish transport delay from analyser rise time and
 show that sample tubing, connectors, internal gas exchange and acquisition
@@ -465,11 +483,11 @@ received MEXA audit log. Then use the **NO response time** tab:
    commands B, confirms the B flows and detects the final NO plateau.
 
 The buttons and result panel are created at
-[`qt_optimiser.py:295`](../flow_controller/ui/qt_optimiser.py#L295) to
-[`qt_optimiser.py:333`](../flow_controller/ui/qt_optimiser.py#L333), and the
+[`qt_optimiser.py:338`](../flow_controller/ui/qt_optimiser.py#L338) to
+[`qt_optimiser.py:376`](../flow_controller/ui/qt_optimiser.py#L376), and the
 confirmation dialog is at
-[`qt_optimiser.py:335`](../flow_controller/ui/qt_optimiser.py#L335) to
-[`qt_optimiser.py:350`](../flow_controller/ui/qt_optimiser.py#L350).
+[`qt_optimiser.py:378`](../flow_controller/ui/qt_optimiser.py#L378) to
+[`qt_optimiser.py:393`](../flow_controller/ui/qt_optimiser.py#L393).
 
 A stored condition is a snapshot of settled target flows, measured flows,
 controller assignments, capture time and, when available, the corresponding
@@ -854,8 +872,8 @@ automatic return-to-A command and does not zero the rig. This avoids introducing
 an unreviewed recovery transition; it also means the operator remains responsible
 for the physical condition after a partial or completed A-to-B move. The warning
 is explicit in the start dialog at
-[`qt_optimiser.py:341`](../flow_controller/ui/qt_optimiser.py#L341) to
-[`qt_optimiser.py:350`](../flow_controller/ui/qt_optimiser.py#L350), and cancel
+[`qt_optimiser.py:384`](../flow_controller/ui/qt_optimiser.py#L384) to
+[`qt_optimiser.py:393`](../flow_controller/ui/qt_optimiser.py#L393), and cancel
 behaviour is implemented at
 [`analyser_response_controller.py:403`](../flow_controller/core/analyser_response_controller.py#L403)
 to [`analyser_response_controller.py:416`](../flow_controller/core/analyser_response_controller.py#L416).
@@ -1396,8 +1414,10 @@ relationship. Such a relationship is a lower-dimensional path and requires a
 dedicated path parameter or explicit constraint; the present dialog searches a
 rectangular box in the selected variables.
 
-The default 16-point initial design remains available for three to five
-variables. It is a starting allocation, not a statistical guarantee. Increase
+The initial design defaults to the minimum: four completed tests for three
+variables, five for four variables, or six for five variables. The dialog updates
+this default when optional variables are selected or cleared. A larger initial
+design can still be entered. These minimum counts do not guarantee model accuracy. Increase
 the initial design and candidate pool when broad bounds, interactions or short
 length scales make the response harder to resolve. Reserve experiments for
 reference-condition repeats and confirmation of the apparent optimum.
