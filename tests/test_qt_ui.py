@@ -21,8 +21,10 @@ from flow_controller.core.combustion_prefs import (GEOMETRY_AREA,
 from flow_controller.core.session import (FlowSession, MODE_STAGED,
                                           MODE_STANDARD)
 from flow_controller.core.sequence import Sequence
+from flow_controller.domain.models import ControllerInfo, DiscoveryResult
 from flow_controller.ui import qt_config
 from flow_controller.ui.qt_main_window import MainWindow
+from flow_controller.ui.qt_connection_tab import ConnectionTab
 from flow_controller.ui.qt_operation_tab import (
     OperationTab, SafetyBar, _area_from_diameter, _sequence_stem,
 )
@@ -84,6 +86,45 @@ class QtUiTests(unittest.TestCase):
         self.assertEqual(
             harness.link,
             ('ok', '2 controllers · COM7 · 57600 baud'))
+
+    def test_com_port_is_a_populated_non_editable_dropdown(self):
+        session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
+        self.addCleanup(session.shutdown)
+        session.port = 'COM9'
+        with patch('flow_controller.core.session.serial.tools.list_ports.comports',
+                   return_value=[SimpleNamespace(device='COM7'), SimpleNamespace(device='COM9')]):
+            tab = ConnectionTab(session)
+        self.addCleanup(tab.close)
+        combo = tab.port_combo
+        self.assertFalse(combo.isEditable())
+        self.assertIsNone(combo.lineEdit())
+        self.assertEqual([combo.itemText(i) for i in range(combo.count())], ['COM7', 'COM9'])
+        self.assertEqual(tab._port(), 'COM9')
+
+        combo.setCurrentIndex(0)
+        tab._on_ports(['COM9', 'COM7'])
+        self.assertEqual(tab._port(), 'COM7')
+        tab._on_ports(['COM11'])
+        self.assertEqual(tab._port(), 'COM11')
+        tab._on_ports([])
+        self.assertEqual(tab._port(), '')
+        self.assertEqual(combo.placeholderText(), 'No COM ports found')
+
+    def test_connect_requires_gas_tables_from_the_selected_bus(self):
+        worker = SimpleNamespace(shutdown=lambda: None, submit=Mock())
+        session = FlowSession(worker=worker)
+        self.addCleanup(session.shutdown)
+        session.selection = {'A': ('Air', 'General')}
+        session.last_scan = DiscoveryResult(
+            [ControllerInfo('A', {'gas': 'Air'}, {0: 'Air'})],
+            port='COM7', baudrate=57600)
+        failures = []
+        session.failed.connect(lambda title, message: failures.append((title, message)))
+        for port, baudrate in (('COM9', 57600), ('COM7', 19200)):
+            with self.subTest(port=port, baudrate=baudrate):
+                self.assertFalse(session.connect_all(port, baudrate, accept_no_autocalc=True))
+        worker.submit.assert_not_called()
+        self.assertEqual([title for title, _ in failures], ['Scan required', 'Scan required'])
 
     def test_top_bar_owns_batch_and_zero_actions(self):
         session = _SafetySession()

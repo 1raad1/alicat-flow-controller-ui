@@ -4,8 +4,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                               QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
-from ..mexa.app import default_log_dir
-from ..mexa.records import RECEIVER_LOG_REQUIRED, additional_reading_text, reading_text
+from mexa_bridge.records import (RECEIVER_LOG_REQUIRED, additional_reading_text,
+                                 default_log_dir, reading_text)
 from .qt_widgets import Card
 from . import qt_theme as theme
 

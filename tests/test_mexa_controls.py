@@ -8,10 +8,10 @@ import time
 import unittest
 from unittest.mock import patch
 
-from flow_controller.mexa.bridge import Bridge
-from flow_controller.mexa.protocol import MODE_COMMANDS, ProtocolError, SerialReader, simulated_cycle
-from flow_controller.mexa.records import AuditLog, validate_packet
-from flow_controller.mexa.transport import StreamClient, connection_hint
+from mexa_bridge.bridge import Bridge
+from mexa_bridge.protocol import MODE_COMMANDS, ProtocolError, SerialReader, simulated_cycle
+from mexa_bridge.records import AuditLog, validate_packet
+from mexa_bridge.transport import StreamClient, connection_hint
 
 
 KEY = "local-control-tests-shared-key-12345"
@@ -72,7 +72,7 @@ class ModeProtocolTests(unittest.TestCase):
                 self.addCleanup(reader.close)
                 reader.port.response = bytes.fromhex(reply)
                 # Advance the deadline deterministically for missing/truncated data.
-                with patch("flow_controller.mexa.protocol.time.monotonic",
+                with patch("mexa_bridge.protocol.time.monotonic",
                            side_effect=[0, .1, .2, .3, .4, .5, .7]):
                     with self.assertRaises(ProtocolError):
                         reader.set_mode("meas")
@@ -110,7 +110,7 @@ class FakeReader:
 class BridgeControlTests(unittest.TestCase):
     def setUp(self):
         self.reader = FakeReader()
-        self.factory = patch("flow_controller.mexa.bridge.SerialReader", return_value=self.reader)
+        self.factory = patch("mexa_bridge.bridge.SerialReader", return_value=self.reader)
         self.factory.start()
         self.addCleanup(self.factory.stop)
         self.samples = []

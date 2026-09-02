@@ -18,7 +18,7 @@ from ..domain.bayesian import SearchConfig, corrected_no, finite
 from ..domain.combustion import CombustionCalculator
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from ..domain.roles import ROLES
-from ..mexa.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
+from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
 SCHEMA = 2

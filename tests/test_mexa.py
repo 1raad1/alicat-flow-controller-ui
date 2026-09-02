@@ -13,13 +13,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from flow_controller.mexa.protocol import (PEF_QUERY, ProtocolError, QUERIES, SerialReader,
+from mexa_bridge.protocol import (PEF_QUERY, ProtocolError, QUERIES, SerialReader,
                                            check_reply, decode_cycle, simulated_cycle)
-from flow_controller.mexa.records import (AuditLog, CHANNEL_FIELDS, LiveWindow, ReceivedSample,
+from mexa_bridge.records import (AuditLog, CHANNEL_FIELDS, LiveWindow, ReceivedSample,
                                           epoch, make_packet, utc_now, validate_packet)
-from flow_controller.mexa.transport import (Lines, StreamClient, StreamServer, send_line,
+from mexa_bridge.transport import (Lines, StreamClient, StreamServer, send_line,
                                             signature, validate_endpoint)
-from flow_controller.mexa.bridge import Bridge
+from mexa_bridge.bridge import Bridge
 from flow_controller.core.csv_logger import CsvLogger
 
 
@@ -204,10 +204,10 @@ class RecordTests(unittest.TestCase):
             item = deepcopy(p)
             item.update(seq=seq, acquired_at=(base + timedelta(seconds=seconds)).isoformat(), no_ppm=100 + seq)
             return ReceivedSample(item, utc_now(), time.monotonic(), "log.jsonl")
-        with patch("flow_controller.mexa.records.time.time", return_value=base.timestamp()):
+        with patch("mexa_bridge.records.time.time", return_value=base.timestamp()):
             capture = LiveWindow(sample(1, 0))
         for seq, seconds in ((2, 1), (3, 3), (4, 6)):
-            with patch("flow_controller.mexa.records.time.time", return_value=base.timestamp() + seconds):
+            with patch("mexa_bridge.records.time.time", return_value=base.timestamp() + seconds):
                 capture.add(sample(seq, seconds))
         result = capture.finish({"start": base.isoformat(), "end": (base + timedelta(seconds=6)).isoformat()}, 5)
         self.assertEqual(result["samples"], 3)
@@ -229,10 +229,10 @@ class RecordTests(unittest.TestCase):
                 item[key] = float(index + seq)
             return ReceivedSample(item, utc_now(), time.monotonic(), "audit.jsonl")
 
-        with patch("flow_controller.mexa.records.time.time", return_value=base.timestamp()):
+        with patch("mexa_bridge.records.time.time", return_value=base.timestamp()):
             capture = LiveWindow(sample(1, -1))
         for seq, seconds in ((2, 0), (3, 3), (4, 6)):
-            with patch("flow_controller.mexa.records.time.time",
+            with patch("mexa_bridge.records.time.time",
                        return_value=base.timestamp() + seconds):
                 capture.add(sample(seq, seconds))
         result = capture.finish(
@@ -376,7 +376,7 @@ class TransportTests(unittest.TestCase):
                 validate_endpoint(host, port, key)
 
     def test_bridge_simulation_streams_and_logs_without_serial(self):
-        with tempfile.TemporaryDirectory() as directory, patch("flow_controller.mexa.bridge.SerialReader") as serial:
+        with tempfile.TemporaryDirectory() as directory, patch("mexa_bridge.bridge.SerialReader") as serial:
             ready = threading.Event()
             source = []
             bridge = Bridge(host="127.0.0.1", port=self.port, token=self.key, serial_port="NEVER",
@@ -405,7 +405,7 @@ class TransportTests(unittest.TestCase):
             bridge.stop()
 
     def test_bridge_stream_only_never_creates_a_log(self):
-        with patch("flow_controller.mexa.bridge.AuditLog", side_effect=AssertionError("Unexpected disk write")) as log:
+        with patch("mexa_bridge.bridge.AuditLog", side_effect=AssertionError("Unexpected disk write")) as log:
             ready = threading.Event()
             bridge = Bridge(host="127.0.0.1", port=self.port, token=self.key, serial_port="NEVER",
                             save_logs=False, simulated=True, on_sample=lambda p: ready.set())

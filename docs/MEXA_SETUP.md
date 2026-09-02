@@ -21,6 +21,18 @@ software performs itself.
 
 ## Install on the analyser PC
 
+Already using the 28 August `MEXA-584L-bridge-wormhole.zip`? Keep that installation.
+The package separation and flow-meter connection fixes do not change its serial
+commands, measurement format, or network authentication. New receiver-side
+summary fields are calculated on the flow-controller PC. You do not need to
+reinstall the bridge for those changes.
+
+New builds keep the reader in a standalone `mexa_bridge/` package, outside
+`flow_controller/`. The bridge ZIP contains no burner-control code. Extract a
+new build into its own folder; do not mix its files with an older installation.
+Use the launchers included in that folder. The new module entrypoint is
+`python -m mexa_bridge.app`; older ZIPs keep their original launchers.
+
 1. Copy and extract the latest MEXA-584L bridge ZIP onto that PC.
    Do not run a launcher inside the ZIP. Alternatively, copy the full flow
    controller project; it contains the same reader.

@@ -44,6 +44,8 @@ class DiscoveryResult:
 
     controllers: list[ControllerInfo]
     error: str | None = None
+    port: str | None = None
+    baudrate: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

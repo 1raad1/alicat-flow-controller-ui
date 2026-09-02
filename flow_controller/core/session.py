@@ -34,7 +34,7 @@ import threading
 
 import serial
 import serial.tools.list_ports
-from alicat import FlowController
+from alicat import FlowController, FlowMeter
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
 
 from ..domain import combustion, roles
@@ -68,6 +68,27 @@ SCAN_RESPONSE_TIMEOUT_S = 0.15
 #: Consecutive read timeouts on one unit before the port is assumed wedged
 #: and the monitor is restarted rather than left silently stale.
 MAX_TIMEOUTS = 10
+
+#: Windows USB-serial drivers can briefly retain an exclusive COM handle after
+#: it is closed.  Retry only that transient open failure; protocol and device
+#: errors should still fail immediately.
+CONNECT_OPEN_ATTEMPTS = 3
+CONNECT_OPEN_RETRY_S = 0.15
+
+
+def _is_access_denied(error):
+    """Whether an exception chain represents a transient Windows port lock."""
+    seen = set()
+    current = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (isinstance(current, PermissionError)
+                or getattr(current, 'winerror', None) == 5
+                or getattr(current, 'errno', None) == 13
+                or 'access is denied' in str(current).casefold()):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 #: The application's own serial baud.  Selecting it does not reconfigure the
 #: instruments, so every device on the port must already be set to match; the
@@ -788,6 +809,15 @@ class FlowSession(QObject):
         if not port:
             self.failed.emit("Connection", "Select a COM port first.")
             return False
+        requested_baudrate = self.baudrate if baudrate is None else baudrate
+        if (self.last_scan is None
+                or (self.last_scan.port, self.last_scan.baudrate)
+                != (port, requested_baudrate)):
+            self.failed.emit(
+                "Scan required",
+                "Scan the selected COM port and baud rate before connecting. "
+                "Gas-table indices belong to the meters found on that bus.")
+            return False
         self.port = port
         if baudrate is not None:
             self.baudrate = baudrate
@@ -800,6 +830,7 @@ class FlowSession(QObject):
             return False
         gas_map = {unit: gas for unit, (gas, _zone) in self.selection.items()
                    if gas not in (roles.UNSELECTED_GAS, '', None)}
+        gas_indexes = self._cached_gas_indexes(gas_map)
 
         self.is_connecting = True
         self.controllers_connected = False
@@ -811,7 +842,8 @@ class FlowSession(QObject):
             f"{self.baudrate} baud…")
         try:
             self._connection_future = self._submit(
-                self._configure_async(port, self.baudrate, units, gas_map),
+                self._configure_async(
+                    port, self.baudrate, units, gas_map, gas_indexes),
                 self._finish_connect)
         except Exception as exc:
             self.is_connecting = False
@@ -820,43 +852,86 @@ class FlowSession(QObject):
             return False
         return True
 
-    async def _configure_async(self, port, baudrate, units, gas_map):
-        """Program requested gases, poll every unit, return what was confirmed."""
-        confirmed = {}
-        errors = {}
-        for unit in units:
-            gas_name = gas_map.get(unit)
+    def _cached_gas_indexes(self, gas_map):
+        """Resolve selected gas names from the table already read by the scan."""
+        scanned = {
+            controller.unit: controller
+            for controller in getattr(self.last_scan, 'controllers', ())
+        }
+        indexes = {}
+        for unit, gas_name in gas_map.items():
+            controller = scanned.get(unit)
+            if controller is None:
+                continue
+            wanted = str(gas_name).strip().casefold()
+            index = next(
+                (index for index, name in controller.supported_gases.items()
+                 if str(name).strip().casefold() == wanted),
+                None)
+            if index is not None:
+                indexes[unit] = index
+            elif controller.active_gas.casefold() == wanted:
+                # Some firmware reports the active gas but omits the table.
+                # It is already selected, so confirm it without guessing a
+                # register from the driver's unrelated global gas list.
+                indexes[unit] = None
+        return indexes
+
+    async def _configure_async(
+            self, port, baudrate, units, gas_map, gas_indexes=None):
+        """Program and confirm every unit through one shared serial handle."""
+        units = tuple(units)
+        gas_indexes = gas_indexes or {}
+        configuration_errors = {
+            unit: f'ValueError: No gas-table index is known for "{gas_map[unit]}" on Unit {unit}'
+            for unit in units if gas_map.get(unit) and unit not in gas_indexes
+        }
+        units = tuple(unit for unit in units if unit not in configuration_errors)
+        if not units:
+            return {}, configuration_errors
+
+        for attempt in range(1, CONNECT_OPEN_ATTEMPTS + 1):
+            confirmed = {}
+            errors = dict(configuration_errors)
             try:
-                gas_index = None
-                if gas_name:
-                    supported = self._protocol.query_gases(port, unit, baudrate)
-                    if supported and gas_name not in supported.values():
-                        listed = ", ".join(sorted(supported.values()))
-                        raise ValueError(
-                            f'"{gas_name}" is not in the gas table ({listed})')
-                    gas_index = next(
-                        (index for index, name in supported.items()
-                         if name == gas_name), None)
-                    if gas_index is not None:
-                        self._protocol.set_gas(port, unit, gas_index, baudrate)
+                async with FlowMeter(
+                        address=port, unit=units[0], baudrate=baudrate,
+                        timeout=0.3) as meter:
+                    for unit in units:
+                        meter.unit = unit
+                        meter.keys = [
+                            'pressure', 'temperature', 'volumetric_flow',
+                            'mass_flow', 'setpoint', 'gas',
+                        ]
+                        meter.hw.timeouts = 0
+                        gas_name = gas_map.get(unit)
+                        try:
+                            if gas_name:
+                                gas_index = gas_indexes[unit]
+                                if gas_index is not None:
+                                    await asyncio.wait_for(
+                                        meter.set_gas(gas_index), timeout=3.0)
+                            reading = await asyncio.wait_for(
+                                meter.get(), timeout=2.0)
 
-                async with FlowController(
-                        address=port, unit=unit, baudrate=baudrate,
-                        timeout=0.3) as controller:
-                    if gas_name and gas_index is None:
-                        await asyncio.wait_for(
-                            controller.set_gas(gas_name), timeout=3.0)
-                    reading = await asyncio.wait_for(controller.get(), timeout=2.0)
-
-                actual_gas = str(reading.get('gas', '')).strip()
-                if gas_name and actual_gas.casefold() != gas_name.casefold():
-                    raise OSError(
-                        f"gas readback mismatch: requested {gas_name}, "
-                        f"got {actual_gas or 'unknown'}")
-                confirmed[unit] = reading
+                            actual_gas = str(reading.get('gas', '')).strip()
+                            if (gas_name and actual_gas.casefold()
+                                    != str(gas_name).casefold()):
+                                raise OSError(
+                                    f"gas readback mismatch: requested {gas_name}, "
+                                    f"got {actual_gas or 'unknown'}")
+                            confirmed[unit] = reading
+                        except Exception as exc:
+                            if _is_access_denied(exc):
+                                raise
+                            errors[unit] = f"{type(exc).__name__}: {exc}"
+                return confirmed, errors
             except Exception as exc:
-                errors[unit] = f"{type(exc).__name__}: {exc}"
-        return confirmed, errors
+                if not _is_access_denied(exc) or attempt == CONNECT_OPEN_ATTEMPTS:
+                    return {}, {"serial port": f"{type(exc).__name__}: {exc}"}
+                await asyncio.sleep(CONNECT_OPEN_RETRY_S * attempt)
+
+        raise AssertionError("unreachable")
 
     def _finish_connect(self, future):
         self._connection_future = None

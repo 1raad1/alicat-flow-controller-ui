@@ -21,8 +21,8 @@ from flow_controller.ui.qt_main_window import MainWindow
 from flow_controller.ui.qt_optimiser import ExperimentDialog
 from flow_controller.ui.qt_operation_tab import OperationTab
 from flow_controller.core.optimisation import Experiment
-from flow_controller.mexa.protocol import simulated_cycle
-from flow_controller.mexa.records import ReceivedSample, make_packet
+from mexa_bridge.protocol import simulated_cycle
+from mexa_bridge.records import ReceivedSample, make_packet
 
 
 class QtOptimiserTests(unittest.TestCase):
@@ -180,7 +180,7 @@ class QtOptimiserTests(unittest.TestCase):
         return sample
 
     def start_live(self):
-        clock = patch("flow_controller.mexa.records.time.time", side_effect=lambda: self.clock.timestamp())
+        clock = patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp())
         clock.start()
         self.addCleanup(clock.stop)
         self.mexa(1)
@@ -248,7 +248,7 @@ class QtOptimiserTests(unittest.TestCase):
 
     def test_unlogged_preview_stream_cannot_start_an_optimiser_window(self):
         from dataclasses import replace
-        with patch("flow_controller.mexa.records.time.time", side_effect=lambda: self.clock.timestamp()):
+        with patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp()):
             sample = self.mexa(1)
             self.session.mexa.latest = replace(sample, log_path="")
             with self.assertRaisesRegex(ValueError, "Save received MEXA logs"):
@@ -257,7 +257,7 @@ class QtOptimiserTests(unittest.TestCase):
         self.assertTrue(self.session.setpoint_queue.empty())
 
     def test_simulated_stream_cannot_start_experimental_window(self):
-        with patch("flow_controller.mexa.records.time.time", side_effect=lambda: self.clock.timestamp()):
+        with patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp()):
             self.mexa(1, simulated=True)
             with self.assertRaisesRegex(ValueError, "Simulated"):
                 self.controller.start_window(True, True, live=True)

@@ -10,8 +10,7 @@ def build(destination, *, relay=False):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if relay:
-        sources = [root / "flow_controller" / "__init__.py",
-                   *(root / "flow_controller" / "mexa" / name for name in
+        sources = [*(root / "mexa_bridge" / name for name in
                      ("__init__.py", "records.py", "transport.py", "relay.py", "relay_server.py", "relay_host.py")),
                    root / "requirements-relay.txt", root / "docs" / "MEXA_RELAY.md",
                    root / "docs" / "MEXA_QUICK_TUNNEL.md",
@@ -21,8 +20,9 @@ def build(destination, *, relay=False):
                    root / "deploy" / "mexa-relay" / "Caddyfile.example",
                    root / "deploy" / "mexa-relay" / "Dockerfile"]
     else:
-        sources = [root / "flow_controller" / "__init__.py",
-                   *sorted((root / "flow_controller" / "mexa").glob("*.py")),
+        sources = [*(root / "mexa_bridge" / name for name in
+                     ("__init__.py", "app.py", "bridge.py", "protocol.py", "records.py",
+                      "transport.py", "relay.py", "relay_server.py")),
                    root / "install_mexa_bridge.bat", root / "run_mexa_bridge.bat",
                    root / "run_mexa_relay_local.bat",
                    root / "requirements-mexa.txt", root / "docs" / "MEXA_SETUP.md",

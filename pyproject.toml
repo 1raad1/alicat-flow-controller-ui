@@ -27,12 +27,12 @@ xlsx = ["openpyxl>=3.1,<4"]
 
 [project.scripts]
 flow-controller-v3 = "flow_controller.ui.qt_main_window:main"
-mexa-584l-bridge = "flow_controller.mexa.app:main"
-mexa-584l-relay = "flow_controller.mexa.relay_server:main"
+mexa-584l-bridge = "mexa_bridge.app:main"
+mexa-584l-relay = "mexa_bridge.relay_server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["flow_controller*"]
+include = ["flow_controller*", "mexa_bridge*"]
 
 [tool.setuptools.package-data]
 "flow_controller.ui" = ["assets/*.svg"]

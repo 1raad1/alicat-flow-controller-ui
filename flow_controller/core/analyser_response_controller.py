@@ -13,7 +13,7 @@ from .optimisation import FLOW_ABS_TOL, FLOW_REL_TOL
 from ..domain.analyser_response import AnalyserResponseDetector
 from ..domain.bayesian import finite
 from ..domain.roles import RAMP_KEYS, ROLE_LABELS
-from ..mexa.records import epoch
+from mexa_bridge.records import epoch
 
 
 FLOW_STABLE_HOLD_S = 3.0

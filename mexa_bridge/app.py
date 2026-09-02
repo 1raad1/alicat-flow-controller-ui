@@ -1,7 +1,5 @@
 """Standalone MEXA reader with explicitly confirmed, local-only mode controls."""
 
-import os
-from pathlib import Path
 import secrets
 import sys
 
@@ -13,16 +11,12 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, 
                               QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .bridge import Bridge
-from .records import ReceivedSample, additional_reading_text, reading_text, utc_now
+from .records import ReceivedSample, additional_reading_text, default_log_dir, reading_text, utc_now
 from .transport import DEFAULT_PORT
 import time
 
 # This reader deliberately starts with a new in-memory shared key on each
 # launch. It never writes a network credential into a measurement log.
-
-
-def default_log_dir():
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "Documents"))) / "MEXA-584L" / "logs"
 
 
 class BridgeSignals(QObject):

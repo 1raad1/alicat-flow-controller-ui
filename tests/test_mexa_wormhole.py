@@ -17,9 +17,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from flow_controller.core.mexa_controller import MexaController
-from flow_controller.mexa import wormhole
-from flow_controller.mexa.bridge import Bridge
-from flow_controller.mexa.quick_tunnel import HostError, QuickTunnelHost, helper_environment
+from mexa_bridge import wormhole
+from mexa_bridge.bridge import Bridge
+from mexa_bridge.quick_tunnel import HostError, QuickTunnelHost, helper_environment
 from flow_controller.ui.qt_mexa import MexaTab
 from tests.test_mexa_quick_tunnel import SHARED, wait_for
 
@@ -213,12 +213,12 @@ class WormholeLifecycleTests(unittest.TestCase):
             self.assertTrue(wait_for(lambda: controller.client is not None))
             self.assertEqual(controller.temporary_host.provider, "wormhole")
             self.assertFalse(tab.tunnel_provider.isEnabled())
-            from flow_controller.mexa.protocol import simulated_cycle
+            from mexa_bridge.protocol import simulated_cycle
             cycle = simulated_cycle(1)
             cycle.update(no_ppm=-2, valid=False, alarms=["no_out_of_range"], rpm=2400,
                          oil_temperature_c=85, options=15, afr=14.7, **{"lambda": 1.234})
-            with patch("flow_controller.mexa.bridge.simulated_cycle", return_value=cycle), \
-                 patch("flow_controller.mexa.bridge.StreamServer", side_effect=AssertionError("No LAN listener")):
+            with patch("mexa_bridge.bridge.simulated_cycle", return_value=cycle), \
+                 patch("mexa_bridge.bridge.StreamServer", side_effect=AssertionError("No LAN listener")):
                 bridge = Bridge(host="127.0.0.1", port=61234, token=SHARED, serial_port="NEVER",
                                 simulated=True, save_logs=False, transport="relay",
                                 relay_url=controller.host_status.local_url, relay_key=controller.host_status.publisher_key)
