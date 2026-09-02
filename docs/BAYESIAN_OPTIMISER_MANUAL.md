@@ -115,7 +115,7 @@ and leaves the reference unchanged. The copy and its acquisition time are
 displayed by
 [`qt_optimiser.py:175`](../flow_controller/ui/qt_optimiser.py#L175), using the
 existing sample checks at
-[`mexa_controller.py:195`](../flow_controller/core/mexa_controller.py#L195).
+[`mexa_controller.py:200`](../flow_controller/core/mexa_controller.py#L200).
 
 You can edit the copied value or click again before saving. The dialog passes
 the field into `reference_o2` (the reporting oxygen percentage for the campaign)

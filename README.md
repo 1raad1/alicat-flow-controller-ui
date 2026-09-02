@@ -219,9 +219,8 @@ For the algorithms, equations, file format and code map, see the
    This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
    present. Every assigned pilot fuel line must be off during measurements.
 2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
-   initial-design size (default 4, 5 or 6 completed tests for 3, 4 or 5 variables),
-   candidate-pool size and minimum averaging window (default 30 seconds).
-   **Use current O₂**, beside the
+   initial-design size (default 16 completed tests), candidate-pool size and
+   minimum averaging window (default 30 seconds). **Use current O₂**, beside the
    reference field, copies one fresh, validated, uncorrected dry MEXA reading;
    receiver logging must be enabled. You can edit it before saving. It does not
    follow later readings or change burner flows. The initial design must contain
