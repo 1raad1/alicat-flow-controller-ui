@@ -18,10 +18,10 @@ from PySide6.QtWidgets import QApplication
 
 from flow_controller.core.csv_logger import CsvLogger
 from flow_controller.core.mexa_controller import MexaController
-from flow_controller.mexa.protocol import PEF_QUERY, QUERIES, ProtocolError, SerialReader, decode_cycle, decode_pef, simulated_cycle
-from flow_controller.mexa.records import (AuditLog, CHANNEL_FIELDS, ReceivedSample, additional_reading_text,
+from mexa_bridge.protocol import PEF_QUERY, QUERIES, ProtocolError, SerialReader, decode_cycle, decode_pef, simulated_cycle
+from mexa_bridge.records import (AuditLog, CHANNEL_FIELDS, ReceivedSample, additional_reading_text,
                                           make_packet, utc_now, validate_packet)
-from flow_controller.mexa.transport import StreamServer
+from mexa_bridge.transport import StreamServer
 from flow_controller.ui.qt_mexa import MexaTab
 
 
@@ -214,7 +214,7 @@ class ChannelLogAndUITests(unittest.TestCase):
             self.assertNotIn("2400", additional_reading_text(self.controller.latest))
 
     def test_error_and_control_packets_do_not_retain_previous_extra_channels(self):
-        from flow_controller.mexa.bridge import Bridge
+        from mexa_bridge.bridge import Bridge
         cycle = Bridge._control_cycle("standby", "requested")
         p = make_packet(cycle, str(uuid.uuid4()), 2, simulated=False, validated=False, dry=True, cycle_s=.1)
         for field in CHANNEL_FIELDS:

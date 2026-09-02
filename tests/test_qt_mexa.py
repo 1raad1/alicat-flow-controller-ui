@@ -16,10 +16,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from flow_controller.core.mexa_controller import MexaController
-from flow_controller.mexa.app import BridgeWindow
-from flow_controller.mexa.bridge import Bridge
-from flow_controller.mexa.records import AuditLog, ReceivedSample, make_packet, utc_now
-from flow_controller.mexa.protocol import simulated_cycle
+from mexa_bridge.app import BridgeWindow
+from mexa_bridge.bridge import Bridge
+from mexa_bridge.records import AuditLog, ReceivedSample, make_packet, utc_now
+from mexa_bridge.protocol import simulated_cycle
 from flow_controller.ui.qt_mexa import MexaTab
 import uuid
 
@@ -92,7 +92,7 @@ class QtMexaTests(unittest.TestCase):
         self.assertIsNone(self.controller.csv_snapshot(now)["mexa_no_ppm"])
 
     def test_views_start_disconnected_without_io(self):
-        with patch("flow_controller.mexa.app.Bridge") as bridge:
+        with patch("mexa_bridge.app.Bridge") as bridge:
             window = BridgeWindow()
             tab = MexaTab(self.controller)
             self.addCleanup(window.close)
@@ -212,7 +212,7 @@ class QtMexaTests(unittest.TestCase):
         self.assertFalse(rebuilt.save_logs.isChecked())
 
     def test_bridge_ui_starts_stream_only_without_a_folder(self):
-        with patch("flow_controller.mexa.app.Bridge") as bridge:
+        with patch("mexa_bridge.app.Bridge") as bridge:
             bridge.return_value.log = None
             bridge.return_value.running = True
             bridge.return_value.stop.return_value = True
@@ -234,7 +234,7 @@ class QtMexaTests(unittest.TestCase):
         window = BridgeWindow()
         self.addCleanup(tab.close)
         self.addCleanup(window.close)
-        with patch("flow_controller.mexa.app.Bridge") as fake:
+        with patch("mexa_bridge.app.Bridge") as fake:
             fake.return_value.running = True
             fake.return_value.stop.return_value = True
             window.bridge = fake.return_value
@@ -273,8 +273,8 @@ class QtMexaTests(unittest.TestCase):
             self.assertIsNone(self.controller.csv_snapshot(datetime.now())["mexa_reported_no_ppm"])
 
     def test_out_of_range_stream_reaches_receiver_without_disconnect(self):
-        from flow_controller.mexa.protocol import decode_cycle
-        from flow_controller.mexa.transport import StreamServer
+        from mexa_bridge.protocol import decode_cycle
+        from mexa_bridge.transport import StreamServer
         frames = {key: bytearray.fromhex(value) for key, value in self.packet()["raw"].items()}
         frames["channels"][21:23] = bytes.fromhex("17 70")  # 6000 ppm, above the configured range
         frames["channels"][-1] = -sum(frames["channels"][:-1]) & 255
@@ -298,7 +298,7 @@ class QtMexaTests(unittest.TestCase):
         self.assertEqual(len(self.controller.log.path.read_text().splitlines()), 2)
 
     def test_mode_buttons_require_enablement_confirmation_and_fresh_state(self):
-        with patch("flow_controller.mexa.app.Bridge") as factory:
+        with patch("mexa_bridge.app.Bridge") as factory:
             window = BridgeWindow()
             self.addCleanup(window.close)
             self.assertFalse(window.meas_button.isEnabled())
@@ -311,11 +311,11 @@ class QtMexaTests(unittest.TestCase):
             self.assertFalse(window.meas_button.isEnabled())
             window.enable_controls.setChecked(True)
             self.assertTrue(window.meas_button.isEnabled())
-            with patch("flow_controller.mexa.app.QMessageBox.question", return_value=QMessageBox.StandardButton.No):
+            with patch("mexa_bridge.app.QMessageBox.question", return_value=QMessageBox.StandardButton.No):
                 window._mode("meas")
             window.bridge.request_mode.assert_not_called()
             window.validated.setChecked(True)
-            with patch("flow_controller.mexa.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            with patch("mexa_bridge.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
                 window._mode("meas")
             window.bridge.request_mode.assert_called_once_with("meas")
             self.assertFalse(window.validated.isChecked())

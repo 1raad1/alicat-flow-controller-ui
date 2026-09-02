@@ -774,12 +774,12 @@ to [`optimiser_controller.py:372`](../flow_controller/core/optimiser_controller.
 
 Transient samples received during the delay remain in the receiver's JSONL and
 CSV audit logs, whose write path is at
-[`records.py:123`](../flow_controller/mexa/records.py#L123) to
-[`records.py:151`](../flow_controller/mexa/records.py#L151). They are excluded
+[`records.py:128`](../mexa_bridge/records.py#L128) to
+[`records.py:156`](../mexa_bridge/records.py#L156). They are excluded
 from the optimiser NO/O2 mean because `LiveWindow` is created only after the
 delay. Its accepted samples and arithmetic channel means are implemented at
-[`records.py:232`](../flow_controller/mexa/records.py#L232) to
-[`records.py:314`](../flow_controller/mexa/records.py#L314). Manual-input windows
+[`records.py:237`](../mexa_bridge/records.py#L237) to
+[`records.py:319`](../mexa_bridge/records.py#L319). Manual-input windows
 do not use the automatic delay because `start_window()` assigns zero delay unless
 live capture is selected at
 [`optimiser_controller.py:242`](../flow_controller/core/optimiser_controller.py#L242)
@@ -815,8 +815,8 @@ with limits declared at
 to [`analyser_response.py:37`](../flow_controller/domain/analyser_response.py#L37).
 The controller additionally requires a valid, non-simulated, validated, dry,
 uncorrected live reading and the same receiver log. The MEXA validity and basis
-checks are at [`records.py:179`](../flow_controller/mexa/records.py#L179) to
-[`records.py:199`](../flow_controller/mexa/records.py#L199), and the response
+checks are at [`records.py:184`](../mexa_bridge/records.py#L184) to
+[`records.py:204`](../mexa_bridge/records.py#L204), and the response
 controller applies them at
 [`analyser_response_controller.py:267`](../flow_controller/core/analyser_response_controller.py#L267)
 to [`analyser_response_controller.py:298`](../flow_controller/core/analyser_response_controller.py#L298).
@@ -1273,8 +1273,8 @@ checks that the log agrees with the saved trial, window and outcome at
 CO2, HC, AFR, lambda, RPM, oil temperature and PEF are stored when available but
 are explicitly informational and are not separately validated; missing values
 are omitted from that channel's statistics rather than filled. That distinction
-is recorded at [`records.py:249`](../flow_controller/mexa/records.py#L249) to
-[`records.py:269`](../flow_controller/mexa/records.py#L269).
+is recorded at [`records.py:254`](../mexa_bridge/records.py#L254) to
+[`records.py:274`](../mexa_bridge/records.py#L274).
 
 The requested **target flow** is the desired value loaded for a role. A
 **setpoint** is the controller's commanded value read back during the window,
@@ -1301,8 +1301,8 @@ The same summary function calculates setpoint and measured-flow statistics with
 [`optimisation.py:942`](../flow_controller/core/optimisation.py#L942) to
 [`optimisation.py:957`](../flow_controller/core/optimisation.py#L957). MEXA uses
 `statistics.mean`, `statistics.stdev`, `min` and `max` at
-[`records.py:244`](../flow_controller/mexa/records.py#L244) to
-[`records.py:260`](../flow_controller/mexa/records.py#L260). Here `ddof=1` and
+[`records.py:249`](../mexa_bridge/records.py#L249) to
+[`records.py:265`](../mexa_bridge/records.py#L265). Here `ddof=1` and
 `statistics.stdev` both use the $n-1$ sample-SD denominator. When an auxiliary
 MEXA channel has only one retained value, its SD is saved as `null`; the MEXA
 summary saves each channel's own sample count because auxiliary channels can be
@@ -1318,8 +1318,8 @@ Range checks, the correction factor and optional NO-SEM scaling are implemented
 at [`bayesian.py:166`](../flow_controller/domain/bayesian.py#L166) to
 [`bayesian.py:183`](../flow_controller/domain/bayesian.py#L183). The live MEXA
 path first calculates arithmetic channel means at
-[`records.py:259`](../flow_controller/mexa/records.py#L259) to
-[`records.py:264`](../flow_controller/mexa/records.py#L264); it does not average
+[`records.py:264`](../mexa_bridge/records.py#L264) to
+[`records.py:269`](../mexa_bridge/records.py#L269); it does not average
 already corrected samples.
 
 A **SHA-256 digest** is a fixed-length identifier calculated from bytes. For
@@ -1370,8 +1370,8 @@ continuous-log reference at
 [`optimisation.py:971`](../flow_controller/core/optimisation.py#L971) to
 [`optimisation.py:976`](../flow_controller/core/optimisation.py#L976), while the
 MEXA receiver writes each packet to separate JSONL and CSV logs at
-[`records.py:123`](../flow_controller/mexa/records.py#L123) to
-[`records.py:161`](../flow_controller/mexa/records.py#L161). Keep those raw files
+[`records.py:128`](../mexa_bridge/records.py#L128) to
+[`records.py:166`](../mexa_bridge/records.py#L166). Keep those raw files
 with the campaign JSON when packet-level or flow-pass reconstruction is required.
 The flow audit path is absent when continuous flow logging was not active; live
 MEXA capture, by contrast, requires its receiver audit log before a window can

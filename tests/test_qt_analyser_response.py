@@ -20,8 +20,8 @@ from flow_controller.core.optimisation import Experiment
 from flow_controller.core.optimiser_controller import OptimiserController
 from flow_controller.core.session import FlowSession, MODE_STAGED
 from flow_controller.domain.bayesian import SearchConfig
-from flow_controller.mexa.protocol import simulated_cycle
-from flow_controller.mexa.records import ReceivedSample, make_packet
+from mexa_bridge.protocol import simulated_cycle
+from mexa_bridge.records import ReceivedSample, make_packet
 from flow_controller.ui.qt_operation_tab import OperationTab
 
 
@@ -64,7 +64,7 @@ class QtAnalyserResponseTests(unittest.TestCase):
                 self.wall.replace(tzinfo=timezone.utc) if tz else self.wall)
             self.addCleanup(item.stop)
         self.time_patch = patch(
-            "flow_controller.mexa.records.time.time",
+            "mexa_bridge.records.time.time",
             side_effect=lambda: self.wall.astimezone(timezone.utc).timestamp())
         self.time_patch.start()
         self.addCleanup(self.time_patch.stop)

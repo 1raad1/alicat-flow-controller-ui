@@ -20,8 +20,11 @@ by the apps or installers.
 
 ## Set up the two PCs
 
-Update both apps. On the analyser PC, extract the new bridge package and rerun
-`install_mexa_bridge.bat` to install the WebSocket dependency. On the flow PC,
+If the installed bridge already offers **Internet relay (outbound WSS)**,
+including the 28 August Wormhole package, it remains compatible with this
+flow-app update. Keep that installation. For a bridge predating relay support,
+extract a new package and run `install_mexa_bridge.bat` to install the WebSocket
+dependency. On the flow PC,
 rerun its installer or install the updated `requirements.txt` into the existing
 app environment. Restart the apps when safe for the rig.
 
@@ -85,7 +88,7 @@ on Linux or `.venv\Scripts\python.exe` on Windows):
 
 ```text
 python -m pip install -r requirements-relay.txt
-python -m flow_controller.mexa.relay_server --generate-keys
+python -m mexa_bridge.relay_server --generate-keys
 ```
 
 The second command prints two fresh keys once. Store them in the server's
@@ -105,7 +108,7 @@ Start the backend on loopback, with those environment variables available to
 the process:
 
 ```text
-python -m flow_controller.mexa.relay_server --host 127.0.0.1 --port 8765
+python -m mexa_bridge.relay_server --host 127.0.0.1 --port 8765
 ```
 
 Use an approved HTTPS reverse proxy on that same server to expose `/mexa` on
@@ -120,7 +123,7 @@ If your administrator manages certificates directly, the Python server can
 terminate TLS itself:
 
 ```text
-python -m flow_controller.mexa.relay_server --host 0.0.0.0 --port 8443 --cert /path/fullchain.pem --key /path/privkey.pem
+python -m mexa_bridge.relay_server --host 0.0.0.0 --port 8443 --cert /path/fullchain.pem --key /path/privkey.pem
 ```
 
 Use the corresponding `wss://hostname:8443/mexa` URL. Port 443 is preferable on
@@ -214,7 +217,7 @@ has been exposed.
   suspended applications. Do not extend the age limit to accept delayed data.
 
 For a same-PC simulation test, run `run_mexa_relay_local.bat` on Windows, or
-`python -m flow_controller.mexa.relay_server --local-test`. It prints temporary
+`python -m mexa_bridge.relay_server --local-test`. It prints temporary
 publisher/receiver keys and starts on `ws://127.0.0.1:8765/mexa`. Enter those
 keys and that URL in the apps on the same PC. Keep its console open; Ctrl+C
 stops it and invalidates the temporary keys. It is not reachable from another

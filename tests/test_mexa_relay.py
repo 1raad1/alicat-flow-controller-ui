@@ -26,14 +26,14 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from flow_controller.core.mexa_controller import MexaController
-from flow_controller.mexa.app import BridgeWindow
-from flow_controller.mexa.bridge import Bridge
-from flow_controller.mexa.protocol import simulated_cycle
-from flow_controller.mexa.records import CHANNEL_FIELDS, MAX_LINE, make_packet
-from flow_controller.mexa.relay import (RelayPublisher, RelayReceiver, decode, encode, quiet_logger,
+from mexa_bridge.app import BridgeWindow
+from mexa_bridge.bridge import Bridge
+from mexa_bridge.protocol import simulated_cycle
+from mexa_bridge.records import CHANNEL_FIELDS, MAX_LINE, make_packet
+from mexa_bridge.relay import (RelayPublisher, RelayReceiver, decode, encode, quiet_logger,
                                         receive, send, validate_relay_url)
-from flow_controller.mexa.relay_server import RelayService, main, server_tls
-from flow_controller.mexa.transport import signature
+from mexa_bridge.relay_server import RelayService, main, server_tls
+from mexa_bridge.transport import signature
 from flow_controller.ui.qt_mexa import MexaTab
 
 PUBLISH_KEY = "publisher-test-key-" + "p" * 32
@@ -152,20 +152,20 @@ class RelayConfigurationTests(unittest.TestCase):
                 with zipfile.ZipFile(archive_path) as archive:
                     self.assertIsNone(archive.testzip())
                     names = archive.namelist()
-                    for name in ("flow_controller/mexa/relay.py", "flow_controller/mexa/relay_server.py",
+                    for name in ("mexa_bridge/relay.py", "mexa_bridge/relay_server.py",
                                  "docs/MEXA_RELAY.md", "run_mexa_relay_local.bat"):
                         self.assertIn(prefix + name, names)
                     self.assertFalse(any(name.endswith((".csv", ".jsonl", ".exe", ".pem", ".env")) for name in names))
                     if relay:
-                        self.assertNotIn(prefix + "flow_controller/mexa/app.py", names)
+                        self.assertNotIn(prefix + "mexa_bridge/app.py", names)
                         self.assertIn(prefix + "requirements-relay.txt", names)
                         self.assertIn(prefix + "CACHYOS_START_HERE.md", names)
-                        self.assertIn(prefix + "flow_controller/mexa/relay_host.py", names)
+                        self.assertIn(prefix + "mexa_bridge/relay_host.py", names)
                         for name in ("install_relay_host.sh", "run_relay_host.sh"):
                             self.assertNotIn(b"\r", archive.read(prefix + name))
                             self.assertEqual(archive.getinfo(prefix + name).external_attr >> 16 & 0o777, 0o755)
                     else:
-                        self.assertIn(prefix + "flow_controller/mexa/app.py", names)
+                        self.assertIn(prefix + "mexa_bridge/app.py", names)
                         self.assertIn(b"websockets", archive.read(prefix + "requirements-mexa.txt"))
                 with self.assertRaises(FileExistsError):
                     build(archive_path, relay=relay)
@@ -403,7 +403,7 @@ class RelayQtTests(unittest.TestCase):
 
     def test_bridge_and_receiver_relay_logs_no_lan_listener_and_recovery(self):
         source_dir = Path(self.directory.name) / "source"
-        with patch("flow_controller.mexa.bridge.StreamServer", side_effect=AssertionError("LAN listener in relay mode")):
+        with patch("mexa_bridge.bridge.StreamServer", side_effect=AssertionError("LAN listener in relay mode")):
             bridge = Bridge(host="ignored", port=61234, token=SHARED_KEY, serial_port="NEVER",
                             simulated=True, directory=source_dir, save_logs=True,
                             transport="relay", relay_url=self.relay.url, relay_key=PUBLISH_KEY)
@@ -429,7 +429,7 @@ class RelayQtTests(unittest.TestCase):
         self.assertEqual(self.controller.latest.packet["source_id"], sample.packet["source_id"])
 
     def test_relay_stream_only_does_not_create_logs(self):
-        with patch("flow_controller.mexa.bridge.AuditLog", side_effect=AssertionError("Unexpected source log")):
+        with patch("mexa_bridge.bridge.AuditLog", side_effect=AssertionError("Unexpected source log")):
             bridge = Bridge(host="ignored", port=61234, token=SHARED_KEY, serial_port="NEVER",
                             simulated=True, save_logs=False, transport="relay", relay_url=self.relay.url, relay_key=PUBLISH_KEY)
         self.addCleanup(bridge.stop)
@@ -513,7 +513,7 @@ class RelayTLSTests(unittest.TestCase):
                 self.assertTrue(context.check_hostname)
                 self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
                 received, statuses = [], []
-                with patch("flow_controller.mexa.relay.ssl.create_default_context", return_value=context):
+                with patch("mexa_bridge.relay.ssl.create_default_context", return_value=context):
                     publisher = RelayPublisher(relay.url, PUBLISH_KEY, SHARED_KEY, statuses.append)
                     receiver = RelayReceiver(relay.url, RECEIVE_KEY, SHARED_KEY, received.append, lambda *s: None)
                     receiver.start()

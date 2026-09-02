@@ -57,6 +57,7 @@ class DiscoveryServiceTests(unittest.TestCase):
         result = asyncio.run(service.scan("COM_TEST", 115200, ("A", "B"), 0.01))
 
         self.assertIsNone(result.error)
+        self.assertEqual((result.port, result.baudrate), ("COM_TEST", 115200))
         self.assertEqual([controller.unit for controller in result.controllers], ["A", "B"])
         self.assertEqual(result.controllers[0].gas_options(), ["Air", "N2"])
         self.assertEqual(result.controllers[1].gas_options(), ["H2", "He"])

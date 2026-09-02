@@ -17,8 +17,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from flow_controller.core.mexa_controller import MexaController
-from flow_controller.mexa.bridge import Bridge
-from flow_controller.mexa.quick_tunnel import (
+from mexa_bridge.bridge import Bridge
+from mexa_bridge.quick_tunnel import (
     HostError, HostStatus, QuickTunnelHost, helper_command, helper_environment, prepare_helper, tunnel_event,
 )
 from flow_controller.ui.qt_mexa import MexaTab
@@ -82,10 +82,10 @@ class HelperTests(unittest.TestCase):
         target = Path(directory) / "helper.exe"
         response = io.BytesIO(content)
         response.url = "https://release-assets.githubusercontent.com/asset"
-        with patch("flow_controller.mexa.quick_tunnel.default_helper_path", return_value=target), \
-             patch("flow_controller.mexa.quick_tunnel.WINDOWS_SIZE", len(content)), \
-             patch("flow_controller.mexa.quick_tunnel.WINDOWS_SHA256", expected or hashlib.sha256(content).hexdigest()), \
-             patch("flow_controller.mexa.quick_tunnel.urllib.request.urlopen", return_value=response):
+        with patch("mexa_bridge.quick_tunnel.default_helper_path", return_value=target), \
+             patch("mexa_bridge.quick_tunnel.WINDOWS_SIZE", len(content)), \
+             patch("mexa_bridge.quick_tunnel.WINDOWS_SHA256", expected or hashlib.sha256(content).hexdigest()), \
+             patch("mexa_bridge.quick_tunnel.urllib.request.urlopen", return_value=response):
             return prepare_helper("", stop or threading.Event(), lambda message: None)
 
     def test_download_verified_before_install_and_cached_helper_is_rechecked(self):
@@ -124,8 +124,8 @@ class HostLifecycleTests(unittest.TestCase):
 
     def setUp(self):
         self.mode = "normal"
-        self.prepare = patch("flow_controller.mexa.quick_tunnel.prepare_helper", return_value=Path(sys.executable)).start()
-        self.command = patch("flow_controller.mexa.quick_tunnel.helper_command",
+        self.prepare = patch("mexa_bridge.quick_tunnel.prepare_helper", return_value=Path(sys.executable)).start()
+        self.command = patch("mexa_bridge.quick_tunnel.helper_command",
                              side_effect=lambda *args: [sys.executable, str(FIXTURE), self.mode]).start()
         self.addCleanup(patch.stopall)
 
@@ -224,12 +224,12 @@ class HostLifecycleTests(unittest.TestCase):
             self.assertTrue(tab.copy_publisher.isEnabled())
             self.assertEqual(tab.public_url.text(), controller.host_status.public_url)
             self.assertEqual(tab.publisher_key.text(), controller.host_status.publisher_key)
-            from flow_controller.mexa.protocol import simulated_cycle
+            from mexa_bridge.protocol import simulated_cycle
             cycle = simulated_cycle(1)
             cycle.update(no_ppm=-2, valid=False, alarms=["no_out_of_range"], rpm=2400,
                          oil_temperature_c=85, options=15, afr=14.7, **{"lambda": 1.234})
-            with patch("flow_controller.mexa.bridge.simulated_cycle", return_value=cycle), \
-                 patch("flow_controller.mexa.bridge.StreamServer", side_effect=AssertionError("No LAN listener allowed")):
+            with patch("mexa_bridge.bridge.simulated_cycle", return_value=cycle), \
+                 patch("mexa_bridge.bridge.StreamServer", side_effect=AssertionError("No LAN listener allowed")):
                 bridge = Bridge(host="127.0.0.1", port=61234, token=SHARED, serial_port="NEVER",
                                 simulated=True, save_logs=False, transport="relay",
                                 relay_url=controller.host_status.local_url, relay_key=controller.host_status.publisher_key)

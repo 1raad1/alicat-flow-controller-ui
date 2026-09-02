@@ -13,7 +13,8 @@ import statistics
 import time
 import uuid
 
-from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
+# Emissions oxygen-correction convention; independent of burner gas properties.
+O2_CORRECTION_AIR_PERCENT = 20.9
 
 PROTOCOL = "mexa584l-horiba-v1-readonly"
 MAX_AGE = 5.0
@@ -26,6 +27,10 @@ CSV_FIELDS = ("source_id", "seq", "acquired_at", "received_at", "no_ppm", "o2_pe
               "validated", "basis", "alarms", "warnings", "afr", "lambda", "rpm",
               "oil_temperature_c", "pef", "options", "cycle_s", "pef_error",
               "raw_status", "raw_subsystem", "raw_channels", "raw_pef")
+
+
+def default_log_dir():
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "Documents"))) / "MEXA-584L" / "logs"
 
 
 def utc_now():

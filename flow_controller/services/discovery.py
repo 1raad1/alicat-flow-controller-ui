@@ -42,7 +42,7 @@ class DiscoveryService:
     ) -> DiscoveryResult:
         unit_list = tuple(units)
         if not unit_list:
-            return DiscoveryResult([])
+            return DiscoveryResult([], port=port, baudrate=baudrate)
 
         controllers: list[ControllerInfo] = []
         meter = None
@@ -105,5 +105,5 @@ class DiscoveryService:
                 controller.supported_gases = self._protocol.query_gases(
                     port, controller.unit, baudrate)
 
-        return DiscoveryResult(controllers, scan_error)
+        return DiscoveryResult(controllers, scan_error, port=port, baudrate=baudrate)
 

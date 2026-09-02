@@ -6,12 +6,12 @@ import time
 
 from PySide6.QtCore import QObject, QTimer, Signal, Qt
 
-from ..mexa.records import (AuditLog, CHANNEL_FIELDS, ReceivedSample, RECEIVER_LOG_REQUIRED,
+from mexa_bridge.records import (AuditLog, CHANNEL_FIELDS, ReceivedSample, RECEIVER_LOG_REQUIRED,
                             csv_text, epoch, utc_now)
-from ..mexa.transport import StreamClient
-from ..mexa.relay import RelayReceiver
-from ..mexa.relay import validate_key
-from ..mexa.quick_tunnel import HostStatus, QuickTunnelHost
+from mexa_bridge.transport import StreamClient
+from mexa_bridge.relay import RelayReceiver
+from mexa_bridge.relay import validate_key
+from mexa_bridge.quick_tunnel import HostStatus, QuickTunnelHost
 
 
 class MexaController(QObject):

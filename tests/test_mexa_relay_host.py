@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from flow_controller.mexa.relay_host import configure, hostname, load_config, main, unit_quote
+from mexa_bridge.relay_host import configure, hostname, load_config, main, unit_quote
 
 
 class RelayHostTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class RelayHostTests(unittest.TestCase):
         caddy = (self.directory / "Caddyfile").read_text()
         service = (self.directory / "mexa-relay.service").read_text()
         self.assertEqual(caddy, "relay.example.net {\n    reverse_proxy 127.0.0.1:8765\n}\n")
-        self.assertIn("flow_controller.mexa.relay_host --config-dir", service)
+        self.assertIn("mexa_bridge.relay_host --config-dir", service)
         self.assertIn("NoNewPrivileges=true", service)
         for key in ("publisher_key", "receiver_key"):
             self.assertNotIn(config[key], caddy + service)

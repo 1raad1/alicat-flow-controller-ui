@@ -624,9 +624,24 @@ flow_controller/
   services/        controller discovery
   core/            session, telemetry, logging, ramps, sequences, and preferences
   ui/              PySide6 interface
+mexa_bridge/        standalone analyser reader, records, transports, and relay
 tests/              hardware-free unit and Qt tests
 run.py              source-tree launcher
 ```
+
+The analyser bridge lives outside `flow_controller/`. The flow app imports its
+measurement records and receiver transports, not the bridge window or serial
+reader. The bridge and relay ZIPs contain no flow-controller code or optimiser
+dependencies. Build them independently:
+
+```powershell
+python build_mexa_package.py dist/MEXA-584L-bridge.zip
+python build_mexa_package.py dist/MEXA-584L-relay.zip --relay
+```
+
+Use a new destination filename for each build. Existing ZIPs are never replaced.
+The 28 August `MEXA-584L-bridge-wormhole.zip` remains compatible with the updated
+flow app; this separation does not require reinstalling it on the analyser PC.
 
 The domain and most core modules do not import serial hardware or a GUI toolkit,
 which keeps their behavior testable without a controller. `core.session` is the

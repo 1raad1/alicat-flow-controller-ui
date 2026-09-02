@@ -12,4 +12,4 @@ fi
 if (( $# == 0 )); then
     set -- run
 fi
-exec .venv/bin/python -m flow_controller.mexa.relay_host "$@"
+exec .venv/bin/python -m mexa_bridge.relay_host "$@"

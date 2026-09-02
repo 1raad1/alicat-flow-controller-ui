@@ -13,7 +13,7 @@ from .analyser_response_controller import AnalyserResponseController
 from .optimisation import Experiment, MeasurementWindow, FLOW_ABS_TOL, FLOW_REL_TOL
 from ..domain.bayesian import finite, suggest
 from ..domain.roles import ROLE_MAP
-from ..mexa.records import LiveWindow
+from mexa_bridge.records import LiveWindow
 
 
 class SuggestionWorker(QThread):

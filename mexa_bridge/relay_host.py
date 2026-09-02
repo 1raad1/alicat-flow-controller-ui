@@ -114,10 +114,10 @@ def configure(directory, domain, port=8765):
     config.update(hostname=domain, port=port)
     write_private(path, json.dumps(config, indent=2) + "\n")
     write_private(directory / "Caddyfile", f"{domain} {{\n    reverse_proxy 127.0.0.1:{port}\n}}\n")
-    project = Path(__file__).resolve().parents[2]
+    project = Path(__file__).resolve().parents[1]
     unit = ("[Unit]\nDescription=MEXA measurement relay\n\n[Service]\nType=simple\n"
             f"WorkingDirectory={unit_quote(project)}\n"
-            f"ExecStart={unit_quote(sys.executable)} -m flow_controller.mexa.relay_host --config-dir {unit_quote(directory)} run\n"
+            f"ExecStart={unit_quote(sys.executable)} -m mexa_bridge.relay_host --config-dir {unit_quote(directory)} run\n"
             "Restart=on-failure\nRestartSec=5\nUMask=0077\nNoNewPrivileges=true\n\n[Install]\nWantedBy=default.target\n")
     write_private(directory / "mexa-relay.service", unit)
     return config

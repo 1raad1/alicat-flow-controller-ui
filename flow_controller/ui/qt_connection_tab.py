@@ -715,8 +715,8 @@ class ConnectionTab(QWidget):
         row.setSpacing(theme.PAD_SM)
         row.addWidget(label('Port', object_name='FieldLabel'))
         self.port_combo = QComboBox()
-        self.port_combo.setEditable(True)
-        self.port_combo.setCurrentText('COM3')
+        self.port_combo.setEditable(False)
+        self.port_combo.setPlaceholderText('No COM ports found')
         self.port_combo.setMinimumWidth(theme.scale(120))
         row.addWidget(self.port_combo, 1)
         refresh = QPushButton('Refresh')
@@ -956,14 +956,12 @@ class ConnectionTab(QWidget):
         QMessageBox.critical(self, title, detail)
 
     def _on_ports(self, ports):
-        current = self.port_combo.currentText().strip()
+        current = self.port_combo.currentText().strip() or self.session.port
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         self.port_combo.addItems(ports)
-        if current:
-            self.port_combo.setCurrentText(current)
-        elif ports:
-            self.port_combo.setCurrentIndex(0)
+        index = self.port_combo.findText(current) if current else -1
+        self.port_combo.setCurrentIndex(index if index >= 0 else (0 if ports else -1))
         self.port_combo.blockSignals(False)
 
     # ================================================================== #

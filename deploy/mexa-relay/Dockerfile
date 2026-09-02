@@ -4,8 +4,7 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY requirements-relay.txt ./
 RUN pip install --no-cache-dir -r requirements-relay.txt
-COPY flow_controller/__init__.py ./flow_controller/__init__.py
-COPY flow_controller/mexa/__init__.py flow_controller/mexa/records.py flow_controller/mexa/transport.py flow_controller/mexa/relay.py flow_controller/mexa/relay_server.py ./flow_controller/mexa/
+COPY mexa_bridge/__init__.py mexa_bridge/records.py mexa_bridge/transport.py mexa_bridge/relay.py mexa_bridge/relay_server.py ./mexa_bridge/
 USER 10001:10001
 EXPOSE 8765
-CMD ["python", "-m", "flow_controller.mexa.relay_server", "--host", "0.0.0.0", "--port", "8765", "--behind-tls-proxy"]
+CMD ["python", "-m", "mexa_bridge.relay_server", "--host", "0.0.0.0", "--port", "8765", "--behind-tls-proxy"]
