@@ -126,6 +126,31 @@ class QtUiTests(unittest.TestCase):
         worker.submit.assert_not_called()
         self.assertEqual([title for title, _ in failures], ['Scan required', 'Scan required'])
 
+    def test_connection_retry_progress_stays_disabled_and_resets_on_completion(self):
+        session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))
+        self.addCleanup(session.shutdown)
+        with patch('flow_controller.core.session.serial.tools.list_ports.comports',
+                   return_value=[SimpleNamespace(device='COM_TEST')]):
+            tab = ConnectionTab(session)
+        self.addCleanup(tab.close)
+
+        session.is_connecting = True
+        session.connecting_changed.emit(True)
+        self.assertEqual(tab.connect_btn.text(), 'Connecting…')
+        self.assertFalse(tab.connect_btn.isEnabled())
+
+        session.connection_progress.emit('Waiting for COM_TEST…')
+        self.assertEqual(tab.connect_btn.text(), 'Waiting for COM_TEST…')
+        self.assertFalse(tab.connect_btn.isEnabled())
+        self.assertFalse(tab.scan_btn.isEnabled())
+
+        session.is_connecting = False
+        session.connecting_changed.emit(False)
+        self.assertEqual(tab.connect_btn.text(), 'Connect Selected')
+        self.assertTrue(tab.connect_btn.isEnabled())
+        session.connection_progress.emit('Waiting for COM_TEST…')
+        self.assertEqual(tab.connect_btn.text(), 'Connect Selected')
+
     def test_top_bar_owns_batch_and_zero_actions(self):
         session = _SafetySession()
         sent = []

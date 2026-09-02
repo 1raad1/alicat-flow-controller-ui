@@ -222,7 +222,10 @@ For the algorithms, equations, file format and code map, see the
    present. Every assigned pilot fuel line must be off during measurements.
 2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
    initial-design size (default 16 completed tests), candidate-pool size and
-   minimum averaging window (default 30 seconds). The initial design must contain
+   minimum averaging window (default 30 seconds). **Use current O₂**, beside the
+   reference field, copies one fresh, validated, uncorrected dry MEXA reading;
+   receiver logging must be enabled. You can edit it before saving. It does not
+   follow later readings or change burner flows. The initial design must contain
    at least one more completed test than the number of variables. Save a new
    `.fcbo.json` experiment. These settings are fixed for the campaign; use a new
    file to change them.

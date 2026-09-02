@@ -69,26 +69,31 @@ SCAN_RESPONSE_TIMEOUT_S = 0.15
 #: and the monitor is restarted rather than left silently stale.
 MAX_TIMEOUTS = 10
 
-#: Windows USB-serial drivers can briefly retain an exclusive COM handle after
-#: it is closed.  Retry only that transient open failure; protocol and device
-#: errors should still fail immediately.
-CONNECT_OPEN_ATTEMPTS = 3
-CONNECT_OPEN_RETRY_S = 0.15
+#: Allow a temporarily busy COM port to become available without a second click.
+#: This is a retry window, not a startup delay. Protocol/device errors are not
+#: retried, and an available port connects immediately.
+CONNECT_OPEN_RETRY_WINDOW_S = 6.0
+CONNECT_OPEN_RETRY_S = 0.5
 
 
-def _is_access_denied(error):
-    """Whether an exception chain represents a transient Windows port lock."""
+def _is_port_open_denied(error):
+    """Recognize pyserial open denials without retrying failed device writes."""
     seen = set()
     current = error
+    opening = False
+    denied = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        if (isinstance(current, serial.SerialException)
+                and 'could not open port' in str(current).casefold()):
+            opening = True
         if (isinstance(current, PermissionError)
                 or getattr(current, 'winerror', None) == 5
                 or getattr(current, 'errno', None) == 13
                 or 'access is denied' in str(current).casefold()):
-            return True
+            denied = True
         current = current.__cause__ or current.__context__
-    return False
+    return opening and denied
 
 #: The application's own serial baud.  Selecting it does not reconfigure the
 #: instruments, so every device on the port must already be set to match; the
@@ -150,6 +155,7 @@ class FlowSession(QObject):
 
     # -- connection ------------------------------------------------------- #
     connecting_changed = Signal(bool)
+    connection_progress = Signal(str)
     connection_changed = Signal(bool)
     autocalc_changed = Signal(bool, object)  # available, config
     assignments_changed = Signal(dict)      # role key -> unit, after a live edit
@@ -890,7 +896,9 @@ class FlowSession(QObject):
         if not units:
             return {}, configuration_errors
 
-        for attempt in range(1, CONNECT_OPEN_ATTEMPTS + 1):
+        deadline = time.monotonic() + CONNECT_OPEN_RETRY_WINDOW_S
+        waiting = False
+        while True:
             confirmed = {}
             errors = dict(configuration_errors)
             try:
@@ -922,16 +930,27 @@ class FlowSession(QObject):
                                     f"got {actual_gas or 'unknown'}")
                             confirmed[unit] = reading
                         except Exception as exc:
-                            if _is_access_denied(exc):
+                            if _is_port_open_denied(exc):
                                 raise
                             errors[unit] = f"{type(exc).__name__}: {exc}"
                 return confirmed, errors
             except Exception as exc:
-                if not _is_access_denied(exc) or attempt == CONNECT_OPEN_ATTEMPTS:
+                if not _is_port_open_denied(exc):
                     return {}, {"serial port": f"{type(exc).__name__}: {exc}"}
-                await asyncio.sleep(CONNECT_OPEN_RETRY_S * attempt)
-
-        raise AssertionError("unreachable")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {}, {"serial port": (
+                        f"{type(exc).__name__}: {exc}. Automatic retries exhausted; "
+                        f"check whether another application is using {port}.")}
+                if not waiting:
+                    waiting = True
+                    self.connection_progress.emit(f"Waiting for {port}…")
+                    self._log_conn(
+                        f"Waiting for {port}… access denied; retrying automatically "
+                        f"for up to {CONNECT_OPEN_RETRY_WINDOW_S:g} s.")
+                # The failed context has closed before yielding here. Keep the
+                # UI responsive and let cancellation interrupt the wait.
+                await asyncio.sleep(min(CONNECT_OPEN_RETRY_S, remaining))
 
     def _finish_connect(self, future):
         self._connection_future = None
