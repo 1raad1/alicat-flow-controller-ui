@@ -926,6 +926,7 @@ class ConnectionTab(QWidget):
         session.scan_finished.connect(self._on_scan_finished)
 
         session.connecting_changed.connect(self._on_connecting)
+        session.connection_progress.connect(self._on_connection_progress)
         session.connection_changed.connect(self._on_connection)
         session.autocalc_changed.connect(self._on_autocalc)
 
@@ -1149,6 +1150,10 @@ class ConnectionTab(QWidget):
         self.connect_btn.setText('Connecting…' if connecting
                                  else 'Connect Selected')
         self._sync_buttons()
+
+    def _on_connection_progress(self, text):
+        if self.session.is_connecting:
+            self.connect_btn.setText(text)
 
     def _on_connection(self, connected):
         self._connected = connected
