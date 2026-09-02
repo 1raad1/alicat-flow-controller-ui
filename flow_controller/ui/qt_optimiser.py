@@ -39,8 +39,9 @@ def point_text(config, point):
 
 
 class ExperimentDialog(QDialog):
-    def __init__(self, request=None, parent=None):
+    def __init__(self, request=None, parent=None, *, mexa=None):
         super().__init__(parent)
+        self._mexa = mexa
         self.setWindowTitle("New Bayesian experiment")
         self.resize(theme.scale(600), theme.scale(650))
         layout = QVBoxLayout(self)
@@ -60,8 +61,32 @@ class ExperimentDialog(QDialog):
             entry = QLineEdit(f"{value:g}")
             entry.setAccessibleName(title)
             self.entries[key] = entry
-            form.addRow(title, entry)
+            if key == "reference":
+                reference_field = QWidget()
+                reference_row = QHBoxLayout(reference_field)
+                reference_row.setContentsMargins(0, 0, 0, 0)
+                reference_row.addWidget(entry, 1, Qt.AlignmentFlag.AlignVCenter)
+                self.record_reference_button = QPushButton("Use current O₂")
+                self.record_reference_button.setProperty("density", "compact")
+                self.record_reference_button.setAccessibleName("Use current MEXA oxygen as reporting reference")
+                self.record_reference_button.setToolTip(
+                    "Copy one fresh, validated, uncorrected dry MEXA O2 reading. "
+                    "Receiver logging must be enabled. This does not change the burner "
+                    "or make the reference follow later readings.")
+                self.record_reference_button.setEnabled(mexa is not None)
+                self.record_reference_button.clicked.connect(self._record_reference_o2)
+                reference_row.addWidget(self.record_reference_button)
+                form.addRow(title, reference_field)
+                self.record_reference_button.setMinimumHeight(
+                    self.record_reference_button.sizeHint().height())
+            else:
+                form.addRow(title, entry)
         layout.addLayout(form)
+        self.reference_status = note(
+            "O₂ reference is copied once or entered manually, then fixed for the campaign.")
+        self.entries["reference"].textEdited.connect(lambda _text: self.reference_status.setText(
+            "Manually entered O₂ reporting reference; fixed for the campaign."))
+        layout.addWidget(self.reference_status)
         grid = QGridLayout()
         for column, title in enumerate(("Variable", "Lower", "Upper")):
             grid.addWidget(QLabel(title), 0, column)
@@ -146,6 +171,24 @@ class ExperimentDialog(QDialog):
             self.error.setText(str(exc))
             return
         super().accept()
+
+    def _record_reference_o2(self):
+        """Copy a checked reading into the draft reference without any device commands."""
+        try:
+            if self._mexa is None:
+                raise ValueError("Connect the MEXA analyser before copying its O2 reading.")
+            sample = self._mexa.checked_sample()
+            value = finite(sample.packet["o2_percent"], "Current MEXA O2")
+            if not 0 <= value < O2_CORRECTION_AIR_PERCENT:
+                raise ValueError(f"Reference O2 must be below {O2_CORRECTION_AIR_PERCENT:g}%.")
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        self.entries["reference"].setText(f"{value:.12g}")
+        self.reference_status.setText(
+            f"Copied dry O₂ {value:g}% from sample acquired {sample.packet['acquired_at']}. "
+            "This reporting reference stays fixed for the campaign; burner flows are unchanged.")
+        self.error.setText("")
 
 
 class OptimiserPane(Card):
@@ -360,7 +403,8 @@ class OptimiserPane(Card):
     def _new(self):
         if not self._switch_ok():
             return
-        dialog = ExperimentDialog(self.controller.session.autocalc_request, self)
+        dialog = ExperimentDialog(self.controller.session.autocalc_request, self,
+                                  mexa=self.controller.session.mexa)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path, _ = QFileDialog.getSaveFileName(

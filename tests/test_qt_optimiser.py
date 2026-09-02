@@ -1,5 +1,6 @@
 """Offscreen Qt tests with fake telemetry and no serial worker."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -12,13 +13,14 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEventLoop, QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog
 
 from flow_controller.core.session import FlowSession, MODE_STAGED
 from flow_controller.core.optimiser_controller import OptimiserController
 from flow_controller.domain.bayesian import SearchConfig
 from flow_controller.ui.qt_main_window import MainWindow
-from flow_controller.ui.qt_optimiser import ExperimentDialog
+from flow_controller.ui.qt_optimiser import ExperimentDialog, OptimiserPane
 from flow_controller.ui.qt_operation_tab import OperationTab
 from flow_controller.core.optimisation import Experiment
 from mexa_bridge.protocol import simulated_cycle
@@ -185,6 +187,101 @@ class QtOptimiserTests(unittest.TestCase):
         self.addCleanup(clock.stop)
         self.mexa(1)
         self.controller.start_window(True, True, live=True)
+
+    def test_reference_o2_copies_once_and_remains_manually_editable(self):
+        dialog = ExperimentDialog(mexa=self.session.mexa)
+        self.addCleanup(dialog.close)
+        entry = dialog.entries["reference"]
+        with patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp()):
+            sample = self.mexa(1, o2_percent=8.123456789)
+            dialog.record_reference_button.click()
+            self.assertEqual(float(entry.text()), sample.packet["o2_percent"])
+            self.assertIn(sample.packet["acquired_at"], dialog.reference_status.text())
+            self.assertIn("fixed", dialog.reference_status.text())
+            self.assertEqual(dialog.error.text(), "")
+
+            self.mexa(2, o2_percent=9.87654321)
+            self.app.processEvents()
+            self.assertEqual(float(entry.text()), 8.123456789)
+            dialog.record_reference_button.click()
+            self.assertEqual(float(entry.text()), 9.87654321)
+
+            self.assertFalse(entry.isReadOnly())
+            entry.selectAll()
+            QTest.keyClicks(entry, "12.5")
+            self.assertEqual(entry.text(), "12.5")
+            self.assertIn("Manually entered", dialog.reference_status.text())
+            self.mexa(3, o2_percent=10.25)
+            self.app.processEvents()
+            self.assertEqual(entry.text(), "12.5")
+        self.assertTrue(self.session.setpoint_queue.empty())
+
+    def test_reference_o2_rejects_unusable_samples_without_changing_input(self):
+        dialog = ExperimentDialog(mexa=self.session.mexa)
+        self.addCleanup(dialog.close)
+        cases = (
+            ("missing", {}, "Fresh MEXA data"),
+            ("stale", {"acquired_at": (self.clock - timedelta(seconds=6)).astimezone(
+                timezone.utc).isoformat()}, "Stale"),
+            ("simulated", {"simulated": True}, "Simulated"),
+            ("unvalidated", {"validated": False}, "Validate the serial readings"),
+            ("wrong_basis", {"basis": "unknown"}, "Uncorrected dry"),
+            ("unlogged", {}, "Save received MEXA logs"),
+            ("invalid", {"valid": False, "alarms": ["filter"]}, "filter"),
+            ("at_air", {"o2_percent": 20.9}, "below 20.9"),
+            ("above_air", {"o2_percent": 21.0}, "below 20.9"),
+        )
+        with patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp()):
+            for name, changes, error in cases:
+                with self.subTest(name=name):
+                    sample = self.mexa(1, **changes)
+                    if name == "missing":
+                        self.session.mexa.latest = None
+                    elif name == "unlogged":
+                        self.session.mexa.latest = replace(sample, log_path="")
+                    dialog.entries["reference"].setText("14.2500")
+                    dialog.error.setText("")
+                    dialog.record_reference_button.click()
+                    self.assertEqual(dialog.entries["reference"].text(), "14.2500")
+                    self.assertIn(error, dialog.error.text())
+                    self.assertTrue(self.session.setpoint_queue.empty())
+
+    def test_reference_o2_button_disabled_without_mexa(self):
+        dialog = ExperimentDialog()
+        self.addCleanup(dialog.close)
+        self.assertFalse(dialog.record_reference_button.isEnabled())
+        self.assertFalse(dialog.entries["reference"].isReadOnly())
+
+    def test_new_experiment_wires_mexa_and_persists_copied_reference(self):
+        self.controller.invalidate("Replace fixture campaign")
+        pane = OptimiserPane(self.controller)
+        self.addCleanup(pane.close)
+        path = Path(self.directory.name) / "copied-reference.fcbo.json"
+
+        def accept_dialog(dialog):
+            self.assertIs(dialog._mexa, self.session.mexa)
+            dialog.record_reference_button.click()
+            self.assertEqual(float(dialog.entries["reference"].text()), 7.654321)
+            for pair, values in zip(dialog.bounds, ((15, 65), (1.05, 1.6), (.5, .85))):
+                for entry, value in zip(pair, values):
+                    entry.setText(str(value))
+            dialog.entries["power"].setText("10")
+            dialog.entries["split"].setText("100")
+            dialog.approved.setChecked(True)
+            dialog.accept()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+            self.assertEqual(dialog.config.reference_o2, 7.654321)
+            return dialog.result()
+
+        with patch("mexa_bridge.records.time.time", side_effect=lambda: self.clock.timestamp()), \
+                patch.object(ExperimentDialog, "exec", accept_dialog), \
+                patch("flow_controller.ui.qt_optimiser.QFileDialog.getSaveFileName",
+                      return_value=(str(path), "")):
+            self.mexa(1, o2_percent=7.654321)
+            pane._new()
+        self.assertEqual(self.controller.experiment.config.reference_o2, 7.654321)
+        self.assertEqual(Experiment.load(path).config.reference_o2, 7.654321)
+        self.assertTrue(self.session.setpoint_queue.empty())
 
     def finish_live(self):
         self.start_live()
