@@ -1,25 +1,27 @@
 # Temporary relay on the flow-controller PC
 
-The flow app can start a private MEXA relay and publish it through Wormhole
-(`wormhole.bar`, not Magic Wormhole). Wormhole is the default; Cloudflare Quick
-Tunnel is an alternative. No home server, account, domain or router port
-forwarding is needed. The receiver connects locally. The analyser PC sends
-measurements to the public WSS address.
+The flow app starts an internal loopback MEXA relay and publishes it through
+Wormhole (`wormhole.bar`, not Magic Wormhole). No third PC, hosting account,
+domain or router port forwarding is needed. The receiver connects locally.
+The analyser PC sends measurements to the public WSS address. The two
+connection choices are Wormhole and Direct LAN; Direct LAN is the backup on
+a trusted, approved network. See [MEXA setup](MEXA_SETUP.md) for that route.
 
-Temporary tunnels have no guaranteed uptime. Keep the flow PC awake and test
-from both PCs before an experiment. For sustained use, arrange a stable,
-approved endpoint using the [separate relay guide](MEXA_RELAY.md).
+Temporary tunnels have no guaranteed uptime. Keep the flow PC awake. A
+registered tunnel does not establish that the analyser PC can reach it or
+that measurements are suitable for experimental use.
 
 ## Start a session
 
-1. Restart the updated flow app. The analyser bridge needs its existing
-   **Internet relay (outbound WSS)** option; no Wormhole installation is needed
-   on the analyser PC. Close the original HORIBA app before the replacement
-   bridge takes ownership of the COM port.
+1. Restart the updated flow app. Use **Wormhole (outbound WSS)** in the analyser
+   bridge. The existing **Internet relay (outbound WSS)** option, including the
+   28 August bridge package, works unchanged; no reinstall or Wormhole helper
+   is needed on the analyser PC. Close the original HORIBA app before the
+   replacement bridge takes ownership of the COM port.
 2. Copy the analyser bridge's **Shared key**. This authenticates measurements
    and is different from the relay publisher key.
-3. In the flow app's **MEXA analyser** tab, select **Host temporary relay on
-   this PC**. Leave **Tunnel provider** on **Wormhole (wormhole.bar, port 443)**.
+3. In the flow app's **MEXA analyser** tab, select **Wormhole (temporary hosting
+   on this PC)**.
    Paste the shared key. Choose whether to save received logs and select a
    folder if logging is on. Live optimiser capture requires receiver logs.
 4. Confirm UCL permits the service and the transfer of your data. Tick
@@ -28,7 +30,8 @@ approved endpoint using the [separate relay guide](MEXA_RELAY.md).
    receiver to its private relay once the tunnel registers.
 5. Click **Copy URL** and paste it into the analyser bridge's Relay URL. Click
    **Copy publisher key** and paste it into the bridge's publisher-key field.
-   Select **Internet relay (outbound WSS)** on the bridge, not Direct LAN.
+   Select **Wormhole (outbound WSS)** on the bridge, or its older **Internet
+   relay (outbound WSS)** label, not Direct LAN.
 6. Start the bridge with **Simulation only** first. Confirm fresh readings at
    the flow app. A registered tunnel alone does not prove that the analyser
    PC can reach it. Simulation cannot be used for live optimisation.
@@ -53,9 +56,8 @@ URL and asks you to copy it to the bridge and reconnect. The publisher key
 stays the same during that host session. Stop/start creates fresh keys and a
 new address, so copy both again. If recovery times out, start a fresh session.
 
-Changing provider clears consent and a manually selected helper path. Stop
-the current host before changing provider. The app never switches providers
-automatically.
+There is no provider selector or external receiver URL/key setup. Stop the
+current connection before changing between Wormhole and Direct LAN.
 
 ## Helper installation
 
@@ -79,8 +81,7 @@ traffic inspector disabled. Existing Wormhole account configuration is unused.
 On another platform, or if downloads are restricted, obtain the executable
 from the [official Wormhole release](https://github.com/MuhammadHananAsghar/wormhole/releases/tag/v0.2.1)
 and use **Select helper**. Manually selected helpers are not checked against
-the pinned Windows hash. Only select an executable you trust; its updates
-are your responsibility.
+the pinned Windows hash. Only select an executable you trust.
 
 ## Network access and privacy
 
@@ -108,27 +109,52 @@ authenticity, not confidentiality from the provider. Confirm data-transfer
 approval before sending real measurements. The local relay saves no data;
 the two apps retain their independent logging choices.
 
-## Cloudflare alternative
+Each connection pair uses a fresh receiver challenge and HMAC-SHA256 sample
+signatures, so a previous session's record cannot be replayed as a new
+measurement. The relay accepts one publisher and one receiver, refuses
+browser-origin connections and rejects commands. MEAS/STANDBY remain confirmed
+local actions in the analyser bridge. Do not enable packet/frame debug logging;
+authentication frames contain access keys.
 
-Select **Cloudflare Quick Tunnel (port 7844)** and give separate consent.
-The flow PC needs outbound TCP 7844, plus HTTPS for registration and download.
-The analyser needs HTTPS/WSS 443 to `*.trycloudflare.com`. The helper uses
-HTTP/2, so UDP is not required. This option downloads `cloudflared` 2026.8.2
-(55 MB) and checks SHA-256:
+Clients use the operating system's configured proxy where supported. A SOCKS
+proxy may need the optional `python-socks[asyncio]` dependency, which is not
+included. Ask IT for the approved route if proxy connection fails; do not
+disable certificate checks.
 
-```text
-c29eee2b121f5436a642eed69fd9767da7e7b8c510fa50aaa130337f931357b5
-```
+## Reconnects and troubleshooting
 
-Its cache is `%USERPROFILE%\.flow-controller-v3\tools\cloudflared-2026.8.2\cloudflared.exe`.
-Existing Cloudflare configuration is untouched; the helper uses a private
-temporary configuration and a loopback-only metrics endpoint. Stop removes
-the temporary configuration, not the cached executable.
+The sender retries after an outage with a bounded delay up to 15 seconds. A
+peer disconnect closes the pair and requires a fresh handshake. The bridge
+sends only readings acquired after pairing; it does not upload saved logs or
+replay an outage backlog. Enable source logging if you need those readings
+retained on the analyser PC.
 
-If the app reports `blocked-due-to-malware.ucl.ac.uk`, ask IT to review
-`api.trycloudflare.com`, `*.trycloudflare.com` and Cloudflare's tunnel endpoints.
-Certificate verification remains enabled. Cloudflare can see forwarded data.
+Sequence gaps, duplicate records, changed sources, stale/future timestamps,
+authentication failures and disconnects interrupt live capture. The normal
+five-second freshness limit and one-second future-clock tolerance still apply.
+Resettle and start a new live window after recovery. Reconnection never changes
+flows or resumes an experiment.
 
-References: [Wormhole client](https://github.com/MuhammadHananAsghar/wormhole/tree/v0.2.1),
-[Cloudflare Quick Tunnel limitations](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/),
-[Cloudflare firewall requirements](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/tunnel-with-firewall/).
+- **Cannot reach Wormhole:** check the app's startup error and ask IT about
+  approved outbound WSS access to the destinations above. Do not change DNS or
+  firewall settings to evade a block.
+- **Relay access denied:** copy the publisher key from the active flow-app
+  session to the analyser bridge. It is not the analyser shared key.
+- **Role already connected:** stop the other bridge using that session. The
+  relay does not silently replace an existing connection.
+- **Waiting for the other PC:** confirm the bridge is running with the current
+  URL and publisher key. A restarted host has new credentials.
+- **Shared-key authentication failed:** copy the key from the current bridge
+  window into the receiver. A bridge relaunch generates a new shared key.
+- **Certificate verification failed:** ask IT to investigate the certificate
+  chain, hostname or PC clock. Do not use an insecure override.
+- **Stale/future samples:** synchronise PC clocks and investigate latency or
+  suspended applications. Do not extend the age limit to accept delayed data.
+
+If a publisher key is exposed, stop the temporary relay and start a new session,
+then copy the new URL and publisher key. If the analyser shared key is exposed,
+relaunch the bridge and copy its new key to the receiver. These are independent
+keys. Follow [instrument validation and optimiser guidance](MEXA_SETUP.md)
+before using real measurements.
+
+Implementation reference: [Wormhole v0.2.1 client](https://github.com/MuhammadHananAsghar/wormhole/tree/v0.2.1).

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import tomllib
 import unittest
 import zipfile
 
@@ -16,21 +17,22 @@ from build_mexa_package import build
 
 BRIDGE_MODULES = {
     "__init__.py", "app.py", "bridge.py", "protocol.py", "records.py",
-    "transport.py", "relay.py", "relay_server.py",
+    "transport.py", "relay.py",
 }
-RELAY_MODULES = {
-    "__init__.py", "records.py", "transport.py", "relay.py",
-    "relay_server.py", "relay_host.py",
+BRIDGE_FILES = {
+    *(f"mexa_bridge/{module}" for module in BRIDGE_MODULES),
+    "install_mexa_bridge.bat", "run_mexa_bridge.bat", "requirements-mexa.txt",
+    "docs/MEXA_SETUP.md", "docs/MEXA_QUICK_TUNNEL.md",
 }
 
 
 class MexaPackageTests(unittest.TestCase):
     @contextmanager
-    def exported(self, *, relay=False):
+    def exported(self):
         with tempfile.TemporaryDirectory(prefix="mexa-package-test-") as temporary:
             workspace = Path(temporary)
-            archive_path = build(workspace / "package.zip", relay=relay)
-            package_name = "MEXA-584L-relay" if relay else "MEXA-584L-bridge"
+            archive_path = build(workspace / "package.zip")
+            package_name = "MEXA-584L-bridge"
             with zipfile.ZipFile(archive_path) as archive:
                 members = [PurePosixPath(name) for name in archive.namelist()]
                 self.assertTrue(members)
@@ -43,15 +45,17 @@ class MexaPackageTests(unittest.TestCase):
                     member.name for member in members
                     if member.parent == PurePosixPath(package_name, "mexa_bridge")
                 }
-                self.assertEqual(modules, RELAY_MODULES if relay else BRIDGE_MODULES)
+                self.assertEqual(modules, BRIDGE_MODULES)
+                self.assertEqual(
+                    {member.relative_to(package_name).as_posix() for member in members},
+                    BRIDGE_FILES,
+                )
                 # This archive was generated above from the repository's explicit allowlist.
                 archive.extractall(workspace / "extracted")
             yield workspace / "extracted" / package_name
 
-    def run_isolated(self, root, body, *, relay=False):
+    def run_isolated(self, root, body):
         blocked = ["flow_controller", "alicat", "numpy", "scipy", "sklearn"]
-        if relay:
-            blocked.extend(["PySide6", "PySide2", "serial"])
         # Reuse installed dependencies, including Windows user-site installations,
         # but never inherit the checkout or arbitrary parent sys.path entries.
         dependency_paths = [*site.getsitepackages(), site.getusersitepackages()]
@@ -103,29 +107,43 @@ class MexaPackageTests(unittest.TestCase):
                 app.quit()
             """)
 
-    def test_relay_zip_imports_without_desktop_or_serial_dependencies(self):
-        with self.exported(relay=True) as root:
+    def test_bridge_modules_import_without_burner_dependencies(self):
+        with self.exported() as root:
             self.run_isolated(root, """
-                from mexa_bridge import records, transport, relay, relay_host, relay_server
-                assert callable(relay_host.main)
-                assert callable(relay_server.main)
-            """, relay=True)
+                import importlib.util
+                from mexa_bridge import app, bridge, protocol, records, transport, relay
+                assert callable(app.main)
+                assert importlib.util.find_spec('mexa_bridge.relay_server') is None
+                assert importlib.util.find_spec('mexa_bridge.relay_host') is None
+            """)
 
-    def test_relay_help_entrypoints_work_in_exported_package(self):
-        with self.exported(relay=True) as root:
-            for module in ("mexa_bridge.relay_host", "mexa_bridge.relay_server"):
-                with self.subTest(module=module):
-                    result = self.run_isolated(root, f"""
-                        import runpy
-                        sys.argv = [{module!r}, '--help']
-                        try:
-                            runpy.run_module({module!r}, run_name='__main__')
-                        except SystemExit as exc:
-                            assert exc.code == 0, exc.code
-                        else:
-                            raise AssertionError('--help did not exit')
-                    """, relay=True)
-                    self.assertIn("usage:", result.stdout.lower())
+    def test_build_preserves_existing_destination(self):
+        with tempfile.TemporaryDirectory(prefix="mexa-package-test-") as temporary:
+            destination = build(Path(temporary) / "package.zip")
+            original = destination.read_bytes()
+            with self.assertRaises(FileExistsError):
+                build(destination)
+            self.assertEqual(destination.read_bytes(), original)
+
+    def test_standalone_relay_build_option_is_rejected(self):
+        script = Path(__file__).resolve().parents[1] / "build_mexa_package.py"
+        with tempfile.TemporaryDirectory(prefix="mexa-package-test-") as temporary:
+            destination = Path(temporary) / "relay.zip"
+            result = subprocess.run(
+                [sys.executable, str(script), str(destination), "--relay"],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("unrecognized arguments: --relay", result.stderr)
+            self.assertFalse(destination.exists())
+
+    def test_project_exposes_no_standalone_relay_entrypoint(self):
+        project = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        config = tomllib.loads(project.read_text(encoding="utf-8"))
+        self.assertEqual(config["project"]["scripts"], {
+            "flow-controller-v3": "flow_controller.ui.qt_main_window:main",
+            "mexa-584l-bridge": "mexa_bridge.app:main",
+        })
 
 
 if __name__ == "__main__":

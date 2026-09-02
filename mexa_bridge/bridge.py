@@ -16,7 +16,7 @@ class Bridge:
                  on_status=lambda text: None, on_control=lambda text: None,
                  transport="lan", relay_url="", relay_key=""):
         if transport not in ("lan", "relay"):
-            raise ValueError("Choose Direct LAN or Internet relay")
+            raise ValueError("Choose Wormhole or Direct LAN")
         self.source_id = str(uuid.uuid4())
         self.serial_port, self.simulated = serial_port, simulated
         self.validated, self.dry = validated, dry

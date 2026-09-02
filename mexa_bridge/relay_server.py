@@ -1,16 +1,12 @@
-"""Single-instrument relay service. No serial access, disk logging or commands.
+"""Internal loopback relay hosted by the flow app for its Wormhole tunnel.
 
-Run separately from both lab PCs, behind an approved HTTPS endpoint or with
-TLS certificates. Role keys come from environment variables, never CLI flags.
+No standalone deployment entrypoint, serial access, disk logging or commands.
+The owning app supplies fresh in-memory role keys and manages the lifecycle.
 """
 
-import argparse
 import asyncio
 import hmac
 import ipaddress
-import os
-import secrets
-import ssl
 import time
 from http import HTTPStatus
 
@@ -118,6 +114,8 @@ class RelayService:
                 self.active -= 1
 
     async def start(self, host="127.0.0.1", port=8765, *, ssl_context=None):
+        if not ipaddress.ip_address(host).is_loopback:
+            raise ValueError("The built-in Wormhole relay must bind to numeric loopback")
         from websockets.asyncio.server import serve
         return await serve(self.handler, host, port, ssl=ssl_context,
                            process_request=self.process_request, origins=[None],
@@ -125,64 +123,3 @@ class RelayService:
                            open_timeout=5, close_timeout=1, ping_interval=2,
                            ping_timeout=3, write_limit=MAX_LINE, server_header=None,
                            logger=quiet_logger("mexa.relay.server"))
-
-
-def server_tls(host, cert, key, behind_tls_proxy=False):
-    if bool(cert) != bool(key):
-        raise ValueError("Supply both --cert and --key")
-    if cert:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(cert, key)
-        return context
-    if not behind_tls_proxy and not ipaddress.ip_address(host).is_loopback:
-        raise ValueError("Non-loopback binding requires TLS certificates or --behind-tls-proxy on a private backend")
-    return None
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--cert", help="TLS certificate chain file")
-    parser.add_argument("--key", help="TLS private-key file, not a relay access key")
-    parser.add_argument("--behind-tls-proxy", action="store_true", help="Private backend only; the proxy MUST provide HTTPS")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--generate-keys", action="store_true", help="Print new role keys once; store them securely")
-    mode.add_argument("--local-test", action="store_true", help="Same-PC test only: loopback with fresh keys printed to this console")
-    args = parser.parse_args(argv)
-    if args.generate_keys:
-        print("MEXA_RELAY_PUBLISH_KEY=" + secrets.token_hex(32))
-        print("MEXA_RELAY_RECEIVE_KEY=" + secrets.token_hex(32))
-        return 0
-    if args.local_test and (args.host != "127.0.0.1" or args.cert or args.key or args.behind_tls_proxy):
-        parser.error("--local-test only supports 127.0.0.1, with no TLS/proxy options")
-    try:
-        if not 1 <= args.port <= 65535:
-            raise ValueError("Port must be 1–65535")
-        context = server_tls(args.host, args.cert, args.key, args.behind_tls_proxy)
-        publisher_key = secrets.token_hex(32) if args.local_test else os.environ.get("MEXA_RELAY_PUBLISH_KEY", "")
-        receiver_key = secrets.token_hex(32) if args.local_test else os.environ.get("MEXA_RELAY_RECEIVE_KEY", "")
-        service = RelayService(publisher_key, receiver_key)
-    except (ValueError, OSError):
-        parser.error("Invalid relay configuration. Check TLS/binding, port and two different 32–128-character role keys in the environment.")
-
-    async def run():
-        async with await service.start(args.host, args.port, ssl_context=context) as server:
-            print("MEXA relay running; one analyser and one receiver. No measurement files are saved.", flush=True)
-            if args.local_test:
-                print(f"LOCAL TEST ONLY: ws://127.0.0.1:{args.port}/mexa\n"
-                      f"Publisher key: {publisher_key}\nReceiver key: {receiver_key}\n"
-                      "Use Simulation only in the bridge. These keys expire when this process stops.\n"
-                      "This is not reachable from another PC. Ctrl+C stops the server.", flush=True)
-            await server.serve_forever()
-
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        pass
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -90,6 +90,35 @@ class QtOptimiserTests(unittest.TestCase):
             self.assertAlmostEqual(float(card.entry.text()), self.targets.get(tab._card_keys[unit], 0), places=5)
         self.assertEqual(float(tab._cards["P"].entry.text()), 0)
 
+    def test_new_experiment_initial_points_follow_active_dimensions(self):
+        dialog = ExperimentDialog()
+        self.addCleanup(dialog.close)
+        initial = dialog.entries["initial"]
+        power = dialog.optional["power_kw"][0]
+        split = dialog.optional["split_rich"][0]
+        self.assertEqual(initial.text(), "4")
+        for check, enabled, expected in (
+                (power, True, "5"), (split, True, "6"),
+                (power, False, "5"), (split, False, "4")):
+            check.setChecked(enabled)
+            self.assertEqual(initial.text(), expected)
+        initial.setText("16")
+        for check, enabled in ((split, True), (power, True), (split, False), (power, False)):
+            check.setChecked(enabled)
+            self.assertEqual(initial.text(), "16")
+
+    def test_config_seeded_dialog_preserves_initial_points_and_optional_dimensions(self):
+        for count in (6, 16):
+            with self.subTest(initial_points=count):
+                settings = SearchConfig(
+                    10, ((.15, .65), (1.05, 1.6), (.5, .85), (8, 12), (.75, 1.0)),
+                    initial_points=count, optimise_power=True, optimise_split=True)
+                dialog = ExperimentDialog(settings)
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.entries["initial"].text(), str(count))
+                for key in ("power_kw", "split_rich"):
+                    self.assertTrue(dialog.optional[key][0].isChecked())
+
     def test_new_experiment_dialog_adds_power_and_split_dimensions(self):
         dialog = ExperimentDialog(self.session.autocalc_request)
         self.addCleanup(dialog.close)
@@ -104,12 +133,13 @@ class QtOptimiserTests(unittest.TestCase):
             entry.setText(str(value))
         for entry, value in zip(split_pair, (75, 100)):
             entry.setText(str(value))
-        dialog.entries["initial"].setText("6")
+        self.assertEqual(dialog.entries["initial"].text(), "6")
         dialog.entries["pool"].setText("2048")
         dialog.entries["split"].setText("90")
         dialog.approved.setChecked(True)
         dialog.accept()
         self.assertEqual(dialog.config.dimensions, 5)
+        self.assertEqual(dialog.config.initial_points, 6)
         self.assertEqual(dialog.config.variable_names[-2:], ("power_kw", "split_rich"))
         self.assertEqual(dialog.config.bounds[-2:], ((8.0, 12.0), (.75, 1.0)))
         self.assertEqual(dialog.config.candidate_pool_size, 2048)

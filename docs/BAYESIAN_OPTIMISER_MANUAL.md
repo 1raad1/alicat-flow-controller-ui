@@ -1414,8 +1414,10 @@ relationship. Such a relationship is a lower-dimensional path and requires a
 dedicated path parameter or explicit constraint; the present dialog searches a
 rectangular box in the selected variables.
 
-The default 16-point initial design remains available for three to five
-variables. It is a starting allocation, not a statistical guarantee. Increase
+The initial design defaults to the minimum: four completed tests for three
+variables, five for four variables, or six for five variables. The dialog updates
+this default when optional variables are selected or cleared. A larger initial
+design can still be entered. These minimum counts do not guarantee model accuracy. Increase
 the initial design and candidate pool when broad bounds, interactions or short
 length scales make the response harder to resolve. Reserve experiments for
 reference-condition repeats and confirmation of the apparent optimum.

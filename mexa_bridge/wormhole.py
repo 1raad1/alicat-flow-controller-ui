@@ -43,7 +43,7 @@ def tunnel_event(line):
     return None
 
 
-def helper_command(executable, config, port):
+def helper_command(executable, port):
     # Anonymous tunnel: no login/config, no inspector, and no helper updater.
     # Wormhole targets localhost; RelayService binds only 127.0.0.1.
     return [str(executable), "http", str(port), "--headless", "--no-inspect"]

@@ -31,25 +31,17 @@ class MexaTab(QWidget):
         layout = QVBoxLayout(content)
         card = Card("MEXA-584L network receiver")
         layout.addWidget(card)
-        card.add(note("Run the replacement MEXA reader on the analyser PC. Use Direct LAN, a separate Internet relay, "
-                      "or host a temporary relay here. This link only receives measurements."))
+        card.add(note("Run the replacement MEXA reader on the analyser PC. Host a temporary Wormhole relay here, "
+                      "or use Direct LAN as a backup. This link only receives measurements."))
         form = QFormLayout()
         self.connection_form = form
         config = controller.settings
         self.transport = QComboBox()
+        self.transport.addItem("Wormhole (temporary hosting on this PC)", "host")
         self.transport.addItem("Direct LAN (TCP)", "lan")
-        self.transport.addItem("Internet relay (outbound WSS)", "relay")
-        self.transport.addItem("Host temporary relay on this PC", "host")
-        self.transport.setCurrentIndex(2 if controller.temporary_host is not None else
-                                       (1 if config.get("transport") == "relay" else 0))
+        mode = "lan" if controller.temporary_host is None and config.get("transport") == "lan" else "host"
+        self.transport.setCurrentIndex(self.transport.findData(mode))
         form.addRow("Connection mode", self.transport)
-        self.relay_url = QLineEdit(config.get("relay_url", ""))
-        self.relay_url.setPlaceholderText("wss://your-approved-relay.example/mexa")
-        self.relay_key = QLineEdit(config.get("relay_key", ""))
-        self.relay_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.relay_key.setPlaceholderText("Receiver access key supplied by relay administrator")
-        form.addRow("Relay URL", self.relay_url)
-        form.addRow("Relay receiver key", self.relay_key)
         self.host = QLineEdit(config["host"])
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
@@ -72,15 +64,8 @@ class MexaTab(QWidget):
         host_layout.addWidget(note(
             "Temporary host: copy the analyser bridge's shared key into Shared key above before starting. "
             "The receiver connects locally; only the measurement relay is published. "
-            "The tunnel provider can see forwarded data. Temporary tunnels have no guaranteed uptime. "
+            "Wormhole can see forwarded data. Temporary tunnels have no guaranteed uptime. "
             "Keep this PC awake. A new start creates a new URL and access keys."))
-        self.tunnel_provider = QComboBox()
-        self.tunnel_provider.addItem("Wormhole (wormhole.bar, port 443)", "wormhole")
-        self.tunnel_provider.addItem("Cloudflare Quick Tunnel (port 7844)", "cloudflare")
-        self.tunnel_provider.setCurrentIndex(0 if controller.host_provider == "wormhole" else 1)
-        provider_form = QFormLayout()
-        provider_form.addRow("Tunnel provider", self.tunnel_provider)
-        host_layout.addLayout(provider_form)
         self.host_consent = QCheckBox()
         host_layout.addWidget(self.host_consent)
         self.helper_help = note("")
@@ -117,11 +102,11 @@ class MexaTab(QWidget):
         host_layout.addLayout(host_actions)
         self.host_status = note("")
         host_layout.addWidget(self.host_status)
-        host_layout.addWidget(note("On the analyser PC choose Internet relay, paste the URL and publisher key, then start with "
-                                   "Simulation only. Its shared key must match the field above. Copy keys only into the bridge, not logs or screenshots."))
+        host_layout.addWidget(note("On the analyser PC choose Wormhole (Internet relay in older readers), paste the URL and "
+                                   "publisher key, then start with Simulation only. Its shared key must match the field above. "
+                                   "Copy keys only into the bridge, not logs or screenshots."))
         card.add(self.host_panel)
         self.host_consent.toggled.connect(self.refresh)
-        self.tunnel_provider.currentIndexChanged.connect(self._provider_changed)
         self.start_host.clicked.connect(self._start_host)
         self.stop_host.clicked.connect(controller.stop_temporary_host)
         self.helper_browse.clicked.connect(self._helper_folder)
@@ -170,7 +155,7 @@ class MexaTab(QWidget):
                       "The analyser PC's local logging choice is independent."))
         card.add(note("Keep both PC clocks synchronised. NO is not total NOx. Verify the analyser and "
                       "sampling system for NH3/H2 exhaust before using results. "
-                      "Direct LAN is unencrypted. Internet relay requires WSS; its administrator can see forwarded data."))
+                      "Direct LAN is unencrypted. Wormhole uses WSS; the tunnel provider can see forwarded data."))
         layout.addStretch()
         controller.changed.connect(self.refresh)
         self.save_logs.toggled.connect(self._logging_choice)
@@ -187,34 +172,25 @@ class MexaTab(QWidget):
                 return
             self.controller.connect_bridge(self.host.text().strip(), self.port.value(), self.token.text(),
                                            self.directory.text().strip(), save_logs=self.save_logs.isChecked(),
-                                           transport=self.transport.currentData(), relay_url=self.relay_url.text().strip(),
-                                           relay_key=self.relay_key.text())
+                                           transport="lan")
         except (ValueError, OSError) as exc:
             self.status.setText(str(exc))
 
     def _start_host(self):
         if not self.host_consent.isChecked():
-            self.host_status.setText("Confirm that publishing through the selected provider is permitted before starting.")
+            self.host_status.setText("Confirm that publishing through Wormhole is permitted before starting.")
             return
         try:
             self.controller.start_temporary_host(self.token.text(), self.directory.text().strip(),
                                                  save_logs=self.save_logs.isChecked(),
-                                                 executable=self.helper_path.text().strip(),
-                                                 provider=self.tunnel_provider.currentData())
+                                                 executable=self.helper_path.text().strip())
         except (ValueError, OSError) as exc:
             self.host_status.setText(str(exc))
 
     def _helper_folder(self):
-        name = "Wormhole" if self.tunnel_provider.currentData() == "wormhole" else "cloudflared"
-        path, _ = QFileDialog.getOpenFileName(self, f"Select official {name} executable", self.helper_path.text())
+        path, _ = QFileDialog.getOpenFileName(self, "Select official Wormhole executable", self.helper_path.text())
         if path:
             self.helper_path.setText(path)
-
-    def _provider_changed(self):
-        # Consent and an executable selected for one provider cannot carry over.
-        self.host_consent.setChecked(False)
-        self.helper_path.clear()
-        self.refresh()
 
     def _folder(self):
         path = QFileDialog.getExistingDirectory(self, "Received analyser logs", self.directory.text())
@@ -236,25 +212,19 @@ class MexaTab(QWidget):
         self.transport.setEnabled(not connected and not hosting)
         for widget in (self.token, self.save_logs):
             widget.setEnabled(not connected and not pending)
-        relay = self.transport.currentData() == "relay"
         for widget in (self.host, self.port):
-            widget.setEnabled(not connected and not relay and not host_mode)
-            self.connection_form.setRowVisible(widget, not relay and not host_mode)
-        for widget in (self.relay_url, self.relay_key):
-            widget.setEnabled(not connected and relay)
-            self.connection_form.setRowVisible(widget, relay)
+            widget.setEnabled(not connected and not host_mode)
+            self.connection_form.setRowVisible(widget, not host_mode)
         self.host_panel.setVisible(host_mode)
         self.start_host.setEnabled(host_mode and not connected and not hosting and self.host_consent.isChecked())
         self.stop_host.setEnabled(hosting and c.host_status.state != "stopping")
-        for widget in (self.tunnel_provider, self.host_consent, self.helper_path, self.helper_browse):
+        for widget in (self.host_consent, self.helper_path, self.helper_browse):
             widget.setEnabled(not hosting and not connected)
-        wormhole = self.tunnel_provider.currentData() == "wormhole"
-        provider = "Wormhole" if wormhole else "Cloudflare"
-        self.host_consent.setText(f"Allow temporary publishing through {provider}")
-        self.helper_path.setPlaceholderText("Automatic verified download, or select official " + ("wormhole.exe" if wormhole else "cloudflared"))
+        self.host_consent.setText("Allow temporary publishing through Wormhole")
+        self.helper_path.setPlaceholderText("Automatic verified download, or select official wormhole.exe")
         self.helper_help.setText("Use only where UCL permits this service and data transfer. Starting downloads the official Windows x64 helper "
-                                 + ("(3.6 MB ZIP; ZIP and executable SHA-256 checked)" if wormhole else "(55 MB, SHA-256 checked)")
-                                 + " if needed. Manually selected helpers must be trusted and are not hash-checked. "
+                                 "(3.6 MB ZIP; ZIP and executable SHA-256 checked) "
+                                 "if needed. Manually selected helpers must be trusted and are not hash-checked. "
                                  "No admin rights or inbound firewall rule is required.")
         self.public_url.setText(c.host_status.public_url)
         self.publisher_key.setText(c.host_status.publisher_key)
@@ -262,15 +232,10 @@ class MexaTab(QWidget):
         self.copy_publisher.setEnabled(bool(c.host_status.publisher_key))
         self.host_status.setText(c.host_status.message)
         self.connection_help.setText(
-            ("Temporary host: the flow receiver connects to its own private relay. The analyser uses the public WSS URL. "
-             + ("Both PCs need approved outbound HTTPS/WSS 443 to Wormhole. " if wormhole else
-                "The flow PC needs outbound TCP 7844 to Cloudflare; the analyser needs HTTPS/WSS 443. ")
-             + "Stopping the host disconnects MEXA and invalidates live capture, but does not change burner settings.")
-            if host_mode else
-            "Relay: enter the same approved WSS URL on both PCs, your receiver access key, and the analyser's shared key. "
-            "Both PCs connect outward; no inbound firewall rule is needed on either PC. "
-            "A separate hosted relay is required. ws:// numeric loopback is for local testing only."
-            if relay else self.lan_help)
+            ("Wormhole: the flow receiver connects to its own private relay. The analyser uses the public WSS URL. "
+             "Both PCs need approved outbound HTTPS/WSS 443 to Wormhole. "
+             "Stopping the host disconnects MEXA and invalidates live capture, but does not change burner settings.")
+            if host_mode else self.lan_help)
         for widget in (self.directory, self.browse):
             widget.setEnabled(not connected and not pending and self.save_logs.isChecked())
         self.status.setText(c.status)

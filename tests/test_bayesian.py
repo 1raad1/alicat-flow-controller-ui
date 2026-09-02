@@ -45,6 +45,21 @@ def synthetic_trial(settings, point, value):
 
 
 class BayesianTests(unittest.TestCase):
+    def test_initial_design_defaults_to_one_more_than_active_dimensions(self):
+        base_bounds = ((.15, .65), (1.05, 1.6), (.5, .85))
+        for power, split in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(power=power, split=split):
+                bounds = base_bounds + (((8, 12),) if power else ())
+                bounds += (((.75, 1.0),) if split else ())
+                settings = SearchConfig(10, bounds, optimise_power=power, optimise_split=split)
+                self.assertEqual(settings.initial_points, 4 + power + split)
+                saved = json.loads(json.dumps(settings.to_dict()))
+                self.assertIs(type(saved["initial_points"]), int)
+                self.assertEqual(SearchConfig(**saved), settings)
+                explicit = SearchConfig(10, bounds, initial_points=16,
+                                        optimise_power=power, optimise_split=split)
+                self.assertEqual(explicit.initial_points, 16)
+
     def test_reference_correction_and_standard_error(self):
         value, sem = corrected_no(100, 10, 15, 2)
         self.assertAlmostEqual(value, 100 * 5.9 / 10.9)

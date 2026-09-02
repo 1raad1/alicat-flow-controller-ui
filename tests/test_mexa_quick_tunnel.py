@@ -1,5 +1,4 @@
 """Temporary hosting tests use a fake helper and loopback synthetic samples only."""
-import hashlib
 import io
 import json
 import os
@@ -7,6 +6,7 @@ from pathlib import Path
 import queue
 import socket
 import sys
+import subprocess
 import tempfile
 import threading
 import time
@@ -18,12 +18,11 @@ from PySide6.QtWidgets import QApplication
 
 from flow_controller.core.mexa_controller import MexaController
 from mexa_bridge.bridge import Bridge
-from mexa_bridge.quick_tunnel import (
-    HostError, HostStatus, QuickTunnelHost, helper_command, helper_environment, prepare_helper, tunnel_event,
-)
+from mexa_bridge.quick_tunnel import HostStatus, QuickTunnelHost, helper_environment
+from mexa_bridge import wormhole
 from flow_controller.ui.qt_mexa import MexaTab
 
-FIXTURE = Path(__file__).parent / "fixtures" / "fake_cloudflared.py"
+FIXTURE = Path(__file__).parent / "fixtures" / "fake_wormhole.py"
 SHARED = "synthetic-analyser-shared-key-" + "s" * 32
 
 
@@ -38,82 +37,26 @@ def wait_for(predicate, seconds=5):
 
 
 class HelperTests(unittest.TestCase):
-    def test_only_expected_public_url_and_connection_events_are_exposed(self):
-        self.assertEqual(tunnel_event("| https://abc-def.trycloudflare.com |"),
-                         ("url", "wss://abc-def.trycloudflare.com/mexa"))
-        for line in ("https://abc.trycloudflare.com.evil.test", "https://abc.trycloudflare.com/secret",
-                     "https://user:secret@abc.trycloudflare.com", "https://abc.trycloudflare.com?key=secret",
-                     "https://abc.trycloudflare.com:443", "http://abc.trycloudflare.com",
-                     "https://-abc.trycloudflare.com", "https://abc-.trycloudflare.com",
-                     "https://evil.test/https://abc.trycloudflare.com"):
-            self.assertIsNone(tunnel_event(line), line)
-        self.assertEqual(tunnel_event("INF Registered tunnel connection connIndex=0"), ("connected", ""))
-        self.assertIsNone(tunnel_event("arbitrary error with private data"))
-
-    def test_helper_command_is_loopback_only_and_overrides_existing_configuration(self):
-        args = helper_command("C:/Program Files/cloudflared.exe", "C:/temp/private/config.yml", 43210)
-        self.assertEqual(args[0], "C:/Program Files/cloudflared.exe")
-        self.assertEqual(args[args.index("--url") + 1], "http://127.0.0.1:43210")
-        self.assertEqual(args[args.index("--protocol") + 1], "http2")
-        self.assertEqual(args[args.index("--metrics") + 1], "127.0.0.1:0")
-        self.assertIn("--no-autoupdate", args)
-        self.assertIn("--config", args)
-        self.assertNotIn("--token", args)
-
-    def test_certificate_and_filter_diagnostics_are_specific_and_sanitized(self):
-        for raw, expected in (("x509: certificate is valid for blocked-due-to-malware.ucl.ac.uk secret=private", "UCL is blocking"),
-                              ("x509: failed to verify certificate secret=private", "TLS certificate verification failed"),
-                              ("failed to request quick Tunnel private-body", "Could not create")):
-            event, detail = tunnel_event(raw)
-            self.assertEqual(event, "error")
-            self.assertIn(expected, detail)
-            self.assertNotIn("private", detail)
-
-    def test_cloudflare_and_mexa_environment_credentials_are_not_inherited(self):
+    def test_helper_environment_strips_current_and_legacy_credentials(self):
         with patch.dict(os.environ, {"TUNNEL_TOKEN": "secret", "CF_API_KEY": "secret",
-                                     "MEXA_RELAY_PUBLISH_KEY": "secret", "CLOUDFLARE_API_TOKEN": "secret"}):
+                                     "MEXA_RELAY_PUBLISH_KEY": "secret", "CLOUDFLARE_API_TOKEN": "secret",
+                                     "WORMHOLE_TOKEN": "secret", "wormhole_key": "secret"}):
             env = helper_environment()
-        self.assertFalse(any(key.upper().startswith(("TUNNEL_", "CF_", "MEXA_", "CLOUDFLARE_")) for key in env))
+        self.assertFalse(any(key.upper().startswith(("TUNNEL_", "CF_", "MEXA_", "CLOUDFLARE_", "WORMHOLE_"))
+                             for key in env))
 
     def test_status_repr_does_not_expose_access_keys(self):
         self.assertNotIn("secret", repr(HostStatus(publisher_key="secret", receiver_key="secret")))
 
-    def download(self, directory, content, expected=None, stop=None):
-        target = Path(directory) / "helper.exe"
-        response = io.BytesIO(content)
-        response.url = "https://release-assets.githubusercontent.com/asset"
-        with patch("mexa_bridge.quick_tunnel.default_helper_path", return_value=target), \
-             patch("mexa_bridge.quick_tunnel.WINDOWS_SIZE", len(content)), \
-             patch("mexa_bridge.quick_tunnel.WINDOWS_SHA256", expected or hashlib.sha256(content).hexdigest()), \
-             patch("mexa_bridge.quick_tunnel.urllib.request.urlopen", return_value=response):
-            return prepare_helper("", stop or threading.Event(), lambda message: None)
-
-    def test_download_verified_before_install_and_cached_helper_is_rechecked(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = self.download(directory, b"synthetic-binary")
-            self.assertEqual(target.read_bytes(), b"synthetic-binary")
-            self.assertEqual(self.download(directory, b"synthetic-binary"), target)
-            with self.assertRaisesRegex(HostError, "existing file was not replaced"):
-                self.download(directory, b"different-binary")
-            self.assertEqual(target.read_bytes(), b"synthetic-binary")
-
-    def test_hash_mismatch_and_cancel_leave_no_executable_or_partial_file(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(HostError, "SHA-256"):
-                self.download(directory, b"bad-download", expected="0" * 64)
-            self.assertEqual(list(Path(directory).iterdir()), [])
-            stop = threading.Event()
-            stop.set()
-            with self.assertRaisesRegex(HostError, "cancelled"):
-                self.download(directory, b"cancelled-download", stop=stop)
-            self.assertEqual(list(Path(directory).iterdir()), [])
-
-    def test_output_reader_is_bounded_and_discards_oversized_lines(self):
-        events = queue.Queue(maxsize=128)
-        stream = io.BytesIO(b"x" * 8000 + b" https://bad.trycloudflare.com\n"
-                            b"INF Registered tunnel connection\n")
-        QuickTunnelHost._read_output(stream, events)
-        self.assertEqual(events.get_nowait(), ("connected", ""))
+    def test_output_reader_is_bounded_discards_oversized_lines_and_keeps_newest_event(self):
+        events = queue.Queue(maxsize=2)
+        stream = io.BytesIO(b"x" * 8000 + b" INF tunnel established url=https://bad.wormhole.bar\n"
+                            b"INF tunnel established url=https://one.wormhole.bar\n"
+                            b"INF status changed status=reconnecting\n"
+                            b"INF reconnected url=https://two.wormhole.bar\n")
+        QuickTunnelHost._read_output(stream, events, wormhole.tunnel_event)
+        self.assertEqual(events.get_nowait(), ("disconnected", ""))
+        self.assertEqual(events.get_nowait(), ("registered", "wss://two.wormhole.bar/mexa"))
         self.assertTrue(events.empty())
 
 
@@ -124,9 +67,10 @@ class HostLifecycleTests(unittest.TestCase):
 
     def setUp(self):
         self.mode = "normal"
-        self.prepare = patch("mexa_bridge.quick_tunnel.prepare_helper", return_value=Path(sys.executable)).start()
-        self.command = patch("mexa_bridge.quick_tunnel.helper_command",
+        self.prepare = patch("mexa_bridge.wormhole.prepare_helper", return_value=Path(sys.executable)).start()
+        self.command = patch("mexa_bridge.wormhole.helper_command",
                              side_effect=lambda *args: [sys.executable, str(FIXTURE), self.mode]).start()
+        self.spawn = patch("mexa_bridge.quick_tunnel.subprocess.Popen", wraps=subprocess.Popen).start()
         self.addCleanup(patch.stopall)
 
     def start_host(self, timeout=2):
@@ -142,10 +86,22 @@ class HostLifecycleTests(unittest.TestCase):
         status, process = host.status, host.process
         self.assertNotEqual(status.publisher_key, status.receiver_key)
         self.assertEqual(len(status.publisher_key), 64)
+        self.assertIn("reachability is not yet verified", status.message)
+        child_args, child_options = self.spawn.call_args
+        for key in (status.publisher_key, status.receiver_key):
+            self.assertNotIn(key, repr(child_args))
+            self.assertNotIn(key, repr(child_options))
+        self.assertEqual(child_options["stdin"], subprocess.DEVNULL)
+        self.assertEqual(child_options["creationflags"], subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        child_directory = Path(child_options["cwd"])
+        self.assertNotEqual(child_directory, Path(sys.executable).parent)
+        self.assertNotEqual(child_directory, Path.cwd())
+        self.assertEqual(list(child_directory.iterdir()), [])
         port = int(status.local_url.split(":")[2].split("/")[0])
         with socket.create_connection(("127.0.0.1", port), timeout=1):
             pass
         self.assertTrue(host.stop(wait=True))
+        self.assertFalse(child_directory.exists())
         self.assertIsNotNone(process.poll())
         self.assertEqual(host.status.state, "stopped")
         self.assertEqual(host.status.publisher_key, "")
@@ -181,7 +137,7 @@ class HostLifecycleTests(unittest.TestCase):
         self.mode = "silent"
         host, _ = self.start_host(timeout=.25)
         self.assertTrue(wait_for(lambda: host.status.state == "failed"))
-        self.assertIn("7844", host.status.message)
+        self.assertIn("443", host.status.message)
         self.assertIsNone(host.process)
         second, _ = self.start_host(timeout=10)
         self.assertTrue(wait_for(lambda: second.process is not None))
@@ -203,8 +159,7 @@ class HostLifecycleTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         tab = MexaTab(controller)
         self.addCleanup(tab.close)
-        tab.transport.setCurrentIndex(2)
-        tab.tunnel_provider.setCurrentIndex(1)  # Existing Cloudflare lifecycle coverage
+        tab.transport.setCurrentIndex(tab.transport.findData("host"))
         self.assertFalse(tab.start_host.isEnabled())
         self.assertFalse(tab.connect_button.isEnabled())
         self.assertFalse(tab.host.isEnabled())
@@ -260,7 +215,7 @@ class HostLifecycleTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         tab = MexaTab(controller)
         self.addCleanup(tab.close)
-        tab.transport.setCurrentIndex(2)
+        tab.transport.setCurrentIndex(tab.transport.findData("host"))
         tab._start_host()
         self.assertIsNone(controller.temporary_host)
         tab.host_consent.setChecked(True)
@@ -272,7 +227,7 @@ class HostLifecycleTests(unittest.TestCase):
     def test_shutdown_and_queued_ready_event_cannot_restart_receiver(self):
         controller = MexaController()
         self.addCleanup(controller.shutdown)
-        controller.start_temporary_host(SHARED, save_logs=False, provider="cloudflare")
+        controller.start_temporary_host(SHARED, save_logs=False)
         generation = controller._host_generation
         self.assertTrue(wait_for(lambda: controller.client is not None))
         status, process = controller.host_status, controller.temporary_host.process
@@ -285,7 +240,7 @@ class HostLifecycleTests(unittest.TestCase):
     def test_stop_cancels_pending_auto_connect(self):
         controller = MexaController()
         self.addCleanup(controller.shutdown)
-        controller.start_temporary_host(SHARED, save_logs=False, provider="cloudflare")
+        controller.start_temporary_host(SHARED, save_logs=False)
         generation = controller._host_generation
         controller.stop_temporary_host()
         with patch.object(controller, "connect_temporary_host") as connect:

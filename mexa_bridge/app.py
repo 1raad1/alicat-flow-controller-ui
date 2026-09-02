@@ -65,13 +65,14 @@ class BridgeWindow(QWidget):
         form.addRow("Serial port (9600, 8N1)", port_line)
         self.transport = QComboBox()
         self.transport.addItem("Direct LAN (TCP)", "lan")
-        self.transport.addItem("Internet relay (outbound WSS)", "relay")
+        self.transport.addItem("Wormhole (outbound WSS)", "relay")
+        self.transport.setCurrentIndex(self.transport.findData("relay"))
         form.addRow("Connection mode", self.transport)
         self.relay_url = QLineEdit()
-        self.relay_url.setPlaceholderText("wss://your-approved-relay.example/mexa")
+        self.relay_url.setPlaceholderText("Copy the Wormhole URL from the flow app")
         self.relay_key = QLineEdit()
         self.relay_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.relay_key.setPlaceholderText("Publisher access key supplied by relay administrator")
+        self.relay_key.setPlaceholderText("Copy the publisher key from the flow app")
         form.addRow("Relay URL", self.relay_url)
         form.addRow("Relay publisher key", self.relay_key)
         self.host = QLineEdit("127.0.0.1")
@@ -117,8 +118,8 @@ class BridgeWindow(QWidget):
         self.simulated.toggled.connect(self._simulation)
         warning = QLabel("First use: leave validation unchecked and compare this display with the instrument. "
                          "One receiver at a time. Direct LAN is authenticated but unencrypted; never expose "
-                         "its TCP port to the internet. Relay mode uses an approved WSS server and opens "
-                         "no inbound port on this PC. Both PCs need the same analyser shared key.")
+                         "its TCP port to the internet. Wormhole connects outward to the flow app's relay; "
+                         "no inbound port is opened on this PC. Both PCs need the same analyser shared key.")
         warning.setWordWrap(True)
         layout.addWidget(warning)
         buttons = QHBoxLayout()
@@ -307,8 +308,9 @@ class BridgeWindow(QWidget):
             + ("LOCAL PC ONLY: use Local IPv4 to select Wi-Fi for another PC." if local_only else
                "Enter this analyser PC address and port on the receiver; a listener alone does not prove network reachability."))
         if relay:
-            self.listener_label.setText("Internet relay mode: outbound connection only; no local TCP listener. "
-                                        "See connection status below. A separate hosted relay is required. "
+            self.listener_label.setText("Wormhole mode: outbound connection only; no local TCP listener. "
+                                        "Start the built-in Wormhole relay in the flow app, then copy its URL and publisher key here. "
+                                        "Older readers call this Internet relay mode; the connection is compatible. "
                                         "ws:// numeric loopback URLs are for local testing only.")
         for mode, button in (("meas", self.meas_button), ("standby", self.standby_button)):
             button.setEnabled(bool(running and self.enable_controls.isChecked()

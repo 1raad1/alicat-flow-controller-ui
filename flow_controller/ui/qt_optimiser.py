@@ -50,11 +50,15 @@ class ExperimentDialog(QDialog):
             "region; these bounds do not establish flame stability or safe transitions."))
         form = QFormLayout()
         self.entries = {}
+        existing_names = getattr(request, "variable_names", ())
+        self._minimum_initial_points = 4 + sum(
+            name in existing_names for name in ("power_kw", "split_rich"))
         for key, title, value in (
             ("power", "Nominal/fixed thermal input (kW)", getattr(request, "power_kw", 10)),
             ("split", "Nominal/fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
             ("reference", "Reporting reference O2 (dry vol%)", 15),
-            ("initial", "Initial space-filling points", getattr(request, "initial_points", 16)),
+            ("initial", "Initial space-filling points",
+             getattr(request, "initial_points", None) or self._minimum_initial_points),
             ("pool", "Candidate pool size", getattr(request, "candidate_pool_size", None) or 1024),
             ("window", "Minimum averaging window (s)", 30),
         ):
@@ -102,7 +106,6 @@ class ExperimentDialog(QDialog):
                 pair.append(entry)
             self.bounds.append(pair)
         self.optional = {}
-        existing_names = getattr(request, "variable_names", ())
         existing_bounds = dict(zip(existing_names, getattr(request, "bounds", ())))
         for row, (key, title, scale) in enumerate((
                 ("power_kw", "Optimise thermal input (kW)", 1),
@@ -123,6 +126,8 @@ class ExperimentDialog(QDialog):
                 grid.addWidget(entry, row, column)
                 pair.append(entry)
             self.optional[key] = (check, pair, scale)
+        for check, _pair, _scale in self.optional.values():
+            check.toggled.connect(self._update_initial_points)
         layout.addLayout(grid)
         layout.addWidget(note(
             "The first three variables are always searched. Select power or fuel split only when "
@@ -142,6 +147,13 @@ class ExperimentDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.config = None
+
+    def _update_initial_points(self):
+        minimum = 4 + sum(check.isChecked() for check, _pair, _scale in self.optional.values())
+        entry = self.entries["initial"]
+        if entry.text().strip() == str(self._minimum_initial_points):
+            entry.setText(str(minimum))
+        self._minimum_initial_points = minimum
 
     def accept(self):
         try:
