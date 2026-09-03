@@ -1,12 +1,15 @@
 """Operator-approved Bayesian experiments with live or manual NO/O2 measurements."""
 
 from pathlib import Path
+from copy import deepcopy
 
-from PySide6.QtCore import Qt
+import numpy as np
+
+from PySide6.QtCore import Qt, QThread, Signal, QRectF
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
@@ -18,6 +21,55 @@ from .qt_widgets import Card
 
 
 SUFFIX = ".fcbo.json"
+PRESSURE_LABELS = {"rms_pa": "RMS", "peak_abs_pa": "Peak excursion",
+                   "dominant_amplitude_pa": "Dominant spectral amplitude"}
+PRESSURE_UNITS = {"rms_pa": "Pa", "peak_abs_pa": "Pa", "dominant_amplitude_pa": "Pa RMS"}
+MAP_VARIABLES = {"h2_fraction": ("H2 in fuel", "%", 100),
+                 "phi_stage1": ("Stage-1 phi", "", 1),
+                 "phi_overall": ("Overall phi", "", 1),
+                 "power_kw": ("Thermal input", "kW", 1),
+                 "split_rich": ("Stage-1 fuel split", "%", 100)}
+# Workers outlive a pane that is destroyed during an appearance refresh. Qt
+# disconnects its slots; keeping application ownership prevents a running
+# QThread being destroyed with the pane.
+_MAP_WORKERS = set()
+
+
+class MappingWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, config, trials, points, context):
+        super().__init__(QApplication.instance())
+        self.config, self.trials = config, deepcopy(trials)
+        self.points, self.context = points.copy(), context
+        _MAP_WORKERS.add(self)
+        self.finished.connect(self._release)
+        QApplication.instance().aboutToQuit.connect(self._shutdown)
+
+    def run(self):
+        try:
+            from ..domain.bayesian import predict_mapping
+            feasible = self.context["feasible"]
+            predictions = predict_mapping(self.config, self.trials, self.points[feasible])
+            result = {}
+            for name, values in predictions.items():
+                grid = np.full(len(self.points), np.nan)
+                grid[feasible] = values
+                result[name] = grid
+            if not self.isInterruptionRequested():
+                self.succeeded.emit((result, self.context))
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(exc))
+
+    def _release(self):
+        _MAP_WORKERS.discard(self)
+        self.deleteLater()
+
+    def _shutdown(self):
+        self.requestInterruption()
+        self.wait()
 
 
 def note(text):
@@ -44,23 +96,45 @@ class ExperimentDialog(QDialog):
         self._mexa = mexa
         self.setWindowTitle("New Bayesian experiment")
         self.resize(theme.scale(600), theme.scale(650))
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         layout.addWidget(note(
             "Pilot-off NH3/H2, rich stage 1 and lean overall. Enter a rig-approved search "
             "region; these bounds do not establish flame stability or safe transitions."))
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.entries = {}
+        self.objective_mode = QComboBox()
+        self.objective_mode.addItem("Minimise NO", "minimise_no")
+        self.objective_mode.addItem("Map NO + pressure", "map_no_pressure")
+        self.objective_mode.setCurrentIndex(max(0, self.objective_mode.findData(
+            getattr(request, "objective_mode", "minimise_no"))))
+        form.addRow("Experiment purpose", self.objective_mode)
+        self.pressure_metric = QComboBox()
+        for key, label in PRESSURE_LABELS.items():
+            self.pressure_metric.addItem(label + f" ({PRESSURE_UNITS[key]})", key)
+        self.pressure_metric.setCurrentIndex(max(0, self.pressure_metric.findData(
+            getattr(request, "pressure_metric", "rms_pa"))))
+        form.addRow("Pressure response to map", self.pressure_metric)
         existing_names = getattr(request, "variable_names", ())
         self._minimum_initial_points = 4 + sum(
             name in existing_names for name in ("power_kw", "split_rich"))
         for key, title, value in (
             ("power", "Nominal/fixed thermal input (kW)", getattr(request, "power_kw", 10)),
             ("split", "Nominal/fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
-            ("reference", "Reporting reference O2 (dry vol%)", 15),
+            ("reference", "Reporting reference O2 (dry vol%)", getattr(request, "reference_o2", 15)),
             ("initial", "Initial space-filling points",
              getattr(request, "initial_points", None) or self._minimum_initial_points),
             ("pool", "Candidate pool size", getattr(request, "candidate_pool_size", None) or 1024),
-            ("window", "Minimum averaging window (s)", 30),
+            ("window", "Minimum averaging window (s)", getattr(request, "window_seconds", 30)),
+            ("mapping_weight", "NO mapping weight (0–1)",
+             getattr(request, "mapping_no_weight", .5)),
         ):
             entry = QLineEdit(f"{value:g}")
             entry.setAccessibleName(title)
@@ -85,6 +159,10 @@ class ExperimentDialog(QDialog):
                     self.record_reference_button.sizeHint().height())
             else:
                 form.addRow(title, entry)
+        self.objective_mode.currentIndexChanged.connect(self._mapping_options)
+        self._mapping_options()
+        self.entries["mapping_weight"].setToolTip(
+            "Fraction of mapping information assigned to NO; the remaining fraction is assigned to pressure.")
         layout.addLayout(form)
         self.reference_status = note(
             "O₂ reference is copied once or entered manually, then fixed for the campaign.")
@@ -102,6 +180,9 @@ class ExperimentDialog(QDialog):
                 entry = QLineEdit()
                 entry.setPlaceholderText("Required")
                 entry.setAccessibleName(f"{title} {'lower' if column == 1 else 'upper'}")
+                if len(getattr(request, "bounds", ())) >= row:
+                    value = request.bounds[row - 1][column - 1]
+                    entry.setText(f"{value * (100 if row == 1 else 1):g}")
                 grid.addWidget(entry, row, column)
                 pair.append(entry)
             self.bounds.append(pair)
@@ -141,12 +222,17 @@ class ExperimentDialog(QDialog):
                                   "Raw dry NO/O2 reporting basis verified")
         layout.addWidget(self.approved)
         self.error = note("")
-        layout.addWidget(self.error)
+        outer.addWidget(self.error)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer.addWidget(buttons)
         self.config = None
+
+    def _mapping_options(self):
+        mapping = self.objective_mode.currentData() == "map_no_pressure"
+        self.pressure_metric.setEnabled(mapping)
+        self.entries["mapping_weight"].setEnabled(mapping)
 
     def _update_initial_points(self):
         minimum = 4 + sum(check.isChecked() for check, _pair, _scale in self.optional.values())
@@ -178,7 +264,9 @@ class ExperimentDialog(QDialog):
                 reference_o2=self.entries["reference"].text(),
                 initial_points=int(initial), window_seconds=self.entries["window"].text(),
                 optimise_power=selected["power_kw"], optimise_split=selected["split_rich"],
-                candidate_pool_size=int(pool))
+                candidate_pool_size=int(pool), objective_mode=self.objective_mode.currentData(),
+                pressure_metric=self.pressure_metric.currentData(),
+                mapping_no_weight=finite(self.entries["mapping_weight"].text(), "Mapping NO weight"))
         except ValueError as exc:
             self.error.setText(str(exc))
             return
@@ -212,6 +300,9 @@ class OptimiserPane(Card):
                          parent=parent)
         self.controller = controller
         self._trial_id = None
+        self.map_worker = None
+        self._map_result = None
+        self._map_signature = None
         self.toggled.connect(self._expanded)
         self.add(note("MEXA-584L  ·  live or manual NO + O2  ·  pilot off"))
         actions = QHBoxLayout()
@@ -224,6 +315,7 @@ class OptimiserPane(Card):
         self.add(self.tabs)
         self._build_test()
         self._build_history()
+        self._build_maps()
         self._build_response()
         self.status = note(controller.last_message)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -282,6 +374,23 @@ class OptimiserPane(Card):
         layout.addLayout(line)
         self.window_label = note("No measurement window saved.")
         layout.addWidget(self.window_label)
+        self.pressure_label = note("No pressure summary attached.")
+        self.pressure_label.setObjectName("")
+        self.pressure_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.pressure_label)
+        self.labview_ids = note("")
+        self.labview_ids.setObjectName("")
+        self.labview_ids.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.labview_ids)
+        line = QHBoxLayout()
+        self.arm_button = self._button("Arm LabVIEW trigger", self._arm_labview, line)
+        self.disarm_button = self._button("Disarm", lambda: self.controller.disarm_labview(), line)
+        self.disarm_button.setToolTip("Disable new LabVIEW start triggers. An active measurement continues; use Discard window to cancel it.")
+        layout.addLayout(line)
+        line = QHBoxLayout()
+        self.pressure_import_button = self._button("Import pressure JSON…", self._import_pressure, line)
+        self.labview_export_button = self._button("Export LabVIEW request…", self._export_labview, line)
+        layout.addLayout(line)
         form = QFormLayout()
         self.inputs = {}
         for key, title, placeholder in (
@@ -326,6 +435,13 @@ class OptimiserPane(Card):
         self.plot.setLabel("bottom", "Test number")
         self.plot.showGrid(x=True, y=True, alpha=.15)
         layout.addWidget(self.plot)
+        self.outcome_plot = pg.PlotWidget(background=theme.BG)
+        self.outcome_plot.setFixedHeight(theme.scale(180))
+        self.outcome_plot.setLabel("bottom", "Corrected dry NO", units="ppm")
+        self.outcome_plot.setLabel("left", "Pressure RMS", units="Pa")
+        self.outcome_plot.setTitle("Observed outcomes")
+        self.outcome_plot.showGrid(x=True, y=True, alpha=.15)
+        layout.addWidget(self.outcome_plot)
         line = QHBoxLayout()
         self.repeat_button = self._button("Repeat selected", self._repeat, line)
         self.export_button = self._button("Export CSV…", self._export, line)
@@ -334,6 +450,199 @@ class OptimiserPane(Card):
                               "reference conditions; this does not prove a global minimum."))
         layout.addStretch(1)
         self.tabs.addTab(page, "History")
+
+    def _build_maps(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(note(
+            "Operating-space slices: select two variables. Other variables are fixed to the "
+            "selected completed test's measured condition, or to their bounds midpoint. "
+            "Colours show predicted responses; uncertainty shows latent standard deviation. "
+            "Blank cells exceed configured bounds or flow ceilings. These maps do not "
+            "establish a safe operating region."))
+        row = QHBoxLayout()
+        self.map_x, self.map_y = QComboBox(), QComboBox()
+        self.map_x.setAccessibleName("Map horizontal variable")
+        self.map_y.setAccessibleName("Map vertical variable")
+        row.addWidget(QLabel("Horizontal"))
+        row.addWidget(self.map_x)
+        row.addWidget(QLabel("Vertical"))
+        row.addWidget(self.map_y)
+        layout.addLayout(row)
+        self.map_x.currentIndexChanged.connect(self._map_axes_changed)
+        self.map_y.currentIndexChanged.connect(self._map_axes_changed)
+        self.map_slice_label = note("")
+        self.map_slice_label.setObjectName("")
+        layout.addWidget(self.map_slice_label)
+        row = QHBoxLayout()
+        self.map_refresh_button = self._button("Refresh maps", self._refresh_maps, row)
+        self.map_uncertainty = QCheckBox("Show uncertainty (latent SD)")
+        self.map_uncertainty.toggled.connect(self._draw_maps)
+        row.addWidget(self.map_uncertainty)
+        layout.addLayout(row)
+        self.map_plots, self.map_images, self.map_colours = [], [], []
+        for title, unit in (("Corrected dry NO", "ppm"), ("Pressure", "Pa")):
+            plot = pg.PlotWidget(background=theme.BG)
+            plot.setFixedHeight(theme.scale(240))
+            plot.setTitle(title)
+            image = pg.ImageItem(axisOrder="row-major")
+            plot.addItem(image)
+            colours = pg.ColorBarItem(values=(0, 1), colorMap=pg.colormap.get("viridis"),
+                                      label=unit, interactive=False)
+            colours.setImageItem(image, insert_in=plot.getPlotItem())
+            layout.addWidget(plot)
+            self.map_plots.append(plot)
+            self.map_images.append(image)
+            self.map_colours.append(colours)
+        self.map_status = note("Create a mapping campaign to view operating-space slices.")
+        layout.addWidget(self.map_status)
+        self.tabs.addTab(page, "Operating-space maps")
+
+    def _map_axes_changed(self, *_args):
+        if self.map_x.count() < 2:
+            return
+        if self.map_x.currentData() == self.map_y.currentData():
+            other = self.map_y if self.sender() is self.map_x else self.map_x
+            other.blockSignals(True)
+            other.setCurrentIndex((other.currentIndex() + 1) % other.count())
+            other.blockSignals(False)
+        self._invalidate_maps()
+        self._update_slice_label()
+
+    def _slice(self):
+        experiment = self.controller.experiment
+        if experiment is None:
+            return None
+        item = self.history.currentItem()
+        trial = next((t for t in experiment.trials if item
+                      and t["id"] == item.data(Qt.ItemDataRole.UserRole)
+                      and t["status"] == "completed"), None)
+        fixed = (experiment.config.observed_vector(trial["window"]) if trial else
+                 [sum(pair) / 2 for pair in experiment.config.bounds])
+        origin = f"measured test {trial['number']}" if trial else "bounds midpoints"
+        return fixed, origin
+
+    def _update_slice_label(self):
+        selected = self._slice()
+        if selected is None:
+            self.map_slice_label.setText("")
+            return
+        fixed, origin = selected
+        config = self.controller.experiment.config
+        axes = (self.map_x.currentData(), self.map_y.currentData())
+        values = []
+        for name, value in zip(config.variable_names, fixed):
+            if name not in axes:
+                label, unit, scale = MAP_VARIABLES[name]
+                values.append(f"{label} = {value * scale:.5g} {unit}".strip())
+        self.map_slice_label.setText(f"Fixed at {origin}: " + "; ".join(values))
+
+    def _invalidate_maps(self):
+        self._map_result = None
+        for image in self.map_images:
+            image.clear()
+        self.map_status.setText("Slice changed. Refresh maps to calculate this slice.")
+
+    def _refresh_maps(self):
+        experiment = self.controller.experiment
+        if experiment is None or self.map_worker is not None:
+            return
+        config = experiment.config
+        names = config.variable_names
+        x_name, y_name = self.map_x.currentData(), self.map_y.currentData()
+        if x_name == y_name or x_name not in names or y_name not in names:
+            raise ValueError("Select two different active variables.")
+        fixed, origin = self._slice()
+        xi, yi = names.index(x_name), names.index(y_name)
+        x = np.linspace(*config.bounds[xi], 20)
+        y = np.linspace(*config.bounds[yi], 20)
+        xx, yy = np.meshgrid(x, y)
+        points = np.tile(fixed, (400, 1))
+        points[:, xi], points[:, yi] = xx.ravel(), yy.ravel()
+        limits = self.controller.limits()
+        feasible = []
+        for point in points:
+            try:
+                targets = config.targets(point)
+                feasible.append(all(targets.get(role, 0) <= ceiling
+                                    for role, ceiling in limits.items()))
+            except ValueError:
+                feasible.append(False)
+        feasible = np.asarray(feasible, dtype=bool)
+        if not feasible.any():
+            raise ValueError("This fixed slice has no points inside the bounds and current flow ceilings.")
+        context = {"signature": self._current_map_signature(), "x": x, "y": y,
+                   "x_name": x_name, "y_name": y_name,
+                   "feasible": feasible,
+                   "metric": config.pressure_metric,
+                   "slice_label": self.map_slice_label.text()}
+        self.map_worker = MappingWorker(config, experiment.trials, points, context)
+        self.map_worker.succeeded.connect(self._maps_ready)
+        self.map_worker.failed.connect(self.map_status.setText)
+        self.map_worker.finished.connect(self._maps_finished)
+        self.map_refresh_button.setEnabled(False)
+        self.map_status.setText("Calculating 20 × 20 response maps in the background…")
+        self.map_worker.start()
+
+    def _current_map_signature(self):
+        experiment = self.controller.experiment
+        if experiment is None:
+            return None
+        fixed, _origin = self._slice()
+        return (str(experiment.path), repr(experiment.trials), self.map_x.currentData(),
+                self.map_y.currentData(), tuple(fixed), tuple(sorted(self.controller.limits().items())))
+
+    def _maps_ready(self, payload):
+        result, context = payload
+        if context["signature"] != self._current_map_signature():
+            self.map_status.setText("Campaign or slice changed. Refresh maps for current data.")
+            return
+        self._map_result = payload
+        self._draw_maps()
+        self.map_status.setText("Predictions on a 20 × 20 slice. " + context["slice_label"])
+
+    def _maps_finished(self):
+        self.map_worker = None
+        self._update_map_controls()
+
+    def _draw_maps(self, *_args):
+        if self._map_result is None:
+            return
+        result, context = self._map_result
+        uncertainty = self.map_uncertainty.isChecked()
+        suffix = "sd" if uncertainty else "mean"
+        xl, xu, xs = MAP_VARIABLES[context["x_name"]]
+        yl, yu, ys = MAP_VARIABLES[context["y_name"]]
+        x, y = context["x"] * xs, context["y"] * ys
+        dx, dy = x[1] - x[0], y[1] - y[0]
+        for index, key in enumerate(("no", "pressure")):
+            values = np.asarray(result[f"{key}_{suffix}"]).reshape(20, 20)
+            image, plot = self.map_images[index], self.map_plots[index]
+            image.setImage(values, autoLevels=False)
+            image.setRect(QRectF(x[0] - dx / 2, y[0] - dy / 2,
+                                x[-1] - x[0] + dx, y[-1] - y[0] + dy))
+            low, high = float(np.nanmin(values)), float(np.nanmax(values))
+            self.map_colours[index].setLevels((low, high if high > low else low + 1e-9))
+            self.map_colours[index].getAxis("left").setLabel(
+                "ppm" if index == 0 else PRESSURE_UNITS[context["metric"]])
+            plot.setLabel("bottom", xl, units=xu or None)
+            plot.setLabel("left", yl, units=yu or None)
+            title = ("Corrected dry NO (ppm)" if index == 0 else
+                     PRESSURE_LABELS[context["metric"]] + f" ({PRESSURE_UNITS[context['metric']]})")
+            plot.setTitle(title + (" — latent SD" if uncertainty else " — predicted mean"))
+            plot.setRange(xRange=(x[0], x[-1]), yRange=(y[0], y[-1]), padding=0)
+
+    def _update_map_controls(self):
+        experiment = self.controller.experiment
+        mapping = bool(experiment and experiment.config.objective_mode == "map_no_pressure")
+        count = sum(t["status"] == "completed" for t in experiment.trials) if experiment else 0
+        self.map_refresh_button.setEnabled(bool(mapping and count >= experiment.config.initial_points
+                                               and self.map_worker is None and not self.controller.busy))
+
+    def closeEvent(self, event):
+        if self.map_worker is not None:
+            self.map_worker.requestInterruption()
+        super().closeEvent(event)
 
     def _build_response(self):
         page = QWidget()
@@ -439,6 +748,22 @@ class OptimiserPane(Card):
     def _start(self):
         self.controller.start_window(self.pilot.isChecked(), self.settled.isChecked(), live=self.live.isChecked())
 
+    def _arm_labview(self):
+        self.controller.arm_labview(pilot_off=self.pilot.isChecked(),
+                                   settled=self.settled.isChecked(), live=self.live.isChecked())
+
+    def _import_pressure(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import pressure summary or waveform manifest",
+                                            str(DEFAULT_LOG_DIR), "Pressure JSON (*.json)")
+        if path:
+            self.controller.import_pressure(path)
+
+    def _export_labview(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export LabVIEW request",
+                                            str(DEFAULT_LOG_DIR / "labview-request.json"), "JSON (*.json)")
+        if path:
+            self.controller.export_labview_request(path)
+
     def _save(self):
         pending = self.controller.experiment.pending if self.controller.experiment else None
         if pending and (pending.get("window") or {}).get("mexa"):
@@ -476,6 +801,9 @@ class OptimiserPane(Card):
                      None) if experiment else None
         self.repeat_button.setEnabled(bool(trial and trial["status"] == "completed"
                                            and not experiment.pending and not self.controller.busy))
+        self._update_slice_label()
+        if self._map_result and self._map_result[1]["signature"] != self._current_map_signature():
+            self._invalidate_maps()
 
     def refresh(self):
         c = self.controller
@@ -490,20 +818,49 @@ class OptimiserPane(Card):
                 box.setChecked(False)
         response_active = c.response.active
         busy = c.busy or response_active
+        armed = bool(getattr(c, "labview_armed", False))
         capturing = c.capture is not None or c.settle_wait is not None
         window = pending.get("window") if pending else None
+        pressure = pending.get("pressure") if pending else None
+        mapping = bool(experiment and experiment.config.objective_mode == "map_no_pressure")
         mexa = (window or {}).get("mexa")
-        self.live.setEnabled(bool(pending and not capturing and not window and not busy))
-        self.pilot.setEnabled(not capturing and not window)
-        self.settled.setEnabled(not capturing and not window)
+        self.live.setEnabled(bool(pending and not capturing and not window and not busy and not armed))
+        self.pilot.setEnabled(not capturing and not window and not armed)
+        self.settled.setEnabled(not capturing and not window and not armed)
         self.new_button.setEnabled(not busy and not capturing)
         self.open_button.setEnabled(not busy and not capturing)
         self.ask_button.setEnabled(bool(experiment and not pending and not busy))
-        self.load_button.setEnabled(bool(pending and not busy and not capturing and not window))
-        self.start_button.setEnabled(bool(pending and not busy and not capturing and not window))
+        self.load_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
+        self.start_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
         self.finish_button.setEnabled(c.capture is not None)
         self.cancel_button.setEnabled(capturing)
-        self.save_button.setEnabled(bool(window and not capturing and not busy))
+        self.save_button.setEnabled(bool(window and not capturing and not busy and (pressure or not mapping)))
+        self.arm_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
+        self.disarm_button.setEnabled(armed)
+        self.pressure_import_button.setEnabled(bool(window and not pressure and not busy and not capturing))
+        self.labview_export_button.setEnabled(bool(pending and not busy))
+        def pressure_value(key):
+            value = (pressure or {}).get(key)
+            return "—" if value is None else f"{value:.5g}"
+        self.pressure_label.setText(
+            "Pressure: RMS " + pressure_value("rms_pa") + " Pa · peak excursion "
+            + pressure_value("peak_abs_pa") + " Pa\nDominant frequency "
+            + pressure_value("dominant_frequency_hz") + " Hz · spectral amplitude "
+            + pressure_value("dominant_amplitude_pa") + " Pa RMS" if pressure else
+            ("Pressure summary required before saving this mapping result." if mapping else
+             "No pressure summary attached."))
+        if getattr(c, "pressure_worker", None) is not None:
+            self.pressure_label.setText("Processing pressure data in the background…")
+        if pending:
+            try:
+                request = c.labview_request()
+                self.labview_ids.setText(("LabVIEW armed" if armed else "LabVIEW disarmed") + "\n"
+                    + "\n".join(f"{key}: {request[key]}" for key in
+                                ("experiment_id", "trial_id", "capture_id")))
+            except (ValueError, AttributeError) as exc:
+                self.labview_ids.setText(str(exc))
+        else:
+            self.labview_ids.setText("")
         self.invalid_button.setEnabled(bool(pending and not capturing and not busy))
         self.export_button.setEnabled(bool(experiment and not busy))
         for entry in self.inputs.values():
@@ -518,7 +875,8 @@ class OptimiserPane(Card):
                              if not experiment else
                              f"{experiment.path.name}\n{experiment.config.dimensions} variables · "
                              f"{experiment.config.initial_points} initial points · "
-                             f"NO @ {experiment.config.reference_o2:g}% O2")
+                             f"NO @ {experiment.config.reference_o2:g}% O2"
+                             + (f" · map NO + {PRESSURE_LABELS[experiment.config.pressure_metric]}" if mapping else ""))
         if experiment:
             names = ", ".join(experiment.config.variable_names)
             self.summary.setToolTip(str(experiment.path) + f"\nVariables: {names}\nBounds: "
@@ -562,10 +920,14 @@ class OptimiserPane(Card):
             f"{experiment.total_live_logging_seconds:g} s")
         selected = self.history.currentItem()
         selected_id = selected.data(Qt.ItemDataRole.UserRole) if selected else None
+        self.history.blockSignals(True)
         self.history.clear()
         completed = []
         for t in experiment.trials if experiment else []:
             outcome = f"{t['result']['corrected_no']:.3f} ppm" if t["status"] == "completed" else t["status"]
+            metric = experiment.config.pressure_metric
+            if metric in (t.get("pressure") or {}):
+                outcome += f" · {PRESSURE_LABELS[metric]} {t['pressure'][metric]:.4g} {PRESSURE_UNITS[metric]}"
             item = QListWidgetItem(f"#{t['number']}  {outcome}  ·  "
                                    + point_text(experiment.config, t["point"]))
             item.setData(Qt.ItemDataRole.UserRole, t["id"])
@@ -575,7 +937,17 @@ class OptimiserPane(Card):
                 self.history.setCurrentItem(item)
             if t["status"] == "completed":
                 completed.append(t)
+        self.history.blockSignals(False)
         self.plot.clear()
+        self.outcome_plot.clear()
+        self.outcome_plot.setVisible(bool(mapping or any(t.get("pressure") for t in completed)))
+        if experiment:
+            metric = experiment.config.pressure_metric
+            self.outcome_plot.setLabel("left", "Pressure " + PRESSURE_LABELS[metric], units=PRESSURE_UNITS[metric])
+            paired = [t for t in completed if metric in (t.get("pressure") or {})]
+            self.outcome_plot.plot([t["result"]["corrected_no"] for t in paired],
+                                   [t["pressure"][metric] for t in paired], pen=None,
+                                   symbol="o", symbolSize=8, symbolBrush=theme.TEXT_BRIGHT)
         if completed:
             best = min(completed, key=lambda t: t["result"]["corrected_no"])
             self.best_label.setText(f"Lowest observed: {best['result']['corrected_no']:.3f} ppm "
@@ -584,4 +956,16 @@ class OptimiserPane(Card):
                            pen=None, symbol="o", symbolSize=7, symbolBrush=theme.TEXT_BRIGHT)
         else:
             self.best_label.setText("No completed tests.")
+        names = experiment.config.variable_names if experiment else ()
+        if tuple(self.map_x.itemData(i) for i in range(self.map_x.count())) != names:
+            for combo in (self.map_x, self.map_y):
+                combo.blockSignals(True)
+                combo.clear()
+                for name in names:
+                    combo.addItem(MAP_VARIABLES[name][0], name)
+            self.map_y.setCurrentIndex(1 if len(names) > 1 else -1)
+            for combo in (self.map_x, self.map_y):
+                combo.blockSignals(False)
+            self._invalidate_maps()
+        self._update_map_controls()
         self._selection()

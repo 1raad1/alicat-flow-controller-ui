@@ -1,0 +1,30 @@
+{
+  "protocol": "flow-pressure-v1",
+  "type": "file_ready",
+  "request_id": "replace-with-capture-id:file-ready",
+  "experiment_id": "replace-with-exported-experiment-id",
+  "trial_id": "replace-with-exported-trial-id",
+  "capture_id": "replace-with-exported-capture-id",
+  "start": "2026-09-03T12:00:00+00:00",
+  "sample_rate_hz": 1000,
+  "raw_file": "C:/PressureCaptures/example-30s.csv",
+  "format": "csv",
+  "column": "pressure_pa",
+  "channel": "combustor_pressure",
+  "calibration_id": "example-calibration-replace-before-use",
+  "scale_pa_per_unit": 1.0,
+  "offset_pa": 0.0,
+  "quality": {
+    "clipped": false,
+    "nonfinite": false
+  },
+  "analysis": {
+    "id": "python-welch-flattop-v1",
+    "band_hz": [10, 400],
+    "window": "flattop",
+    "segment_samples": 1000,
+    "overlap_samples": 500,
+    "detrend": "constant",
+    "amplitude_convention": "rms_spectrum"
+  }
+}

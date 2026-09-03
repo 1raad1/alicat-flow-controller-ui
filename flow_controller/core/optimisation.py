@@ -15,14 +15,15 @@ import uuid
 import numpy as np
 
 from ..domain.bayesian import SearchConfig, corrected_no, finite
+from ..domain.pressure import validate_pressure_summary, pressure_signature
 from ..domain.combustion import CombustionCalculator
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from ..domain.roles import ROLES
 from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
-SCHEMA = 2
-SUPPORTED_SCHEMAS = (1, SCHEMA)
+SCHEMA = 3
+SUPPORTED_SCHEMAS = (1, 2, SCHEMA)
 MAX_TRIALS = 500
 MAX_EXPERIMENT_BYTES = 50_000_000
 FLOW_REL_TOL = .03
@@ -70,7 +71,9 @@ class Experiment:
                 "config": config.to_dict(), "trials": [],
                 "analyser_response": {"conditions": {"A": None, "B": None},
                                       "runs": [], "selected_run_id": None},
-                "objective": "dry NO ppm corrected to fixed O2; not total NOx",
+                "objective": ("map corrected dry NO and pressure amplitude"
+                              if config.objective_mode == "map_no_pressure" else
+                              "dry NO ppm corrected to fixed O2; not total NOx"),
                 "pilot": "off during measurements"}
         atomic_save(path, data)
         return cls(path, data)
@@ -102,6 +105,9 @@ class Experiment:
                 experiment.config.request(trial["point"])
                 if trial["status"] not in ("pending", "completed", "invalid"):
                     raise ValueError("Invalid trial status.")
+                if "capture_id" in trial and (not isinstance(trial["capture_id"], str)
+                                               or not 1 <= len(trial["capture_id"]) <= 128):
+                    raise ValueError("Invalid pressure capture ID.")
                 pending += trial["status"] == "pending"
                 if trial.get("window") is not None:
                     validate_window(trial["window"], experiment.config, trial["point"])
@@ -123,6 +129,10 @@ class Experiment:
                     if result.get("corrected_sem") != sem:
                         raise ValueError("Stored NO uncertainty does not match raw readings.")
                     validate_mexa_result(trial["window"], result)
+                    if experiment.config.objective_mode == "map_no_pressure" and not trial.get("pressure"):
+                        raise ValueError("Completed mapping tests require a pressure result.")
+                if trial.get("pressure") is not None:
+                    experiment._validate_pressure(trial["pressure"], trial)
                 if trial.get("condition_log") is not None:
                     validate_condition_log(trial, data, experiment.config)
             if pending > 1:
@@ -140,6 +150,7 @@ class Experiment:
         return next((t for t in self.trials if t["status"] == "pending"), None)
 
     def _commit(self, data):
+        data["schema"] = SCHEMA
         atomic_save(self.path, data)
         self.data = data
 
@@ -226,7 +237,8 @@ class Experiment:
         self.config.request(suggestion["point"])
         data = deepcopy(self.data)
         trial = dict(suggestion, id=str(uuid.uuid4()), number=len(self.trials) + 1,
-                     status="pending", created_at=now_iso(), window=None, result=None)
+                     status="pending", created_at=now_iso(), window=None, result=None,
+                     capture_id=str(uuid.uuid4()))
         data["trials"].append(trial)
         self._commit(data)
         return trial
@@ -248,8 +260,75 @@ class Experiment:
         trial["window"] = deepcopy(window)
         self._commit(data)
 
+    def ensure_capture_id(self):
+        """Give legacy pending tests a durable identity before external acquisition."""
+        data, trial = self._pending_copy()
+        if not trial.get("capture_id"):
+            trial["capture_id"] = str(uuid.uuid4())
+            self._commit(data)
+        return trial["capture_id"]
+
+    def reset_capture(self):
+        """Invalidate messages from an abandoned acquisition, retaining the condition."""
+        data, trial = self._pending_copy()
+        if trial.get("window"):
+            raise ValueError("A saved window cannot be discarded; mark this test invalid instead.")
+        trial["capture_id"] = str(uuid.uuid4())
+        trial.pop("pressure", None)
+        self._commit(data)
+
+    def _validate_pressure(self, payload, trial):
+        summary = validate_pressure_summary(payload)
+        for key, expected in (("experiment_id", self.data["id"]),
+                              ("trial_id", trial["id"]),
+                              ("capture_id", trial.get("capture_id"))):
+            if summary[key] != expected:
+                raise ValueError(f"Pressure {key} does not match this acquisition.")
+        window = trial.get("window")
+        if not window:
+            raise ValueError("Finish and save the flow/NO window before attaching pressure.")
+        start = datetime.fromisoformat(summary["start"]).timestamp()
+        end = datetime.fromisoformat(summary["end"]).timestamp()
+        flow_start = datetime.fromisoformat(window["start"]).timestamp()
+        flow_end = datetime.fromisoformat(window["end"]).timestamp()
+        # Association tolerance allows the final flow poll to precede recording stop.
+        # This does not provide hardware clock synchronization.
+        if start < flow_start - 2 or end > flow_end + 2 or end <= flow_start or start >= flow_end:
+            raise ValueError("Pressure recording must lie within the saved flow/NO window "
+                             "(2 s boundary tolerance). Check clocks and analyser delay.")
+        if summary["sample_count"] / summary["sample_rate_hz"] < self.config.window_seconds - 1e-6:
+            raise ValueError("Pressure recording is shorter than the campaign measurement window.")
+        signature = self.data.get("pressure_signature")
+        if signature is not None and signature != pressure_signature(summary):
+            raise ValueError("Pressure channel, calibration or analysis settings differ from this campaign. "
+                             "Use the established settings or create a new campaign.")
+        return summary
+
+    def attach_pressure(self, payload):
+        """Attach once, or acknowledge an identical retry, without finalising NO."""
+        if not isinstance(payload, dict):
+            raise ValueError("Pressure result must be a JSON object.")
+        trial = next((t for t in self.trials if t["id"] == payload.get("trial_id")), None)
+        if trial is None or trial["status"] == "invalid":
+            raise ValueError("Pressure result refers to an unknown or invalid test.")
+        summary = self._validate_pressure(payload, trial)
+        previous = trial.get("pressure")
+        if previous is not None:
+            if previous != summary:
+                raise ValueError("This capture already has a different pressure result; it cannot be overwritten.")
+            return False
+        if trial["status"] != "pending":
+            raise ValueError("A completed test cannot be changed.")
+        data, updated = self._pending_copy()
+        updated["pressure"] = summary
+        data.setdefault("pressure_signature", pressure_signature(summary))
+        self._commit(data)
+        return True
+
     def complete(self, no_ppm, o2_percent, no_sem=None, notes="", *, from_mexa=False):
         data, trial = self._pending_copy()
+        if self.config.objective_mode == "map_no_pressure" and not trial.get("pressure"):
+            raise ValueError("Import a valid pressure result before completing a mapping test.")
         validate_window(trial["window"], self.config, trial["point"])
         if bool(trial["window"].get("mexa")) != from_mexa:
             raise ValueError("Use the saved MEXA means for a live window, or manual inputs for a manual window")
@@ -305,13 +384,19 @@ class Experiment:
                       "mexa_channel_statistics_json", "mexa_cycle_statistics_json",
                       "mexa_received_start", "mexa_received_end", "mexa_states_seen_json",
                       "mexa_alarms_seen_json", "mexa_warnings_seen_json",
-                      "response_calibration_json", "condition_log_json"]
+                      "response_calibration_json", "condition_log_json",
+                      "objective_mode", "pressure_metric", "capture_id", "pressure_rms_pa",
+                      "pressure_peak_abs_pa", "pressure_dominant_amplitude_pa", "pressure_dominant_frequency_hz",
+                      "pressure_rms_window_sd_pa", "pressure_start", "pressure_end",
+                      "pressure_raw_file", "pressure_summary_json", "mapping_score",
+                      "suggested_pressure_pa", "suggested_pressure_sd_pa"]
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for t in self.trials:
                 result, window = t.get("result") or {}, t.get("window") or {}
                 mexa = window.get("mexa") or {}
                 condition = t.get("condition_log") or {}
+                pressure = t.get("pressure") or {}
                 observed = window.get("observed_point", [None] * 3)
                 request = self.config.request(t["point"])
                 note = result.get("notes", t.get("reason", ""))
@@ -388,7 +473,26 @@ class Experiment:
                     "response_calibration_json": compact_json(
                         condition.get("response_calibration")),
                     "condition_log_json": compact_json(condition),
+                    "objective_mode": self.config.objective_mode,
+                    "pressure_metric": self.config.pressure_metric,
+                    "capture_id": t.get("capture_id"),
+                    "pressure_rms_pa": pressure.get("rms_pa"),
+                    "pressure_peak_abs_pa": pressure.get("peak_abs_pa"),
+                    "pressure_dominant_amplitude_pa": pressure.get("dominant_amplitude_pa"),
+                    "pressure_dominant_frequency_hz": pressure.get("dominant_frequency_hz"),
+                    "pressure_rms_window_sd_pa": pressure.get("rms_window_sd_pa"),
+                    "pressure_start": pressure.get("start"), "pressure_end": pressure.get("end"),
+                    "pressure_raw_file": csv_text(pressure.get("raw_file", "")),
+                    "pressure_summary_json": compact_json(pressure or None),
+                    "mapping_score": t.get("mapping_score"),
+                    "suggested_pressure_pa": t.get("predicted_pressure_pa"),
+                    "suggested_pressure_sd_pa": t.get("pressure_latent_sd_pa"),
                 })
+
+
+def csv_text(value):
+    text = str(value)
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) else text
 
 
 def compact_json(value):
@@ -484,7 +588,7 @@ def build_condition_log(trial, data, config):
     response_run_id = (window or {}).get("response_run_id")
     suggestion_exclusions = {
         "id", "number", "status", "created_at", "window", "result",
-        "condition_log", "reason", "invalidated_at",
+        "condition_log", "reason", "invalidated_at", "pressure", "capture_id",
     }
     suggestion = {key: deepcopy(value) for key, value in trial.items()
                   if key not in suggestion_exclusions}
@@ -511,6 +615,8 @@ def build_condition_log(trial, data, config):
         "invalid_reason": trial.get("reason") if trial["status"] == "invalid" else None,
         "response_calibration": _response_calibration_summary(data, response_run_id),
     }
+    if trial.get("pressure") is not None:
+        record["pressure"] = deepcopy(trial["pressure"])
     _bounded_json(record, "Condition log", max_depth=12, max_items=5000,
                   max_bytes=100_000)
     return record
@@ -519,10 +625,13 @@ def build_condition_log(trial, data, config):
 def validate_condition_log(trial, data, config):
     """Reject inconsistent or unbounded per-condition records while allowing legacy absence."""
     record = trial.get("condition_log")
-    if not isinstance(record, dict) or set(record) != {
+    expected_fields = {
             "schema", "logged_at", "outcome", "trial", "suggestion",
             "requested_condition", "measurement_window", "result", "invalid_reason",
-            "response_calibration"}:
+            "response_calibration"}
+    if trial.get("pressure") is not None:
+        expected_fields.add("pressure")
+    if not isinstance(record, dict) or set(record) != expected_fields:
         raise ValueError("Invalid condition-log fields.")
     _bounded_json(record, "Condition log", max_depth=12, max_items=5000,
                   max_bytes=100_000)

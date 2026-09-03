@@ -199,6 +199,8 @@ class FlowSession(QObject):
     # -- recording -------------------------------------------------------- #
     logging_changed = Signal(bool, object)  # active, path
     udp_changed = Signal(bool, str)
+    labview_command = Signal(str)
+    labview_packet = Signal(object, object)
 
     #: Internal: carries a callable from a worker thread to this thread.
     _invoke = Signal(object)
@@ -219,6 +221,7 @@ class FlowSession(QObject):
         self._ramps = RampRunner(self._emit_ramp_setpoint, log=self._log)
         self._udp = UdpCommandListener(
             on_command=lambda command: self._post(self._on_udp_command, command),
+            on_packet=lambda packet, sender: self._post(self.labview_packet.emit, packet, sender),
             on_ready=lambda host, port: self._post(self._on_udp_ready, host, port),
             on_error=lambda error, host, port: self._post(
                 self._on_udp_error, error, host, port),
@@ -2872,16 +2875,16 @@ class FlowSession(QObject):
     def _on_udp_command(self, command):
         """Act on a datagram.  Announcing one is not the same as obeying it.
 
-        ``log`` and ``stop`` exist so that one operator action starts both
-        systems' records at the same instant; a listener that only wrote a
-        line in the syslog would leave the LabVIEW record with no counterpart
-        to line up against, which is the whole point of accepting the trigger.
+        ``log`` and ``stop`` create a flow record alongside the LabVIEW
+        recording. Receipt time is a software association, not hardware clock
+        synchronization. An explicitly armed optimiser also receives the trigger.
         """
         self._log(f"LabVIEW command received: {command}")
         if command == 'log':
             self._udp_start_logging()
         elif command == 'stop':
             self._udp_stop_logging()
+        self.labview_command.emit(command)
 
     def _udp_start_logging(self):
         if self._csv.active:
