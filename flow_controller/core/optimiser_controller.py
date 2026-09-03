@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import time
@@ -16,8 +16,9 @@ from .analyser_response_controller import AnalyserResponseController
 from .optimisation import Experiment, MeasurementWindow, FLOW_ABS_TOL, FLOW_REL_TOL, atomic_save
 from ..domain.bayesian import finite, suggest
 from ..domain.pressure import load_pressure_result, process_pressure_file
+from ..domain.tdms_capture import validate_tdms_source, folder_snapshot, find_tdms_capture, process_tdms_capture
 from ..domain.roles import ROLE_MAP
-from mexa_bridge.records import LiveWindow
+from mexa_bridge.records import LiveWindow, epoch
 
 
 class SuggestionWorker(QThread):
@@ -57,6 +58,28 @@ class PressureWorker(QThread):
                 self.failed.emit(f"Pressure import failed: {exc}")
 
 
+class TdmsWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, source, capture, baseline=None, path=None, parent=None):
+        super().__init__(parent)
+        self.source, self.capture = deepcopy(source), deepcopy(capture)
+        self.baseline, self.path = deepcopy(baseline), path
+
+    def run(self):
+        try:
+            result = (process_tdms_capture(self.path, self.source, self.capture) if self.path else
+                      find_tdms_capture(self.source, self.capture, self.baseline or {},
+                                        cancel=self.isInterruptionRequested, progress=self.progress.emit))
+            if not self.isInterruptionRequested():
+                self.succeeded.emit(result)
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(f"TDMS import: {exc} Choose the matching TDMS file to retry.")
+
+
 class OptimiserController(QObject):
     changed = Signal()
     message = Signal(str)
@@ -73,6 +96,9 @@ class OptimiserController(QObject):
         self._labview_options = {}
         self._labview_started = False
         self._labview_log_owned = None
+        self._legacy_run = None
+        self._tdms_baseline = {}
+        self._armed_tdms_source = None
         self._pressure_error = None
         self._pressure_job_identity = None
         self._file_request = None
@@ -307,7 +333,11 @@ class OptimiserController(QObject):
         self._checked_readings(targets)
         if live:
             self.session.mexa.checked_sample()
+        source = self.tdms_source
+        baseline = folder_snapshot(source["folder"]) if source else {}
         self.experiment.ensure_capture_id()
+        self._armed_tdms_source = source
+        self._tdms_baseline = baseline
         self._labview_options = {"pilot_off": True, "settled": True, "live": bool(live)}
         self.labview_armed = True
         self._labview_started = False
@@ -321,21 +351,105 @@ class OptimiserController(QObject):
         self._labview_options = {}
         self.changed.emit()
 
+    @property
+    def tdms_source(self):
+        return deepcopy(self.experiment.data.get("tdms_source")) if self.experiment else None
+
+    @property
+    def legacy_capture_active(self):
+        return self._legacy_run is not None
+
+    @property
+    def legacy_collecting_after_stop(self):
+        return bool(self._legacy_run and self._legacy_run.get("stop") is not None)
+
+    @property
+    def tdms_auto_pending(self):
+        return isinstance(self.pressure_worker, TdmsWorker) and self.pressure_worker.path is None
+
+    @property
+    def labview_tail_remaining_s(self):
+        run = self._legacy_run
+        if not run or run.get("stop") is None:
+            return 0.0
+        return max(0.0, run["deadline"] - self._clock())
+
+    def configure_tdms_source(self, source):
+        self._require_idle()
+        experiment = self._require_experiment()
+        normalized = validate_tdms_source(source)
+        self.disarm_labview()
+        experiment.set_tdms_source(normalized)
+        self._say("TDMS source saved. Existing LabVIEW log/stop triggers can be used unchanged.")
+        self.changed.emit()
+
     def _legacy_labview_command(self, command):
-        """Bare triggers retain CSV behaviour; optimizer capture requires local arming."""
+        """Record now; after stop retain the same condition for the delayed NO tail."""
         try:
             if command == "log" and self.labview_armed and not self._labview_started:
-                self.start_window(**self._labview_options)
+                self._require_idle()
+                if not self.session.logging_active:
+                    raise ValueError("Could not open the flow CSV log. Check its destination before recording again.")
+                targets = self._pending_targets()
+                stamp, flows, setpoints = self._checked_readings(targets)
+                live = self._labview_options.get("live", False)
+                baseline = self.session.mexa.checked_sample() if live else None
+                delay = self.experiment.response_delay_seconds if live else 0.0
+                start = datetime.now().astimezone(timezone.utc)
+                run = self.experiment.selected_response_run or {}
+                self._legacy_run = {"start": start, "stop": None, "started": self._clock(),
+                                    "delay_s": delay, "no_start": start + timedelta(seconds=delay),
+                                    "response_run_id": run.get("id") if delay else None,
+                                    "source": deepcopy(self._armed_tdms_source),
+                                    "baseline": deepcopy(self._tdms_baseline)}
+                self._begin_window(stamp, flows, setpoints=setpoints, targets=targets, baseline=baseline)
                 self._labview_started = True
-            elif command == "stop" and self._labview_started:
-                if self.settle_wait:
-                    self.cancel_window("LabVIEW stopped before the analyser delay finished; re-arm and record again.")
-                elif self.capture:
-                    self.finish_window()
-                    self.labview_armed = False
+                self.session.labview_stop_deferred = True
+                self._labview_log_owned = self.session.log_path if self.session.logging_active else None
+                self.changed.emit()
+            elif command == "stop" and self._legacy_run:
+                run = self._legacy_run
+                if run["stop"] is None:
+                    run["stop"] = datetime.now().astimezone(timezone.utc)
+                    run["deadline"] = max(self._clock() + run["delay_s"],
+                                          run["started"] + run["delay_s"] + self.experiment.config.window_seconds)
+                    self._say("LabVIEW recording stopped. Keep the condition steady while delayed NO recording finishes.")
                     self.changed.emit()
+                self._maybe_finish_legacy()
         except (ValueError, OSError) as exc:
-            self._say(f"LabVIEW trigger: {exc}")
+            if self._legacy_run:
+                self.cancel_window(f"LabVIEW window discarded: {exc}")
+            else:
+                self._say(f"LabVIEW trigger: {exc}")
+
+    def _legacy_ready(self):
+        run = self._legacy_run
+        if not run or run["stop"] is None or self.labview_tail_remaining_s > 0 or not self.capture:
+            return False
+        first, last = self.capture.stamps[0], self.capture.stamps[-1]
+        minimum = self.experiment.config.window_seconds
+        if (len(self.capture.stamps) < 3 or (last - first).total_seconds() < minimum
+                or last.timestamp() < max(run["stop"].timestamp() + run["delay_s"],
+                                         run["no_start"].timestamp() + minimum)):
+            return False
+        if self.mexa_capture:
+            selected = [s for s in self.mexa_capture.samples
+                        if run["no_start"].timestamp() <= epoch(s.packet["acquired_at"]) <= last.timestamp()]
+            if (len(selected) < 3 or epoch(selected[-1].packet["acquired_at"]) -
+                    epoch(selected[0].packet["acquired_at"]) < minimum):
+                return False
+        return True
+
+    def _maybe_finish_legacy(self):
+        if self._legacy_ready():
+            try:
+                self.finish_window()
+            except OSError as exc:
+                self._say(f"Could not save the NO window: {exc}. Recording continues; check the save location.")
+        elif self.legacy_collecting_after_stop:
+            self.progress.emit(f"Keep condition steady: {self.labview_tail_remaining_s:.0f} s NO tail remaining; "
+                               "waiting for full fresh NO/flow coverage.")
+            self.changed.emit()
 
     def _packet_trial(self, packet):
         if not isinstance(packet, dict) or packet.get("protocol") != "flow-pressure-v1":
@@ -461,6 +575,35 @@ class OptimiserController(QObject):
     def import_pressure(self, path):
         self._start_pressure_import(str(path))
 
+    def import_tdms(self, path):
+        self._start_tdms_import(path=str(path))
+
+    def _start_tdms_import(self, *, path=None, baseline=None):
+        self._require_idle()
+        experiment = self._require_experiment()
+        trial = experiment.pending
+        acquisition = ((trial or {}).get("window") or {}).get("labview_capture")
+        if not acquisition:
+            raise ValueError("Record a window using the armed LabVIEW log/stop triggers first.")
+        if trial.get("pressure"):
+            raise ValueError("Pressure is already saved for this trial.")
+        source = acquisition.get("tdms_source")
+        if not source:
+            raise ValueError("Choose the TDMS source folder, channel and calibration first.")
+        capture = {key: value for key, value in self.labview_request().items()
+                   if key in ("experiment_id", "trial_id", "capture_id")}
+        capture.update(start=acquisition["start"], end=acquisition["stop"])
+        self._pressure_job_identity = tuple(capture[key] for key in ("experiment_id", "trial_id", "capture_id"))
+        self._pressure_error = None
+        self.pressure_worker = TdmsWorker(source, capture, baseline=baseline, path=path, parent=self)
+        self.pressure_worker.succeeded.connect(self._pressure_result)
+        self.pressure_worker.failed.connect(self._pressure_failed)
+        self.pressure_worker.progress.connect(self.progress)
+        self.pressure_worker.finished.connect(self._pressure_finished)
+        self._say("NO window saved. Looking for the matching completed TDMS recording in the background.")
+        self.changed.emit()
+        self.pressure_worker.start()
+
     def _start_pressure_import(self, source):
         self._require_idle()
         experiment = self._require_experiment()
@@ -480,6 +623,8 @@ class OptimiserController(QObject):
         self.pressure_worker.start()
 
     def _pressure_result(self, summary):
+        if self.pressure_worker is not None and self.pressure_worker.isInterruptionRequested():
+            return
         try:
             identity = tuple(summary[key] for key in ("experiment_id", "trial_id", "capture_id"))
             if identity != self._pressure_job_identity:
@@ -495,6 +640,7 @@ class OptimiserController(QObject):
     def _pressure_failed(self, error):
         self._pressure_error = str(error)
         self._say(self._pressure_error)
+        self.changed.emit()
 
     def _pressure_finished(self):
         worker, self.pressure_worker = self.pressure_worker, None
@@ -565,17 +711,33 @@ class OptimiserController(QObject):
             self.progress.emit(f"Capturing: {elapsed:.0f} / {self.experiment.config.window_seconds:g} s minimum; "
                                f"{len(self.capture.rows)} fresh passes"
                                + (f"; {len(self.mexa_capture.samples)} MEXA samples" if self.mexa_capture else ""))
+            self._maybe_finish_legacy()
         except ValueError as exc:
             self.cancel_window(f"Window discarded: {exc}")
 
     def finish_window(self):
         if self.capture is None:
             raise ValueError("Start a measurement window first.")
+        legacy = self._legacy_run
+        if legacy and not self._legacy_ready():
+            raise ValueError("Wait for LabVIEW stop and the complete delayed NO window; keep the condition steady.")
         self._checked_readings(self.capture.targets)
         window = self.capture.finish(end_context=self._measurement_context())
         if self.mexa_capture:
             self.session.mexa.checked_sample()
-            window["mexa"] = self.mexa_capture.finish(window, self.experiment.config.window_seconds)
+            no_window = dict(window, start=legacy["no_start"].isoformat()) if legacy else window
+            window["mexa"] = self.mexa_capture.finish(no_window, self.experiment.config.window_seconds)
+        if legacy:
+            source = legacy["source"]
+            window["labview_capture"] = {
+                "start": legacy["start"].isoformat(), "stop": legacy["stop"].isoformat(),
+                "no_start": legacy["no_start"].isoformat(), "no_end": window["end"],
+                "delay_s": legacy["delay_s"], "pressure_min_seconds": source["min_recording_s"] if source else 1.0,
+                "tdms_source": deepcopy(source),
+            }
+            if legacy["response_run_id"]:
+                window["response_run_id"] = legacy["response_run_id"]
+            window["total_observation_s"] = window["duration_s"]
         if self._capture_delay:
             window["pre_window_delay_s"] = self._capture_delay
             window["response_run_id"] = self._response_run_id
@@ -585,6 +747,8 @@ class OptimiserController(QObject):
         self.mexa_capture = None
         self._capture_delay = 0.0
         self._response_run_id = None
+        self._legacy_run = None
+        self.session.labview_stop_deferred = False
         self.labview_armed = False
         if self._labview_log_owned is not None and self.session.log_path == self._labview_log_owned:
             self.session._udp_stop_logging()
@@ -592,6 +756,14 @@ class OptimiserController(QObject):
         self._say("Window saved with MEXA means. Review the result and confirm the reporting basis."
                   if window.get("mexa") else "Window saved. Enter its matching uncorrected dry NO and O2 averages.")
         self.changed.emit()
+        if legacy and self.experiment.config.objective_mode == "map_no_pressure":
+            if legacy["source"]:
+                try:
+                    self._start_tdms_import(baseline=legacy["baseline"])
+                except (ValueError, OSError) as exc:
+                    self._pressure_failed(f"NO window saved; TDMS import needs attention: {exc}")
+            else:
+                self._say("NO window saved. Choose a TDMS source and the matching file to add pressure.")
         return window
 
     def cancel_window(self, reason="Window discarded. Re-settle before starting another window."):
@@ -601,6 +773,8 @@ class OptimiserController(QObject):
         self.settle_wait = None
         self._capture_delay = 0.0
         self._response_run_id = None
+        self._legacy_run = None
+        self.session.labview_stop_deferred = False
         self.labview_armed = False
         self._labview_started = False
         self._labview_options = {}
@@ -623,6 +797,7 @@ class OptimiserController(QObject):
         if self.mexa_capture:
             try:
                 self.mexa_capture.add(sample)
+                self._maybe_finish_legacy()
             except ValueError as exc:
                 self.cancel_window(f"Window discarded: {exc}")
 
@@ -655,6 +830,12 @@ class OptimiserController(QObject):
             try:
                 self.session.mexa.checked_sample()
                 self._checked_readings(self.capture.targets)
+            except ValueError as exc:
+                self.cancel_window(f"Window discarded: {exc}")
+        if self._legacy_run:
+            try:
+                self._checked_readings(self.capture.targets)
+                self._maybe_finish_legacy()
             except ValueError as exc:
                 self.cancel_window(f"Window discarded: {exc}")
 
@@ -708,6 +889,8 @@ class OptimiserController(QObject):
         self.capture = None
         self.mexa_capture = None
         self.settle_wait = None
+        self._legacy_run = None
+        self.session.labview_stop_deferred = False
         self.response.shutdown()
         self._freshness_timer.stop()
         return True

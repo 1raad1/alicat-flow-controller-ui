@@ -103,11 +103,17 @@ def _timestamp(value, name):
 
 
 def _quality(value):
-    if not isinstance(value, dict) or set(value) != {"clipped", "nonfinite"}:
+    if (not isinstance(value, dict) or not {"clipped", "nonfinite"} <= value.keys()
+            or value.keys() - {"clipped", "nonfinite", "clipping_checked"}):
         raise ValueError("quality must contain clipped and nonfinite boolean flags.")
     if value["clipped"] is not False or value["nonfinite"] is not False:
         raise ValueError("Pressure captures with clipped or nonfinite quality flags are invalid.")
-    return {"clipped": False, "nonfinite": False}
+    result = {"clipped": False, "nonfinite": False}
+    if "clipping_checked" in value:
+        if type(value["clipping_checked"]) is not bool:
+            raise ValueError("quality.clipping_checked must be a boolean.")
+        result["clipping_checked"] = value["clipping_checked"]
+    return result
 
 
 def _analysis(value, rate, count=None):
@@ -153,7 +159,7 @@ def validate_pressure_summary(payload):
     required = {"protocol", "type", "experiment_id", "trial_id", "capture_id", "start", "end",
                 "sample_rate_hz", "sample_count", "units", "channel", "calibration_id", "rms_pa",
                 "peak_abs_pa", "dominant_frequency_hz", "dominant_amplitude_pa", "quality", "analysis"}
-    optional = {"rms_window_sd_pa", "raw_file", "raw_sha256", "request_id"}
+    optional = {"rms_window_sd_pa", "raw_file", "raw_sha256", "request_id", "association"}
     if not required <= payload.keys():
         raise ValueError(f"Pressure summary is missing: {', '.join(sorted(required - payload.keys()))}.")
     if payload.keys() - required - optional:
@@ -196,6 +202,32 @@ def validate_pressure_summary(payload):
         if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
             raise ValueError("raw_sha256 must contain 64 hexadecimal characters.")
         result["raw_sha256"] = digest.lower()
+    if "association" in payload:
+        association = payload["association"]
+        required = {"mode", "trigger_start", "trigger_end", "timing_source", "sample_offset",
+                    "source_sample_count", "source_start"}
+        if not isinstance(association, dict) or set(association) != required:
+            raise ValueError("Invalid pressure association fields.")
+        if (association["mode"] != "tdms-retrospective"
+                or association["timing_source"] not in ("tdms_waveform", "trigger")):
+            raise ValueError("Invalid pressure association timing mode.")
+        trigger_start = _timestamp(association["trigger_start"], "association.trigger_start")
+        trigger_end = _timestamp(association["trigger_end"], "association.trigger_end")
+        source_start = _timestamp(association["source_start"], "association.source_start")
+        sample_offset = _integer(association["sample_offset"], "association.sample_offset", 0)
+        source_count = _integer(association["source_sample_count"], "association.source_sample_count", 16)
+        if trigger_end <= trigger_start or sample_offset + count > source_count:
+            raise ValueError("Pressure association interval or sample selection is inconsistent.")
+        if (abs((start - source_start).total_seconds() - sample_offset / rate) > max(1e-5, 1 / rate)
+                or start < trigger_start - timedelta(seconds=2)
+                or end > trigger_end + timedelta(seconds=2)
+                or end <= trigger_start or start >= trigger_end):
+            raise ValueError("Pressure association does not match the selected waveform interval.")
+        if association["timing_source"] == "trigger" and (sample_offset != 0 or count != source_count
+                or source_start != trigger_start or abs(count / rate - (trigger_end - trigger_start).total_seconds()) > 2):
+            raise ValueError("Trigger timing requires one complete recording matching the trigger duration.")
+        result["association"] = dict(association, trigger_start=trigger_start.isoformat(),
+                                      trigger_end=trigger_end.isoformat(), source_start=source_start.isoformat())
     _json_object(result)
     return result
 
@@ -274,6 +306,40 @@ def _welch_spectrum(samples, rate, segment, overlap):
     return frequencies, accumulated
 
 
+def pressure_metrics(samples, rate, analysis, scale=1.0, offset=0.0):
+    """Shared calibrated full-record and Welch spectrum metrics."""
+    if samples.ndim != 1 or len(samples) < 16:
+        raise ValueError("Pressure capture must contain at least 16 scalar samples.")
+    analysis = _analysis(analysis, rate, len(samples))
+    if not np.all(np.isfinite(samples)):
+        raise ValueError("Pressure capture contains nonfinite samples.")
+    with np.errstate(over="ignore", invalid="ignore"):
+        pressure = samples * scale + offset
+        pressure -= pressure.mean()
+    if not np.all(np.isfinite(pressure)):
+        raise ValueError("Calibrated pressure contains nonfinite samples.")
+    segment = analysis["segment_samples"]
+    frequencies, spectrum = _welch_spectrum(pressure, rate, segment, analysis["overlap_samples"])
+    low, high = analysis["band_hz"]
+    indices = np.flatnonzero((frequencies >= low) & (frequencies <= high))
+    if not len(indices):
+        raise ValueError("analysis.band_hz contains no FFT frequency bins at this segment length.")
+    index = int(indices[np.argmax(spectrum[indices])])
+    # Scaling before squaring avoids overflow for otherwise representable RMS.
+    peak = float(np.max(np.abs(pressure)))
+    rms = peak * float(np.sqrt(np.mean((pressure / peak) ** 2))) if peak else 0.0
+    chunks = len(pressure) // segment
+    if chunks >= 2 and peak:
+        chunk_rms = peak * np.sqrt(np.mean((pressure[:chunks * segment].reshape(chunks, segment) / peak) ** 2, axis=1))
+        rms_sd = float(np.std(chunk_rms / peak) * peak)
+    else:
+        rms_sd = 0.0
+    return {"rms_pa": rms, "peak_abs_pa": peak,
+            "dominant_frequency_hz": float(frequencies[index]),
+            "dominant_amplitude_pa": float(np.sqrt(spectrum[index])),
+            "rms_window_sd_pa": rms_sd}
+
+
 def process_pressure_file(payload):
     """Process a completed CSV/TDMS file-ready manifest using periodic flattop.
 
@@ -316,32 +382,7 @@ def process_pressure_file(payload):
     path = path.resolve()
     initial_stat = _stat_token(path)
     samples = _read_samples(path, payload)
-    if samples.ndim != 1 or len(samples) < 16:
-        raise ValueError("Pressure capture must contain at least 16 scalar samples.")
-    analysis = _analysis(analysis, rate, len(samples))
-    if not np.all(np.isfinite(samples)):
-        raise ValueError("Pressure capture contains nonfinite samples.")
-    with np.errstate(over="ignore", invalid="ignore"):
-        pressure = samples * scale + offset
-        pressure -= pressure.mean()
-    if not np.all(np.isfinite(pressure)):
-        raise ValueError("Calibrated pressure contains nonfinite samples.")
-    segment = analysis["segment_samples"]
-    frequencies, spectrum = _welch_spectrum(pressure, rate, segment, analysis["overlap_samples"])
-    low, high = analysis["band_hz"]
-    indices = np.flatnonzero((frequencies >= low) & (frequencies <= high))
-    if not len(indices):
-        raise ValueError("analysis.band_hz contains no FFT frequency bins at this segment length.")
-    index = int(indices[np.argmax(spectrum[indices])])
-    # Scaling before squaring avoids overflow for otherwise representable RMS.
-    peak = float(np.max(np.abs(pressure)))
-    rms = peak * float(np.sqrt(np.mean((pressure / peak) ** 2))) if peak else 0.0
-    chunks = len(pressure) // segment
-    if chunks >= 2 and peak:
-        chunk_rms = peak * np.sqrt(np.mean((pressure[:chunks * segment].reshape(chunks, segment) / peak) ** 2, axis=1))
-        rms_sd = float(np.std(chunk_rms / peak) * peak)
-    else:
-        rms_sd = 0.0
+    metrics = pressure_metrics(samples, rate, analysis, scale, offset)
     digest = hashlib.sha256()
     hashed_bytes = 0
     with path.open("rb") as raw:
@@ -353,14 +394,12 @@ def process_pressure_file(payload):
     if _stat_token(path) != initial_stat:
         raise ValueError("Pressure raw file changed during processing; supply a completed file.")
     try:
-        end = start + timedelta(seconds=(len(pressure) - 1) / rate)
+        end = start + timedelta(seconds=(len(samples) - 1) / rate)
     except (OverflowError, ValueError) as exc:
         raise ValueError("Capture duration is outside the supported timestamp range.") from exc
     summary.update(protocol=PROTOCOL, type="pressure_summary", units="Pa", start=start.isoformat(),
-                   end=end.isoformat(), sample_rate_hz=rate, sample_count=len(pressure),
-                   analysis=analysis, quality=quality, rms_pa=rms, peak_abs_pa=peak,
-                   dominant_frequency_hz=float(frequencies[index]),
-                   dominant_amplitude_pa=float(np.sqrt(spectrum[index])), rms_window_sd_pa=rms_sd,
+                   end=end.isoformat(), sample_rate_hz=rate, sample_count=len(samples),
+                   analysis=analysis, quality=quality, **metrics,
                    raw_file=str(path), raw_sha256=digest.hexdigest())
     return validate_pressure_summary(summary)
 

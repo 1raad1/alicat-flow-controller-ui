@@ -27,7 +27,7 @@ The desktop interface is built with PySide6 and Qt.
 | Understand setpoints, ramps, or zero commands | [Controls and safety behavior](#controls-and-safety-behavior) |
 | Record or replay a run | [Sequences](#sequences) |
 | Search for low NO with live or manual MEXA readings | [Bayesian optimiser](#bayesian-optimiser) |
-| Map NO and pressure dynamics with LabVIEW recordings | [Pressure mapping and LabVIEW messages](docs/LABVIEW_PRESSURE_MAPPING.md) |
+| Map NO and pressure dynamics with LabVIEW recordings | [Pressure mapping and TDMS setup](docs/LABVIEW_PRESSURE_MAPPING.md) |
 | Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
 | Connect through Wormhole from the flow-controller app | [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
@@ -208,12 +208,14 @@ separate NO and pressure responses and suggests conditions that reduce uncertain
 across both maps. Choose RMS pressure, peak excursion or dominant spectral amplitude
 as the pressure response. The Maps tab shows two-variable slices and their uncertainty.
 
-LabVIEW can provide a compact pressure summary or a completed CSV/TDMS recording
-for background processing. Each result is checked against the experiment, trial,
-capture, time window and analysis settings. Arm the current trial before using
-LabVIEW to trigger its measurement window. See the
-[LabVIEW integration guide](docs/LABVIEW_PRESSURE_MAPPING.md) for packet examples,
-the VI sequence and optional TDMS installation. Existing campaigns still open in
+Choose the LabVIEW TDMS folder and converted pressure channel in the flow app,
+then arm the current trial and use LabVIEW's existing `log`/`stop` triggers.
+The flow app continues recording after stop to cover the selected NO delay and
+minimum averaging time, then reads the matching TDMS waveform in the background.
+Keep the condition steady throughout the extra NO collection. No LabVIEW code
+changes or JSON messages are required. See the
+[LabVIEW integration guide](docs/LABVIEW_PRESSURE_MAPPING.md) for calibration,
+recording settings and file selection. Existing campaigns still open in
 NO minimisation mode. The analyser input remains NO, not total NOx.
 
 The **Bayesian optimiser** replaces the Agent launcher in the Operation sidebar.
@@ -517,7 +519,8 @@ available; `.xlsx` is available when `openpyxl` is installed.
 The Qt interface can listen for two case-insensitive UDP datagrams:
 
 - `log` starts a new timestamped acquisition log;
-- `stop` closes the active log.
+- `stop` closes the active log, or completes the delayed NO collection first when
+  a locally armed optimiser capture is running.
 
 The listener defaults to `127.0.0.1:61557` and is started from **Operation &
 Monitoring > Logging & Acquisition**. A second `log` command is refused while a

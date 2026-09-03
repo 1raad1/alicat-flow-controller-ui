@@ -216,6 +216,7 @@ class FlowSession(QObject):
         self.calc = CombustionCalculator()
         self.history = GraphHistory()
         self._csv = CsvLogger()
+        self.labview_stop_deferred = False
         self.mexa = MexaController(self)
         self._csv_lock = threading.Lock()
         self._ramps = RampRunner(self._emit_ramp_setpoint, log=self._log)
@@ -2883,7 +2884,10 @@ class FlowSession(QObject):
         if command == 'log':
             self._udp_start_logging()
         elif command == 'stop':
-            self._udp_stop_logging()
+            if not self.labview_stop_deferred:
+                self._udp_stop_logging()
+            else:
+                self._announce_udp('LabVIEW stopped; completing delayed NO recording')
         self.labview_command.emit(command)
 
     def _udp_start_logging(self):

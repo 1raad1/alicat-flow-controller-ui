@@ -16,6 +16,7 @@ import numpy as np
 
 from ..domain.bayesian import SearchConfig, corrected_no, finite
 from ..domain.pressure import validate_pressure_summary, pressure_signature
+from ..domain.tdms_capture import validate_tdms_source
 from ..domain.combustion import CombustionCalculator
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from ..domain.roles import ROLES
@@ -88,6 +89,8 @@ class Experiment:
             if data["schema"] not in SUPPORTED_SCHEMAS:
                 raise ValueError("Unsupported experiment file version.")
             experiment = cls(path, data)
+            if data.get("tdms_source") is not None:
+                validate_tdms_source(data["tdms_source"], require_folder=False)
             validate_analyser_response(data.get("analyser_response"))
             trials = data["trials"]
             if not isinstance(trials, list) or len(trials) > MAX_TRIALS:
@@ -260,6 +263,18 @@ class Experiment:
         trial["window"] = deepcopy(window)
         self._commit(data)
 
+    def set_tdms_source(self, source):
+        profile = validate_tdms_source(source)
+        data = deepcopy(self.data)
+        data["tdms_source"] = profile
+        for trial in data["trials"]:
+            if trial["status"] == "pending" and not trial.get("pressure"):
+                acquisition = (trial.get("window") or {}).get("labview_capture")
+                if acquisition is not None:
+                    acquisition["tdms_source"] = deepcopy(profile)
+                    acquisition["pressure_min_seconds"] = profile["min_recording_s"]
+        self._commit(data)
+
     def ensure_capture_id(self):
         """Give legacy pending tests a durable identity before external acquisition."""
         data, trial = self._pending_copy()
@@ -291,12 +306,22 @@ class Experiment:
         end = datetime.fromisoformat(summary["end"]).timestamp()
         flow_start = datetime.fromisoformat(window["start"]).timestamp()
         flow_end = datetime.fromisoformat(window["end"]).timestamp()
+        acquisition = window.get("labview_capture")
+        minimum = self.config.window_seconds
+        if acquisition:
+            flow_start = datetime.fromisoformat(acquisition["start"]).timestamp()
+            flow_end = datetime.fromisoformat(acquisition["stop"]).timestamp()
+            minimum = acquisition["pressure_min_seconds"]
+            association = summary.get("association")
+            if association and (epoch(association["trigger_start"]) != flow_start
+                                or epoch(association["trigger_end"]) != flow_end):
+                raise ValueError("Pressure association does not match the recorded LabVIEW interval.")
         # Association tolerance allows the final flow poll to precede recording stop.
         # This does not provide hardware clock synchronization.
         if start < flow_start - 2 or end > flow_end + 2 or end <= flow_start or start >= flow_end:
-            raise ValueError("Pressure recording must lie within the saved flow/NO window "
+            raise ValueError("Pressure recording must lie within the recorded LabVIEW interval "
                              "(2 s boundary tolerance). Check clocks and analyser delay.")
-        if summary["sample_count"] / summary["sample_rate_hz"] < self.config.window_seconds - 1e-6:
+        if summary["sample_count"] / summary["sample_rate_hz"] < minimum - 1e-6:
             raise ValueError("Pressure recording is shorter than the campaign measurement window.")
         signature = self.data.get("pressure_signature")
         if signature is not None and signature != pressure_signature(summary):
@@ -929,6 +954,43 @@ def validate_window(window, config, requested_point=None):
         raise ValueError("Invalid continuous flow-log reference.")
     if "mexa" in window:
         validate_mexa_window(window, config)
+    if "labview_capture" in window:
+        validate_labview_capture(window, config)
+
+
+def validate_labview_capture(window, config):
+    """Keep physical pressure timing separate from the later analyser window."""
+    capture = window["labview_capture"]
+    fields = {"start", "stop", "no_start", "no_end", "delay_s",
+              "pressure_min_seconds", "tdms_source"}
+    if not isinstance(capture, dict) or set(capture) != fields:
+        raise ValueError("Invalid LabVIEW acquisition timing record.")
+    times = {}
+    for key in ("start", "stop", "no_start", "no_end"):
+        _iso_timestamp(capture[key], f"LabVIEW {key}")
+        stamp = datetime.fromisoformat(capture[key])
+        if stamp.tzinfo is None:
+            raise ValueError("LabVIEW acquisition timestamps must include a timezone.")
+        times[key] = stamp.timestamp()
+    delay = _stored_number(capture["delay_s"], "LabVIEW analyser delay")
+    minimum = _stored_number(capture["pressure_min_seconds"], "Minimum pressure duration")
+    start, stop, no_start, no_end = (times[k] for k in ("start", "stop", "no_start", "no_end"))
+    first = datetime.fromisoformat(window["start"]).timestamp()
+    last = datetime.fromisoformat(window["end"]).timestamp()
+    if (not 0 <= delay <= 3600 or not 0 < minimum <= 3600
+            or not first - 2 <= start < stop <= last + 1e-6
+            or abs(no_start - start - delay) > .001
+            or no_end < stop + delay - .001 or no_end > last + .001
+            or no_end - no_start < config.window_seconds - .001):
+        raise ValueError("LabVIEW, pressure and delayed NO timing are inconsistent.")
+    if capture["tdms_source"] is not None:
+        profile = validate_tdms_source(capture["tdms_source"], require_folder=False)
+        if minimum != profile["min_recording_s"]:
+            raise ValueError("Pressure duration differs from the TDMS settings.")
+    if window.get("mexa"):
+        actual = window["mexa"]
+        if epoch(actual["start"]) < no_start - .001 or epoch(actual["end"]) > no_end + .001:
+            raise ValueError("NO samples lie outside the delay-compensated averaging interval.")
 
 
 def validate_mexa_window(window, config):
@@ -944,9 +1006,11 @@ def validate_mexa_window(window, config):
     start, end = epoch(data["start"]), epoch(data["end"])
     flow_start = datetime.fromisoformat(window["start"]).timestamp()
     flow_end = datetime.fromisoformat(window["end"]).timestamp()
+    acquisition = window.get("labview_capture")
+    coverage_start = epoch(acquisition["no_start"]) if acquisition else flow_start
     if (abs((end - start) - number(data["duration_s"], "MEXA duration")) > .001
             or end - start < config.window_seconds or not flow_start <= start < end <= flow_end
-            or start - flow_start > 5 or flow_end - end > 5):
+            or start < coverage_start or start - coverage_start > 5 or flow_end - end > 5):
         raise ValueError("MEXA measurement does not cover the saved flow window")
     corrected_no(data["no_ppm"], data["o2_percent"], config.reference_o2)
     for key in ("no", "o2"):

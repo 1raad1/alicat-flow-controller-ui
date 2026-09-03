@@ -1,117 +1,61 @@
 # LabVIEW pressure recording and NO mapping
 
-The working branch is `codex/nox-pressure-mapping`. The analyser response used here is corrected dry **NO**, not total NOx. The branch name does not change that measurement basis.
+Use LabVIEW's existing recording controls and localhost UDP `log`/`stop` messages. No LabVIEW code changes or JSON messages are required. Configure the TDMS source once in the flow app, arm each test there, then start and stop recording in LabVIEW as usual.
 
-The previous version is preserved in the sibling folder `flow-controller-backups/flow-controller-v3-before-pressure-mapping-20260903-133746`, and Git tag `backup/before-pressure-mapping-20260903-133746` marks starting commit `aa78cbe`. Keep campaign files copied separately when switching versions. This version writes campaign schema 3 and supports loading schema 1/2 campaigns. The backup application is not forward compatible with schema 3.
+The flow app associates the pressure waveform with that physical recording interval and calculates its metrics afterwards. NO collection can continue after LabVIEW stops. Keep the same burner condition and flows throughout that extra collection.
 
-## Set up the campaign and listener
+## Configure the TDMS source
 
-1. Create a campaign with objective **Map NO + pressure**. Choose **RMS (Pa)**, **Peak excursion (Pa)**, or **Dominant spectral amplitude (Pa RMS)** as the pressure response. Set the NO mapping weight strictly between 0 and 1; the remaining weight goes to pressure. Keep the established bounds, flow ceilings and measurement duration.
-2. Click **Suggest next test**, then **Load target fields**. Review and apply the targets through the existing controls. These buttons and the LabVIEW protocol do not apply flows automatically.
-3. In the operation tab, set **LabVIEW UDP host** and **LabVIEW UDP port**, then click **Start Listener**. The defaults are `127.0.0.1` and `61557` for LabVIEW on the same PC. For another PC, explicitly bind the listener to the flow PC's LAN address and send from LabVIEW to that address. Allow the chosen UDP port through the local firewall for the acquisition connection.
-4. In **Current test**, confirm **Pilot is off throughout this measurement** and **Burner and flows are settled; analyser is settled or a calibrated delay is available**. Select **Capture NO/O2 automatically from the MEXA network link** only when that validated live link is ready. Click **Arm LabVIEW trigger**. Arming checks current readings and does not bypass the usual operator confirmations.
-5. Click **Export LabVIEW request…** for this trial. Load that JSON file into the VI. Copy its `experiment_id`, `trial_id` and `capture_id` into every message for this acquisition. Do not manufacture these IDs or reuse them for the next trial. Discarding a capture changes its identity; export again after a restart.
+1. Create a campaign with **Map NO + pressure** and choose the pressure response: **RMS (Pa)**, **Peak excursion (Pa)** or **Dominant spectral amplitude (Pa)**. Set the operating bounds, flow ceilings and NO measurement window. The app oxygen-corrects the analyser's dry NO readings; this is not a total-NOx measurement.
+2. In **Current test**, click **TDMS source…**. Set **Recording folder** to the folder where LabVIEW saves its `.tdms` files. The app searches that folder directly, not its subfolders. The flow PC must be able to read it.
+3. Click **Inspect sample TDMS…**, select a representative recording, then choose the pressure waveform under **Waveform in sample file**. The picker initially prefers the `converted` group. Confirm the actual channel, likely `PD_CC_3_1` for the supplied example, after checking its sensor assignment. The `FFT` group contains spectra rather than time-domain waveforms and is excluded.
+4. Select **Known pressure units** (Pa or kPa), or enter a custom **Pressure scale (Pa per stored unit)**, and supply a **Calibration identifier** from the signal conversion or calibration. Check **Pressure offset (Pa)** too. The calculation is `pressure = stored value × scale + offset`. The Pa shortcut sets scale `1`; kPa sets `1000`. The supplied sample's `converted` waveform metadata still says `Volts`; its group name does not establish its physical units. Resolve the conversion from the acquisition setup before saving the profile.
+5. Set **Minimum pressure recording (s)** independently of the campaign's NO averaging window. Its default is 1 second. The inspected sample has 21,082 samples at 10,000 Hz, equivalent to 2.1082 seconds of samples; it does not need to be stretched into a 30-second pressure recording. LabVIEW remains in control of recording duration. The NO window has its own minimum, at least 5 seconds under the campaign settings.
+6. Review **Spectrum lower frequency (Hz)**, **Spectrum upper frequency (Hz)**, **Spectral segment (samples)** and **Spectral overlap (samples)** for the experiment. A blank upper frequency uses Nyquist. The defaults are 4,096-sample segments with 2,048-sample overlap. Segments must fit the selected record. Configure both clipping limits in stored units if the acquisition limits are known; leaving them blank does not establish that the signal was free of clipping.
+7. Leave **Fallback sample rate (Hz)** blank when TDMS contains valid waveform timing. If a file lacks a start timestamp, the checkbox **If TDMS has no start timestamp, use trigger time / I confirm LabVIEW writes one new file per trigger** is an explicit fallback. Enable it only when that recording arrangement is true. File modification time is never used as the sample start time. Save the profile with **OK**.
 
-## Change the LabVIEW VI
+The app reads the selected channel through npTDMS, including any NI scaling represented by the file. Enter the Pa conversion for those returned values, not an additional ADC conversion that would apply the same scaling twice. Keep the channel, calibration, sample rate and analysis settings consistent within a campaign. The first attached pressure result locks the comparison settings.
 
-Keep the existing pressure DAQ and raw recording. Add a small state machine around the recording start and stop, plus a JSON result writer. Use the compact summary route below when the VI can calculate the defined metrics; otherwise send a manifest for a completed CSV or TDMS file.
+TDMS support requires the optional `npTDMS` dependency. It is installed in this PC's flow-controller environment. For another installation, run `python -m pip install -r requirements-pressure.txt` using that application's Python environment.
 
-1. Call **UDP Open** once, using an available local port. Retain its refnum for **UDP Write** and **UDP Read** in the state-machine loop, then **UDP Close** when the VI ends. Read replies on the same socket that sent the request: the flow app replies to the sender's address and port. Do not open a second unrelated receive socket. NI's [communication reference](https://download.ni.com/support/manuals/320587c.pdf) describes the UDP Open/Read/Write functions.
-2. Serialize one JSON object as UTF-8 bytes per datagram. Preserve JSON numbers, integers and booleans as their actual types; strings such as `"false"` and `"1000"` are invalid for those fields. The UDP limit is 16,384 bytes, and a pressure summary must be strictly smaller than that. Do not send waveform arrays over UDP.
-3. Include `protocol: "flow-pressure-v1"`, a `type`, the three exported IDs, and a `request_id` string in each operation. IDs and request IDs in UDP messages must be 1–128 characters. Retain the exported start request ID for start retries. Give stop, summary/file-ready and each new status query their own request IDs, for example `capture-id:stop` and `capture-id:status:1`.
-4. Send the exported `start` object. Wait for a JSON `ack` with `ok: true` and matching `request_id` and acquisition IDs. A successful write alone is not an acknowledgement.
-5. Inspect `state`. If it is `waiting_for_analyser`, send `status` queries until it becomes `capturing`. Begin the pressure record only then. The flow/NO averaging window starts after any selected live-analyser response delay. The reply includes `minimum_recording_s`, `window_start` and `window_end`; the last field is null until the window is saved.
-6. Record for at least `minimum_recording_s`. Keep flow polling running throughout. The flow window also needs at least three fresh polling passes and its own minimum elapsed duration. The minimum is a floor, so allow the final flow pass to reach the configured duration before sending `stop`. The current-test progress displays fresh passes. This protocol does not expose a pass counter in status replies.
-7. Stop the pressure recording and retain the first/last sample times. Send `stop`; require a successful acknowledgement with `window_saved`. If it reports an insufficient flow window, keep the operating condition steady, allow another fresh pass, and retry within a bounded interval. A successful stop saves the flow/NO window. It closes the flow CSV only if this start operation opened it.
-8. Finish writing and close the raw pressure file. Send either `pressure_summary` or `file_ready` using the definitions below. A summary acknowledgement should reach `pressure_saved`. A file-ready acknowledgement can be `processing`; keep querying `status` until `pressure_saved` or `pressure_error` appears. Read the `pressure_error` field on failure. `ok: true` on file-ready means the request was accepted, not that processing succeeded.
-9. In **Current test**, review the saved pressure metrics and the matching NO/O2 averages. Confirm **Uncorrected dry averages from this saved window**, then click **Save result**. Pressure upload never finalises the NO result. A later status query returns `completed` after the operator saves it.
+The expected amplitudes, about 0.2 kPa when stable and 3–6 kPa when unstable, are useful checks after calibration. They are not calibration factors or automatic classification thresholds. The sample's numerical RMS of about 0.14108 stored units would be 141.08 Pa if those units are kPa. That agreement is consistent with the expected stable scale, but does not prove the stored units.
 
-A status or stop message has the same identity fields as the exported request, with `type` changed to `status` or `stop` and its own `request_id`. Replies have this shape; the values here are placeholders:
+## Run each test
 
-```json
-{
-  "protocol": "flow-pressure-v1",
-  "type": "ack",
-  "ok": true,
-  "request_id": "replace-with-capture-id:status:1",
-  "experiment_id": "replace-with-exported-experiment-id",
-  "trial_id": "replace-with-exported-trial-id",
-  "capture_id": "replace-with-exported-capture-id",
-  "state": "capturing",
-  "window_start": "2026-09-03T12:00:00+00:00",
-  "window_end": null,
-  "minimum_recording_s": 30.0
-}
-```
+1. Click **Suggest next test**, then **Load target fields**. Review and apply the targets through the existing flow controls. Suggestions, field loading and LabVIEW triggers do not command the flows automatically.
+2. In the operation tab, check **LabVIEW UDP host** is `127.0.0.1` and **LabVIEW UDP port** is `61557`, matching the existing local LabVIEW messages. Click **Start Listener** if it is off.
+3. In **Current test**, confirm **Pilot is off throughout this measurement** and **Burner and flows are settled; analyser is settled or a calibrated delay is available**. For live NO/O2, select **Capture NO/O2 automatically from the MEXA network link** and use the validated live analyser connection. Select the appropriate calibrated analyser response delay before this run.
+4. Click **Arm LabVIEW trigger**. The app records the current TDMS folder contents so it can distinguish a new or changed recording. Now start recording with the existing LabVIEW control that sends `log`.
+5. Record for the duration you choose, meeting the source profile's minimum pressure duration. Stop using LabVIEW's existing control, which sends `stop`. Let LabVIEW finish writing its TDMS file.
+6. Keep the condition steady while the flow app finishes NO and flow collection. Do not apply the next operating point at LabVIEW stop. Watch the status in **Current test**: it shows the remaining collection after stop, then the TDMS search and processing.
+7. Review the attached pressure metrics and the matching saved NO/O2 averages. Confirm **Uncorrected dry averages from this saved window**, then click **Save result**. Pressure processing does not save the NO result automatically. A mapping trial cannot be completed, or used to advance the mapping campaign, without its valid pressure result.
 
-Use a finite receive timeout, for example 1 second, and retry an unchanged operation at most three times before reporting a communication failure. Match request IDs so a delayed reply cannot complete the wrong operation. Query state after an uncertain result. Keep status polling bounded too; use a deadline that allows the configured analyser delay or file processing, and show an error if it expires. `ok: false` carries an `error` string; correct the reported problem rather than retrying indefinitely.
+Arming is required for `log`/`stop` to control the optimiser capture. Without local arming, the existing commands retain their ordinary flow-CSV logging behaviour.
 
-Identical start/stop retries do not create another window. Identical pressure summaries are acknowledged without overwriting the saved result. Repeated unchanged file-ready requests are recognised during processing; query status after completion. A different result cannot overwrite an attached capture. A discarded or unknown capture ID is rejected. Do not advance to a new trial merely because a UDP packet was sent.
+## Why NO collection continues after stop
 
-## Calculate the compact pressure summary
+The app collects around the LabVIEW `log`–`stop` interval and keeps collecting after `stop` for the selected calibrated NO response delay. It excludes the initial delay from the NO averaging window. It extends collection further when the campaign's minimum averaging duration or fresh flow/MEXA sample coverage still needs to be met. The saved NO window therefore need not have the same duration as the pressure record.
 
-Start from [pressure-summary.json](examples/pressure-summary.json). Replace every example identity, timestamp, calibration and metric with acquisition data. The values illustrate a 30-second record at 1,000 Hz: 30,000 samples, a 1,000-sample segment and 500-sample overlap. The 10–400 Hz analysis band is an example, not a recommendation for this burner or sensor.
+For example, a roughly 2-second pressure recording can be paired with a longer NO averaging window. That only represents the same operating condition if the burner and flows remain steady throughout the run and the collection after stop. The delay setting accounts for the selected analyser response calibration; UDP triggers do not create hardware synchronisation.
 
-Convert the selected DAQ channel to physical Pa using its calibration before calculating metrics. Record a calibration ID that identifies the applied calibration. For source units `u`, the file-processing convention is `p = u * scale_pa_per_unit + offset_pa`. Use scale 1 and offset 0 only when the stored samples are already Pa.
+## Finding the correct TDMS record
 
-For the complete calibrated record `p`, form `x = p - mean(p)`. Calculate:
+After NO collection finishes, the app searches in the background for a new or changed TDMS file relative to the snapshot taken at arm. It uses the selected waveform's timestamps and sample rate to match the physical `log`–`stop` interval. A file must remain unchanged for 2 seconds before processing; incomplete final segments and detected changes during processing are rejected.
 
-| Field | Definition |
-|---|---|
-| `rms_pa` | `sqrt(mean(x*x))` over the complete record |
-| `peak_abs_pa` | `max(abs(x))`, the largest sampled excursion from the complete-record mean |
-| `dominant_frequency_hz` | Frequency of the largest Welch spectrum bin inside `analysis.band_hz`, including the band endpoints |
-| `dominant_amplitude_pa` | Square root of that bin's averaged power spectrum, in Pa RMS |
-| `rms_window_sd_pa` | Optional population SD of RMS values from complete, nonoverlapping `segment_samples` blocks of `x`; this is variability, not SEM |
+For one file covering the run, the app can use the complete waveform when its timing agrees within the association tolerance. For a continuous recording, it selects the samples covering the physical trigger interval. It does not extend pressure selection into the later NO collection. The source TDMS file stays unchanged. The saved result retains the source path, SHA-256, selected sample offset and timing association so the raw recording can be analysed again later.
 
-The band limits only the dominant spectral search. It does not band-pass the record used for RMS or peak excursion.
+If no file matches, or more than one matches, the app reports the problem rather than choosing the newest file. Once the background operation finishes, click **Choose TDMS file…** and select the intended recording to retry. Check its channel, timing and calibration if it is rejected. Manual selection still validates the waveform; it does not silently waive those checks. Preserve the current trial until pressure is attached, or mark the test invalid if the recording cannot be recovered.
 
-Use periodic flattop windows, constant detrending in each segment, and arithmetic averaging of the segment power spectra. To match the Python processor, use an unnormalised forward FFT and divide squared FFT magnitude by `sum(window)^2`. Double the positive-frequency bins except DC and the Nyquist bin when present. Average those power spectra, then take the square root at the selected dominant bin. Do not substitute a PSD in Pa²/Hz or a peak-amplitude FFT display without converting its scaling. SciPy documents the [Welch spectrum/RMS convention](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html).
+## What the pressure values and maps mean
 
-If the VI's window function does not expose this periodic convention, generate the coefficients for `n = 0..L-1` with `theta = 2*pi*n/L`:
+RMS is calculated from the complete selected waveform after subtracting its mean. Peak excursion is the largest absolute deviation from that mean. Dominant spectral amplitude is the RMS amplitude at the strongest in-band Welch spectrum bin, with its frequency reported separately. It is a sinusoidal spectral amplitude, not peak-to-peak pressure or a PSD value. The analysis uses periodic flattop windows and constant segment detrending. The frequency band restricts the dominant-bin search; it does not band-pass the RMS or peak calculation. Optional block-RMS spread describes variability and is not a standard error.
 
-```text
-w[n] = 0.21557895 - 0.41663158*cos(theta)
-       + 0.277263158*cos(2*theta) - 0.083578947*cos(3*theta)
-       + 0.006947368*cos(4*theta)
-```
+Initial suggestions fill the operating space. Later suggestions fit separate standardized Gaussian-process models for corrected dry NO and the chosen pressure response. The mapping weight balances their expected uncertainty reduction; it does not create a combined NO/pressure performance score.
 
-Use `L`, not `L-1`, in the angle denominator. Advance frames by `segment_samples - overlap_samples` and exclude incomplete final frames.
+After the initial completed design, open **Operating-space maps**, choose **Horizontal** and **Vertical**, then click **Refresh maps**. Other variables stay at the selected completed test's measured condition, or their bounds midpoint. **Show uncertainty (latent SD)** switches between predicted means and uncertainty. Blank cells exceed bounds or flow ceilings. These response maps do not classify flame stability or establish a safe operating region.
 
-Give the actual LabVIEW implementation a meaningful `analysis.id`, such as `labview-welch-flattop-v1` after implementing and checking that calculation. Preserve its settings in the summary. Keep the channel, calibration ID, sample rate, units and full analysis settings fixed across a campaign. The first saved pressure result locks this comparison signature. The Python file processor sets its own ID, `python-welch-flattop-v1`, and records scale and offset. The two example routes are alternatives; changing implementation or settings can require a new campaign.
+## Existing JSON support and previous version
 
-Set `quality.clipped` from actual DAQ overrange/clipping checks and `quality.nonfinite` from actual sample validity checks. The example's false values describe its clean illustrative record; do not hard-code them in the VI. Flagged captures are rejected. Save the raw record for investigation and use the existing discard/invalid-test workflow if it cannot supply a valid measurement. Optional `raw_file` and `raw_sha256` fields in a summary retain the recording location and its SHA-256; the summary route does not reopen or verify that raw file.
+The `flow-pressure-v1` JSON summary and file-ready routes remain available for advanced integrations and compatibility. They are optional; this TDMS workflow does not require exported IDs, a manifest, UDP acknowledgements or changes to the LabVIEW VI. The files in `docs/examples` illustrate those advanced payloads rather than the normal recording procedure.
 
-## Use sample times, not message times
-
-`start` is the UTC time of the first pressure sample. `end` is the UTC time of the last pressure sample. At a fixed sample rate `fs` with `N` samples, `end = start + (N-1)/fs`. Thus the example ends at `2026-09-03T12:00:29.999+00:00`, although `N/fs` is 30 seconds. The campaign's minimum recording-duration check uses `N/fs`.
-
-LabVIEW timestamps count from 1904-01-01 UTC. Format the timestamp using **Format Date/Time String** with UTC formatting enabled, preserving fractional seconds, then include `Z` or `+00:00`. Do not label local time as UTC. If converting a numeric LabVIEW timestamp through Unix time, subtract 2,082,844,800 seconds first. See NI's [timestamp definition](https://www.ni.com/en/support/documentation/supplemental/08/labview-timestamp-overview.html) and [date/time formatting function](https://www.ni.com/docs/en-US/bundle/labview-api-ref/page/functions/format-date-time-string_1.html).
-
-Align the two PCs' clocks before acquisition. The pressure record must overlap and lie inside the saved flow/NO window, allowing 2 seconds at each boundary. This is an association check, not hardware synchronisation. A shared DAQ trigger or clock, if needed, must be implemented separately. UDP send times are not sample timestamps. Account for any DAQ timing offsets when identifying the first sample.
-
-## Let the flow PC process a completed file
-
-Start from [pressure-file-ready.json](examples/pressure-file-ready.json). For CSV, write a header and one numeric selected-channel value per row; the example selects `pressure_pa`. Other columns can remain in the file, but they are not analysed. For TDMS, change `format` to `tdms`, remove `column`, add `group`, and set `channel` to the exact selected TDMS channel name. TDMS reading requires the optional `npTDMS` package in the flow application's Python environment.
-
-The current development environment has that dependency installed. On another installation, run this PowerShell command from the project folder:
-
-```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r .\requirements-pressure.txt
-```
-
-For package installations, the equivalent extra is `pip install '.[pressure]'`. JSON summaries and CSV imports need no extra package. When the TDMS channel contains `wf_increment`, its sample rate must agree with the manifest. The parser rejects a mismatch.
-
-Use an absolute `raw_file` path accessible from the flow PC, such as a local completed file or a shared-folder UNC path. A LabVIEW PC's local drive path is not automatically accessible from the flow PC. Close the recording before announcing it. The processor reads only the selected channel, checks file size and modification state across processing/hashing, and rejects detected changes. Keep the raw file below 1 GB and at most 20 million selected-channel samples. Reading, metric calculation and hashing run in a background worker.
-
-The manifest supplies the first-sample time and sample rate. Do not add `sample_count` or `end` fields to it; these are derived from the selected-channel record. The example expects a separate 30,000-row CSV, which is not included. The parser applies scale and offset, calculates the defined metrics, and retains the absolute file path and SHA-256 in the saved summary.
-
-UDP is optional. After saving the measurement window, click **Import pressure JSON…** and select a summary JSON or file-ready JSON manifest. A relative `raw_file` in an imported manifest resolves relative to that JSON file's folder. You cannot select a bare CSV or TDMS file without its manifest. Keep the exported acquisition IDs in the imported JSON. Review pressure and complete the same **Save result** step afterwards.
-
-## Existing triggers and the resulting maps
-
-Bare legacy `log` and `stop` messages retain their flow-CSV logging behaviour. They also start/finish an optimiser window only when the current trial has been locally armed. Prefer the correlated JSON sequence: bare commands have no acquisition-ID acknowledgement and do not establish hardware synchronisation. In particular, starting pressure immediately with a bare `log` can include the analyser delay; use JSON status to wait for `capturing`, or start pressure later after checking the actual averaging window.
-
-The initial mapping points use a space-filling design. Later suggestions fit separate standardized Gaussian-process models for corrected dry NO and the chosen pressure amplitude. The next point targets weighted reduction of their uncertainty over the feasible operating space. The weight does not turn NO and pressure into a combined emissions/pressure objective.
-
-After the initial completed design, open **Operating-space maps**, choose **Horizontal** and **Vertical** variables, and click **Refresh maps**. The other variables stay at the selected completed test's measured condition, or their bounds midpoint. **Show uncertainty (latent SD)** switches between predicted mean and latent standard deviation for each response. Blank cells exceed bounds or flow ceilings. A low predicted pressure amplitude does not classify a flame as stable, and these slices do not establish a safe operating region.
+The working branch is `codex/nox-pressure-mapping`. The prior version is preserved in the sibling folder `flow-controller-backups/flow-controller-v3-before-pressure-mapping-20260903-133746`; Git tag `backup/before-pressure-mapping-20260903-133746` marks starting commit `aa78cbe`. This version writes campaign schema 3 and supports schema 1/2 campaigns. Keep copies of campaign files before switching versions: the backup application cannot read the new schema.

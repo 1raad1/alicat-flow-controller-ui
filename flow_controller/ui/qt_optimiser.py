@@ -33,6 +33,248 @@ MAP_VARIABLES = {"h2_fraction": ("H2 in fuel", "%", 100),
 # disconnects its slots; keeping application ownership prevents a running
 # QThread being destroyed with the pane.
 _MAP_WORKERS = set()
+_TDMS_INSPECTORS = set()
+
+
+def inspect_tdms(path):
+    """Lazy reader import keeps optional file dependencies out of UI startup."""
+    from ..domain.tdms_capture import inspect_tdms as inspect
+    return inspect(path)
+
+
+class TdmsInspectionWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, path):
+        super().__init__(QApplication.instance())
+        self.path = str(path)
+        _TDMS_INSPECTORS.add(self)
+        self.finished.connect(self._release)
+        QApplication.instance().aboutToQuit.connect(self._shutdown)
+
+    def run(self):
+        try:
+            channels = inspect_tdms(self.path)
+            if not self.isInterruptionRequested():
+                self.succeeded.emit(channels)
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(exc))
+
+    def _release(self):
+        _TDMS_INSPECTORS.discard(self)
+        self.deleteLater()
+
+    def _shutdown(self):
+        self.requestInterruption()
+        self.wait()
+
+
+class TdmsSourceDialog(QDialog):
+    """Configure an existing LabVIEW waveform source without changing LabVIEW."""
+
+    def __init__(self, source=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("TDMS pressure source")
+        self.resize(theme.scale(660), theme.scale(720))
+        self.source = None
+        self.worker = None
+        self._sample_path = None
+        self._source = dict(source or {})
+        outer = QVBoxLayout(self)
+        outer.addWidget(note(
+            "Use the TDMS files LabVIEW already records. The app matches a new recording "
+            "to the local log/stop interval and calculates pressure metrics after NO collection finishes."))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.viewport().setObjectName("TdmsSourceViewport")
+        scroll.viewport().setStyleSheet(f"#TdmsSourceViewport {{ background-color: {theme.BG}; }}")
+        content = QWidget()
+        body = QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.entries = {}
+        folder_row = QWidget()
+        row = QHBoxLayout(folder_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.entries["folder"] = QLineEdit(str(self._source.get("folder", "")))
+        self.entries["folder"].setAccessibleName("TDMS recording folder")
+        row.addWidget(self.entries["folder"], 1)
+        self.folder_button = QPushButton("Browse…")
+        self.folder_button.clicked.connect(self._choose_folder)
+        row.addWidget(self.folder_button)
+        form.addRow("Recording folder", folder_row)
+        self.inspect_button = QPushButton("Inspect sample TDMS…")
+        self.inspect_button.clicked.connect(self._choose_sample)
+        form.addRow(self.inspect_button)
+        self.channel_picker = QComboBox()
+        self.channel_picker.setAccessibleName("TDMS waveform channel")
+        self.channel_picker.setPlaceholderText("Inspect a file to list waveform channels")
+        self.channel_picker.currentIndexChanged.connect(self._channel_selected)
+        form.addRow("Waveform in sample file", self.channel_picker)
+        self.metadata = note("Select a time-domain waveform. FFT/spectrum channels are excluded.")
+        self.metadata.setObjectName("")
+        form.addRow(self.metadata)
+        self.pressure_units = QComboBox()
+        self.pressure_units.setAccessibleName("Known units of stored pressure values")
+        self.pressure_units.addItem("Custom / enter calibration scale", "custom")
+        self.pressure_units.addItem("Values already in Pa", "pa")
+        self.pressure_units.addItem("Values already in kPa", "kpa")
+        self.pressure_units.setToolTip(
+            "Choose the units you know the stored values represent. TDMS unit labels and group names "
+            "are not used to infer this selection.")
+        for key, label, default, placeholder in (
+            ("group", "TDMS group", "", "Choose a waveform above or enter its group"),
+            ("channel", "TDMS channel", "", "Choose a waveform above or enter its name"),
+            ("scale_pa_per_unit", "Pressure scale (Pa per stored unit)", "", "Required; enter the documented calibration"),
+            ("offset_pa", "Pressure offset (Pa)", 0, "0"),
+            ("calibration_id", "Calibration identifier", "", "Required; certificate, sensor or conversion reference"),
+            ("sample_rate_hz", "Fallback sample rate (Hz)", None, "Optional; TDMS timing takes precedence"),
+            ("min_recording_s", "Minimum pressure recording (s)", 1.0, "Independent of the NO averaging window"),
+            ("band_low_hz", "Spectrum lower frequency (Hz)", 0, "0"),
+            ("band_high_hz", "Spectrum upper frequency (Hz)", None, "Blank = Nyquist"),
+            ("segment_samples", "Spectral segment (samples)", 4096, "4096"),
+            ("overlap_samples", "Spectral overlap (samples)", 2048, "2048"),
+            ("clip_min", "Lower clipping limit (stored units)", None, "Optional"),
+            ("clip_max", "Upper clipping limit (stored units)", None, "Optional"),
+        ):
+            if key == "scale_pa_per_unit":
+                form.addRow("Known pressure units", self.pressure_units)
+            value = self._source.get(key, default)
+            entry = QLineEdit("" if value is None else str(value))
+            entry.setPlaceholderText(placeholder)
+            entry.setAccessibleName(label)
+            self.entries[key] = entry
+            form.addRow(label, entry)
+        self.pressure_units.currentIndexChanged.connect(self._pressure_units_changed)
+        body.addLayout(form)
+        body.addWidget(note(
+            "Pressure = stored value × scale + offset. A group called 'converted' does not "
+            "establish its units. Enter scale 1 only when you know its values already represent Pa."))
+        self.use_trigger_time = QCheckBox(
+            "If TDMS has no start timestamp, use trigger time\n"
+            "I confirm LabVIEW writes one new file per trigger")
+        self.use_trigger_time.setChecked(bool(self._source.get("use_trigger_time", False)))
+        body.addWidget(self.use_trigger_time)
+        self.error = note("")
+        outer.addWidget(self.error)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        outer.addWidget(self.buttons)
+
+    def _pressure_units_changed(self, *_args):
+        units = self.pressure_units.currentData()
+        entry = self.entries["scale_pa_per_unit"]
+        entry.setReadOnly(units != "custom")
+        if units in ("pa", "kpa"):
+            entry.setText("1" if units == "pa" else "1000")
+
+    def _choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose LabVIEW TDMS recording folder", self.entries["folder"].text() or str(DEFAULT_LOG_DIR))
+        if folder:
+            self.entries["folder"].setText(folder)
+
+    def _choose_sample(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Inspect a sample TDMS recording", self.entries["folder"].text() or str(DEFAULT_LOG_DIR),
+            "TDMS (*.tdms)")
+        if path:
+            self.inspect_sample(path)
+
+    def inspect_sample(self, path):
+        if self.worker is not None:
+            return
+        self._sample_path = str(path)
+        self.inspect_button.setEnabled(False)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        self.metadata.setText("Reading TDMS channel metadata in the background…")
+        self.error.setText("")
+        self.worker = TdmsInspectionWorker(path)
+        self.worker.succeeded.connect(self._inspected)
+        self.worker.failed.connect(self.error.setText)
+        self.worker.finished.connect(self._inspection_finished)
+        self.worker.start()
+
+    def _inspected(self, channels):
+        self.channel_picker.blockSignals(True)
+        self.channel_picker.clear()
+        selected = -1
+        preferred, preference = -1, -1
+        for channel in channels:
+            if channel.get("is_spectrum"):
+                continue
+            if (channel["group"] == self.entries["group"].text()
+                    and channel["channel"] == self.entries["channel"].text()):
+                selected = self.channel_picker.count()
+            score = (2 if "converted" in channel["group"].casefold() else 0)
+            score += int(channel["channel"].casefold() == "pd_cc_3_1")
+            if score > preference:
+                preferred, preference = self.channel_picker.count(), score
+            self.channel_picker.addItem(f"{channel['group']} / {channel['channel']}", channel)
+        self.channel_picker.setCurrentIndex(selected if selected >= 0 else
+                                           preferred)
+        self.channel_picker.blockSignals(False)
+        if self.channel_picker.count():
+            if not self.entries["folder"].text().strip():
+                self.entries["folder"].setText(str(Path(self._sample_path).resolve().parent))
+            self._channel_selected()
+        else:
+            self.metadata.setText("No time-domain waveform channels found. Spectrum channels cannot be selected.")
+
+    def _channel_selected(self, *_args):
+        channel = self.channel_picker.currentData()
+        if not channel:
+            return
+        self.entries["group"].setText(channel["group"])
+        self.entries["channel"].setText(channel["channel"])
+        rate = channel.get("sample_rate_hz")
+        rate_text = f"{rate:g} Hz" if rate else "no sample-rate metadata"
+        self.metadata.setText(
+            f"{channel.get('samples', 0):,} samples · {rate_text} · stored unit: {channel.get('unit') or 'unspecified'}\n"
+            f"TDMS start: {channel.get('start') or 'not recorded'}")
+
+    def _inspection_finished(self):
+        self.worker = None
+        self.inspect_button.setEnabled(True)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+
+    def accept(self):
+        if self.worker is not None:
+            return
+        try:
+            from ..domain.tdms_capture import validate_tdms_source
+            values = {key: entry.text().strip() for key, entry in self.entries.items()}
+            for key in ("sample_rate_hz", "band_high_hz", "clip_min", "clip_max"):
+                values[key] = None if not values[key] else finite(values[key], key)
+            for key in ("scale_pa_per_unit", "offset_pa", "min_recording_s", "band_low_hz"):
+                values[key] = finite(values[key], key)
+            for key in ("segment_samples", "overlap_samples"):
+                number = finite(values[key], key)
+                if not number.is_integer():
+                    raise ValueError(f"{key} must be a whole number.")
+                values[key] = int(number)
+            values["use_trigger_time"] = self.use_trigger_time.isChecked()
+            self.source = validate_tdms_source(values)
+        except (ValueError, OSError) as exc:
+            self.error.setText(str(exc))
+            return
+        super().accept()
+
+    def reject(self):
+        if self.worker is not None:
+            self.worker.requestInterruption()
+        super().reject()
+
+    def closeEvent(self, event):
+        if self.worker is not None:
+            self.worker.requestInterruption()
+        super().closeEvent(event)
 
 
 class MappingWorker(QThread):
@@ -100,6 +342,8 @@ class ExperimentDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.viewport().setObjectName("ExperimentViewport")
+        scroll.viewport().setStyleSheet(f"#ExperimentViewport {{ background-color: {theme.BG}; }}")
         content = QWidget()
         layout = QVBoxLayout(content)
         scroll.setWidget(content)
@@ -382,14 +626,24 @@ class OptimiserPane(Card):
         self.labview_ids.setObjectName("")
         self.labview_ids.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.labview_ids)
+        self.labview_ids.hide()
+        self.tdms_source_label = note("TDMS source not configured.")
+        self.tdms_source_label.setObjectName("")
+        self.tdms_source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.tdms_source_label)
+        self.labview_status = note("Arm locally, then use LabVIEW's existing log/stop controls.")
+        self.labview_status.setObjectName("")
+        layout.addWidget(self.labview_status)
         line = QHBoxLayout()
         self.arm_button = self._button("Arm LabVIEW trigger", self._arm_labview, line)
         self.disarm_button = self._button("Disarm", lambda: self.controller.disarm_labview(), line)
         self.disarm_button.setToolTip("Disable new LabVIEW start triggers. An active measurement continues; use Discard window to cancel it.")
         layout.addLayout(line)
         line = QHBoxLayout()
-        self.pressure_import_button = self._button("Import pressure JSON…", self._import_pressure, line)
+        self.tdms_source_button = self._button("TDMS source…", self._configure_tdms, line)
+        self.pressure_import_button = self._button("Choose TDMS file…", self._import_tdms, line)
         self.labview_export_button = self._button("Export LabVIEW request…", self._export_labview, line)
+        self.labview_export_button.hide()
         layout.addLayout(line)
         form = QFormLayout()
         self.inputs = {}
@@ -758,6 +1012,19 @@ class OptimiserPane(Card):
         if path:
             self.controller.import_pressure(path)
 
+    def _configure_tdms(self):
+        dialog = TdmsSourceDialog(getattr(self.controller, "tdms_source", None), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.controller.configure_tdms_source(dialog.source)
+
+    def _import_tdms(self):
+        source = getattr(self.controller, "tdms_source", None) or {}
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose the TDMS recording for this test", source.get("folder") or str(DEFAULT_LOG_DIR),
+            "TDMS (*.tdms)")
+        if path:
+            self.controller.import_tdms(path)
+
     def _export_labview(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export LabVIEW request",
                                             str(DEFAULT_LOG_DIR / "labview-request.json"), "JSON (*.json)")
@@ -821,6 +1088,10 @@ class OptimiserPane(Card):
         armed = bool(getattr(c, "labview_armed", False))
         capturing = c.capture is not None or c.settle_wait is not None
         window = pending.get("window") if pending else None
+        labview_capture = (window or {}).get("labview_capture")
+        legacy_capture_active = bool(getattr(c, "legacy_capture_active", False))
+        tail = bool(getattr(c, "legacy_collecting_after_stop", False))
+        auto_pending = bool(getattr(c, "tdms_auto_pending", False))
         pressure = pending.get("pressure") if pending else None
         mapping = bool(experiment and experiment.config.objective_mode == "map_no_pressure")
         mexa = (window or {}).get("mexa")
@@ -831,13 +1102,20 @@ class OptimiserPane(Card):
         self.open_button.setEnabled(not busy and not capturing)
         self.ask_button.setEnabled(bool(experiment and not pending and not busy))
         self.load_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
-        self.start_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
-        self.finish_button.setEnabled(c.capture is not None)
+        self.start_button.setEnabled(bool(pending and not busy and not capturing and not window
+                                          and not armed and not mapping))
+        self.start_button.setToolTip(
+            "Use Arm LabVIEW trigger for pressure mapping so the TDMS interval is recorded."
+            if mapping else "Start a manual NO measurement window.")
+        self.finish_button.setEnabled(c.capture is not None and not legacy_capture_active)
         self.cancel_button.setEnabled(capturing)
         self.save_button.setEnabled(bool(window and not capturing and not busy and (pressure or not mapping)))
         self.arm_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
         self.disarm_button.setEnabled(armed)
-        self.pressure_import_button.setEnabled(bool(window and not pressure and not busy and not capturing))
+        self.pressure_import_button.setEnabled(bool(window and labview_capture and not pressure
+                                                  and not busy and not capturing))
+        self.tdms_source_button.setEnabled(bool(experiment and not armed and not capturing
+                                               and not busy and not pressure))
         self.labview_export_button.setEnabled(bool(pending and not busy))
         def pressure_value(key):
             value = (pressure or {}).get(key)
@@ -851,6 +1129,29 @@ class OptimiserPane(Card):
              "No pressure summary attached."))
         if getattr(c, "pressure_worker", None) is not None:
             self.pressure_label.setText("Processing pressure data in the background…")
+        source = getattr(c, "tdms_source", None)
+        self.tdms_source_label.setText(
+            f"TDMS folder: {source['folder']}\nWaveform: {source['group']} / {source['channel']}"
+            if source else "TDMS source not configured. Choose a folder and calibrated waveform channel.")
+        if tail:
+            remaining = max(0, float(getattr(c, "labview_tail_remaining_s", 0)))
+            self.labview_status.setText(
+                f"LabVIEW has stopped. At least {remaining:.1f} s remaining; waiting for full fresh "
+                "NO/flow coverage after the analyser delay and minimum NO window. Keep this condition steady. "
+                "The app will then find and process the TDMS recording.")
+        elif legacy_capture_active:
+            self.labview_status.setText(
+                "LabVIEW recording active. Use its existing stop control; NO collection may "
+                "continue afterwards. Keep the burner and flows steady.")
+        elif auto_pending:
+            self.labview_status.setText(
+                "NO window saved. Waiting for a matching TDMS recording in the configured folder. "
+                "You can choose the recording manually if needed.")
+        else:
+            self.labview_status.setText(
+                "Armed for LabVIEW's existing log/stop controls. Keep this condition steady through "
+                "the extra NO collection after stop." if armed else
+                "Arm locally, then use LabVIEW's existing log/stop controls. No LabVIEW changes are needed.")
         if pending:
             try:
                 request = c.labview_request()

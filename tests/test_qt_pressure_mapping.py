@@ -14,7 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog
 
 from tests import test_qt_optimiser as qt_base
-from flow_controller.ui.qt_optimiser import ExperimentDialog, OptimiserPane
+from flow_controller.ui.qt_optimiser import ExperimentDialog, OptimiserPane, TdmsSourceDialog
 
 
 class QtPressureMappingTests(unittest.TestCase):
@@ -70,9 +70,14 @@ class QtPressureMappingTests(unittest.TestCase):
         self.mapping_campaign()
         pane = self.pane()
         self.assertFalse(pane.pressure_import_button.isEnabled())
+        self.assertFalse(pane.start_button.isEnabled())
+        self.assertIn("Arm LabVIEW trigger", pane.start_button.toolTip())
         self.window()
         pane.refresh()
         self.assertFalse(pane.save_button.isEnabled())
+        self.assertFalse(pane.pressure_import_button.isEnabled())
+        self.controller.experiment.pending["window"]["labview_capture"] = {"start": "fixture"}
+        pane.refresh()
         self.assertTrue(pane.pressure_import_button.isEnabled())
         self.assertFalse(pane.arm_button.isEnabled())
         self.controller.experiment.pending["pressure"] = {
@@ -89,9 +94,12 @@ class QtPressureMappingTests(unittest.TestCase):
             self.assertFalse(pane.save_button.isEnabled())
             self.assertFalse(pane.pressure_import_button.isEnabled())
 
-    def test_legacy_save_without_pressure_and_export_unarmed(self):
+    def test_legacy_save_without_pressure_and_json_controls_hidden(self):
         pane = self.pane()
-        self.assertTrue(pane.labview_export_button.isEnabled())
+        self.assertTrue(pane.start_button.isEnabled())
+        self.assertTrue(pane.labview_export_button.isHidden())
+        self.assertTrue(pane.labview_ids.isHidden())
+        self.assertEqual(pane.pressure_import_button.text(), "Choose TDMS file…")
         self.window()
         pane.refresh()
         self.assertTrue(pane.save_button.isEnabled())
@@ -105,15 +113,10 @@ class QtPressureMappingTests(unittest.TestCase):
             pane._arm_labview()
             arm.assert_called_once_with(pilot_off=True, settled=True, live=False)
         with patch("flow_controller.ui.qt_optimiser.QFileDialog.getOpenFileName",
-                   return_value=("pressure.json", "")), \
-                patch.object(self.controller, "import_pressure", create=True) as importer:
-            pane._import_pressure()
-            importer.assert_called_once_with("pressure.json")
-        with patch("flow_controller.ui.qt_optimiser.QFileDialog.getSaveFileName",
-                   return_value=("request.json", "")), \
-                patch.object(self.controller, "export_labview_request", create=True) as exporter:
-            pane._export_labview()
-            exporter.assert_called_once_with("request.json")
+                   return_value=("pressure.tdms", "")), \
+                patch.object(self.controller, "import_tdms", create=True) as importer:
+            pane._import_tdms()
+            importer.assert_called_once_with("pressure.tdms")
 
     def test_trial_ids_are_selectable_and_armed_state_disables_manual_start(self):
         request = {"protocol": "flow-pressure-v1", "type": "start", "experiment_id": "exp-1",
@@ -208,6 +211,119 @@ class QtPressureMappingTests(unittest.TestCase):
         for image in pane.map_images:
             self.assertTrue(np.isfinite(image.image).all())
             self.assertTrue((image.image >= 0).all())
+
+    def test_tdms_source_inspection_excludes_spectra_and_requires_calibration(self):
+        dialog = TdmsSourceDialog()
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.entries["folder"].text(), "")
+        self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), "")
+        self.assertEqual(dialog.entries["calibration_id"].text(), "")
+        self.assertFalse(dialog.use_trigger_time.isChecked())
+        main_thread = threading.get_ident()
+        inspection_threads = []
+
+        def inspect(path):
+            inspection_threads.append(threading.get_ident())
+            return [
+                {"group": "FFT spectrum", "channel": "pressure", "samples": 4096,
+                 "sample_rate_hz": None, "start": None, "unit": "Volts", "is_spectrum": True},
+                {"group": "raw", "channel": "PD_CC_3_1", "samples": 21082,
+                 "sample_rate_hz": 10000, "start": "2026-08-20T12:00:00+00:00",
+                 "unit": "Volts", "is_spectrum": False},
+                {"group": "converted", "channel": "PD_CC_3_1", "samples": 21082,
+                 "sample_rate_hz": 10000, "start": "2026-08-20T12:00:00+00:00",
+                 "unit": "Volts", "is_spectrum": False}]
+
+        with patch("flow_controller.ui.qt_optimiser.inspect_tdms", side_effect=inspect):
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(loop.quit)
+            dialog.inspect_sample(Path(self.directory.name) / "sample.tdms")
+            dialog.worker.finished.connect(loop.quit)
+            timer.start(5000)
+            loop.exec()
+            timer.stop()
+        self.assertIsNone(dialog.worker)
+        self.assertNotEqual(inspection_threads, [main_thread])
+        self.assertEqual(dialog.channel_picker.count(), 2)
+        self.assertEqual(dialog.entries["group"].text(), "converted")
+        self.assertEqual(dialog.entries["channel"].text(), "PD_CC_3_1")
+        self.assertIn("Volts", dialog.metadata.text())
+        self.assertIn("21,082 samples", dialog.metadata.text())
+        self.assertIn("10000 Hz", dialog.metadata.text())
+        self.assertEqual(Path(dialog.entries["folder"].text()), Path(self.directory.name))
+        self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), "")
+        dialog.accept()
+        self.assertIsNone(dialog.source)
+        dialog.entries["scale_pa_per_unit"].setText("1")
+        dialog.entries["calibration_id"].setText("Explicit conversion calibration")
+        dialog.accept()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted, dialog.error.text())
+        self.assertEqual(dialog.source["scale_pa_per_unit"], 1)
+        self.assertEqual(dialog.source["min_recording_s"], 1)
+        self.assertIsNone(dialog.source["sample_rate_hz"])
+        self.assertIsNone(dialog.source["band_high_hz"])
+
+    def test_tdms_source_folder_picker_and_roundtrip(self):
+        from flow_controller.domain.tdms_capture import validate_tdms_source
+        profile = validate_tdms_source({
+            "folder": self.directory.name, "group": "raw", "channel": "pressure",
+            "scale_pa_per_unit": 250, "offset_pa": -1, "calibration_id": "sensor-2026",
+            "sample_rate_hz": 10000, "min_recording_s": 1.25,
+            "band_high_hz": 2000, "use_trigger_time": True})
+        dialog = TdmsSourceDialog(profile)
+        self.addCleanup(dialog.close)
+        with patch("flow_controller.ui.qt_optimiser.QFileDialog.getExistingDirectory",
+                   return_value=self.directory.name):
+            dialog._choose_folder()
+        dialog.accept()
+        self.assertEqual(dialog.source, profile, dialog.error.text())
+
+    def test_pressure_unit_shortcuts_are_explicit_and_keep_calibration_required(self):
+        dialog = TdmsSourceDialog()
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.pressure_units.currentData(), "custom")
+        self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), "")
+        dialog.entries["folder"].setText(self.directory.name)
+        dialog.entries["group"].setText("converted")
+        dialog.entries["channel"].setText("PD_CC_3_1")
+        for units, scale in (("pa", "1"), ("kpa", "1000")):
+            dialog.pressure_units.setCurrentIndex(dialog.pressure_units.findData(units))
+            self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), scale)
+            self.assertTrue(dialog.entries["scale_pa_per_unit"].isReadOnly())
+        dialog.accept()
+        self.assertIsNone(dialog.source)
+        self.assertIn("calibration_id", dialog.error.text())
+        dialog.entries["calibration_id"].setText("Operator-confirmed stored kPa")
+        dialog.accept()
+        self.assertEqual(dialog.source["scale_pa_per_unit"], 1000)
+        dialog.pressure_units.setCurrentIndex(dialog.pressure_units.findData("custom"))
+        self.assertFalse(dialog.entries["scale_pa_per_unit"].isReadOnly())
+
+    def test_source_settings_and_legacy_tail_controls(self):
+        pane = self.pane()
+        source = {"folder": self.directory.name, "group": "converted", "channel": "pressure"}
+        with patch.object(type(self.controller), "tdms_source", new_callable=unittest.mock.PropertyMock,
+                          create=True, return_value=source):
+            pane.refresh()
+            self.assertIn("converted / pressure", pane.tdms_source_label.text())
+            self.assertTrue(pane.tdms_source_button.isEnabled())
+            self.controller.start_window(True, True)
+            with patch.object(type(self.controller), "legacy_capture_active",
+                              new_callable=unittest.mock.PropertyMock, create=True, return_value=True), \
+                    patch.object(type(self.controller), "legacy_collecting_after_stop",
+                                 new_callable=unittest.mock.PropertyMock, create=True, return_value=True), \
+                    patch.object(type(self.controller), "labview_tail_remaining_s",
+                                 new_callable=unittest.mock.PropertyMock, create=True, return_value=12.5):
+                pane.refresh()
+                self.assertFalse(pane.finish_button.isEnabled())
+                self.assertTrue(pane.cancel_button.isEnabled())
+                self.assertFalse(pane.tdms_source_button.isEnabled())
+                self.assertIn("12.5 s", pane.labview_status.text())
+                self.assertIn("At least 12.5 s remaining", pane.labview_status.text())
+                self.assertIn("waiting for full fresh NO/flow coverage", pane.labview_status.text())
+                self.assertIn("Keep this condition steady", pane.labview_status.text())
 
 
 if __name__ == "__main__":

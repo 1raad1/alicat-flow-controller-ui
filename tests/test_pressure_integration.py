@@ -11,18 +11,22 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 from types import SimpleNamespace
 import unittest
 from unittest.mock import PropertyMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEventLoop, QTimer
 
 from flow_controller.core.optimisation import Experiment, MeasurementWindow
 from flow_controller.core.optimiser_controller import OptimiserController
 from flow_controller.core.session import FlowSession, MODE_STAGED
 from flow_controller.core.udp_listener import MAX_PACKET_BYTES, UdpCommandListener
 from flow_controller.domain.bayesian import SearchConfig
+from mexa_bridge.protocol import simulated_cycle
+from mexa_bridge.records import ReceivedSample, make_packet
 
 
 POINT = [.3, 1.2, .7]
@@ -102,7 +106,7 @@ class PressureExperimentIntegrationTests(unittest.TestCase):
             payload = pressure_for(self.experiment)
             for key in ("start", "end"):
                 payload[key] = (datetime.fromisoformat(payload[key]) + timedelta(seconds=shift)).isoformat()
-            with self.subTest(shift=shift), self.assertRaisesRegex(ValueError, "window"):
+            with self.subTest(shift=shift), self.assertRaisesRegex(ValueError, "interval|window"):
                 self.experiment.attach_pressure(payload)
         payload = pressure_for(self.experiment)
         payload["quality"]["clipped"] = True
@@ -201,6 +205,7 @@ class PressureControllerIntegrationTests(unittest.TestCase):
         self.controller.experiment.add_trial({"point": POINT, "method": "test"})
         self.targets = settings().targets(POINT)
         self.clock = datetime(2026, 9, 3, 12)
+        self.controller._clock = lambda: self.clock.timestamp()
         mock_datetime = patch("flow_controller.core.optimiser_controller.datetime")
         self.mock_datetime = mock_datetime.start()
         self.mock_datetime.now.side_effect = lambda: self.clock
@@ -235,11 +240,253 @@ class PressureControllerIntegrationTests(unittest.TestCase):
         return request
 
     def await_import(self):
-        deadline = time.monotonic() + 5
-        while self.controller.pressure_worker is not None and time.monotonic() < deadline:
-            self.app.processEvents()
-            time.sleep(.005)
+        loop = QEventLoop()
+        poll = QTimer()
+        poll.setInterval(5)
+        poll.timeout.connect(lambda: loop.quit() if self.controller.pressure_worker is None else None)
+        timeout = QTimer()
+        timeout.setSingleShot(True)
+        timeout.timeout.connect(loop.quit)
+        poll.start()
+        timeout.start(5000)
+        loop.exec()
+        poll.stop()
+        timeout.stop()
         self.assertIsNone(self.controller.pressure_worker, "Pressure worker did not finish")
+
+    def begin_plain_live(self, delay=3):
+        self.live_source_id = str(uuid.uuid4())
+        self.live_bad_sample = False
+        valid = patch.object(ReceivedSample, "problem", side_effect=lambda **_: "invalid MEXA sample" if self.live_bad_sample else "")
+        valid.start()
+        self.addCleanup(valid.stop)
+
+        def checked():
+            if self.live_bad_sample:
+                raise ValueError("invalid MEXA sample")
+            return self.session.mexa.latest
+
+        check = patch.object(self.session.mexa, "checked_sample", side_effect=checked)
+        check.start()
+        self.addCleanup(check.stop)
+        delay_patch = patch.object(Experiment, "response_delay_seconds", new_callable=PropertyMock, return_value=delay)
+        delay_patch.start()
+        self.addCleanup(delay_patch.stop)
+        self.live_sample(0)
+        request = self.controller.arm_labview(True, True, live=True)
+        self.session._on_udp_command("log")
+        self.assertIsNotNone(self.controller.capture)
+        return request
+
+    def live_sample(self, seconds):
+        self.publish(seconds)
+        packet = make_packet(simulated_cycle(seconds + 1), self.live_source_id, seconds + 1,
+                             simulated=False, validated=True, dry=True, cycle_s=1)
+        packet.update(acquired_at=self.clock.astimezone(timezone.utc).isoformat(),
+                      no_ppm=100 if seconds >= 3 else 900, o2_percent=10)
+        sample = ReceivedSample(packet, packet["acquired_at"], time.monotonic(), str(self.root / "mexa.jsonl"))
+        self.session.mexa.latest = sample
+        self.session.mexa.sample_received.emit(sample)
+
+    def complete_plain_live_window(self):
+        self.live_sample(1)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        for second in range(3, 9):
+            self.live_sample(second)
+        self.assertIsNotNone(self.controller.experiment.pending["window"], self.controller.last_message)
+
+    def tdms_profile(self):
+        return {"folder": str(self.root), "group": "converted", "channel": "pressure",
+                "calibration_id": "tdms-test-cal", "scale_pa_per_unit": 3,
+                "segment_samples": 1000, "overlap_samples": 500, "min_recording_s": 1}
+
+    def write_direct_tdms(self, name="capture.tdms", shift=0):
+        import numpy as np
+        try:
+            from nptdms import ChannelObject, TdmsWriter
+        except ImportError:
+            self.skipTest("Optional npTDMS dependency is not installed")
+        path = self.root / name
+        start = (datetime(2026, 9, 3, 12) + timedelta(seconds=shift)).astimezone(timezone.utc).replace(tzinfo=None)
+        values = 7 + 2 * np.sin(2 * np.pi * 125 * np.arange(2000) / 1000)
+        with TdmsWriter(path) as writer:
+            writer.write_segment([ChannelObject("converted", "pressure", values,
+                                  properties={"wf_start_time": np.datetime64(start, "us"), "wf_increment": .001})])
+        return path
+
+    def test_plain_stop_defers_csv_for_delayed_no_and_retries_preserve_deadline(self):
+        request = self.begin_plain_live()
+        run, capture, log = self.controller._legacy_run, self.controller.capture, self.session.log_path
+        self.live_sample(1)
+        self.session._on_udp_command("log")
+        self.assertIs(self.controller._legacy_run, run)
+        self.assertIs(self.controller.capture, capture)
+        self.assertEqual(self.session.log_path, log)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        stop, deadline = run["stop"], run["deadline"]
+        self.assertTrue(self.session.labview_stop_deferred)
+        self.assertTrue(self.session.logging_active)
+        self.assertEqual(self.controller.labview_tail_remaining_s, 6)
+        with self.assertRaisesRegex(ValueError, "complete delayed NO"):
+            self.controller.finish_window()
+        self.live_sample(3)
+        self.session._on_udp_command("stop")
+        self.session._on_udp_command("log")
+        self.assertEqual((run["stop"], run["deadline"]), (stop, deadline))
+        self.assertIs(self.controller.capture, capture)
+        for seconds in range(4, 8):
+            self.live_sample(seconds)
+        self.assertIsNotNone(self.controller.capture)
+        self.live_sample(8)
+        trial = self.controller.experiment.pending
+        self.assertIsNotNone(trial["window"], self.controller.last_message)
+        window = trial["window"]
+        metadata = window["labview_capture"]
+        self.assertEqual(metadata["delay_s"], 3)
+        self.assertEqual((datetime.fromisoformat(metadata["stop"]) - datetime.fromisoformat(metadata["start"])).total_seconds(), 2)
+        self.assertEqual(window["duration_s"], 8)
+        self.assertEqual(window["mexa"]["duration_s"], 5)
+        self.assertEqual(window["mexa"]["samples"], 6)
+        self.assertEqual(window["mexa"]["no_ppm"], 100)
+        self.assertEqual(window["mexa"]["start"], metadata["no_start"])
+        self.assertEqual(trial["capture_id"], request["capture_id"])
+        self.assertNotIn("pressure", trial)
+        self.assertIsNone(self.controller.pressure_worker)
+        self.assertFalse(self.session.labview_stop_deferred)
+        self.assertFalse(self.session.logging_active)
+        self.assertEqual(Experiment.load(self.controller.experiment.path).pending["window"], window)
+        self.assertTrue(self.session.setpoint_queue.empty())
+
+    def test_plain_live_delay_over_five_seconds_accepts_verified_full_flow_interval(self):
+        self.begin_plain_live(delay=6)
+        self.live_sample(1)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        for second in range(3, 12):
+            self.live_sample(second)
+        trial = self.controller.experiment.pending
+        self.assertIsNotNone(trial["window"], self.controller.last_message)
+        self.assertEqual(trial["window"]["duration_s"], 11)
+        self.assertEqual(trial["window"]["mexa"]["duration_s"], 5)
+        self.assertEqual(Experiment.load(self.controller.experiment.path).pending["window"], trial["window"])
+
+    def test_plain_tail_invalid_mexa_cancels_and_rotates_identity(self):
+        request = self.begin_plain_live()
+        self.live_sample(1)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        self.live_bad_sample = True
+        self.controller._check_live_freshness()
+        self.assertIsNone(self.controller.capture)
+        self.assertFalse(self.session.labview_stop_deferred)
+        self.assertFalse(self.session.logging_active)
+        self.assertIsNone(self.controller.experiment.pending["window"])
+        self.assertNotEqual(self.controller.experiment.pending["capture_id"], request["capture_id"])
+
+    def test_plain_tail_changed_flow_cancels_without_saving_window(self):
+        request = self.begin_plain_live()
+        self.live_sample(1)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        self.targets["h2_rich"] += 10
+        self.publish(3)
+        self.assertIsNone(self.controller.capture)
+        self.assertFalse(self.session.labview_stop_deferred)
+        self.assertFalse(self.session.logging_active)
+        self.assertIsNone(self.controller.experiment.pending["window"])
+        self.assertNotEqual(self.controller.experiment.pending["capture_id"], request["capture_id"])
+
+    def test_plain_triggers_automatically_import_new_two_second_tdms_after_no_tail(self):
+        from flow_controller.domain.tdms_capture import find_tdms_capture
+        self.controller.configure_tdms_source(self.tdms_profile())
+        request = self.begin_plain_live()
+        path = self.write_direct_tdms()
+
+        def find(source, capture, baseline, **kwargs):
+            return find_tdms_capture(source, capture, baseline, timeout_s=2, stable_s=0, **kwargs)
+
+        with patch("flow_controller.core.optimiser_controller.find_tdms_capture", side_effect=find):
+            self.complete_plain_live_window()
+            self.await_import()
+        trial = self.controller.experiment.pending
+        self.assertIsNotNone(trial.get("pressure"), self.controller.last_message)
+        self.assertEqual(trial["pressure"]["sample_count"], 2000)
+        self.assertEqual(trial["pressure"]["raw_file"], str(path))
+        self.assertEqual(trial["pressure"]["capture_id"], request["capture_id"])
+        self.assertEqual(trial["window"]["mexa"]["duration_s"], 5)
+        self.controller.complete_from_mexa(basis_confirmed=True)
+        reloaded = Experiment.load(self.controller.experiment.path)
+        self.assertEqual(reloaded.trials[0]["status"], "completed")
+        self.assertEqual(reloaded.trials[0]["condition_log"]["pressure"], trial["pressure"])
+
+    def test_configure_source_repairs_saved_pending_window_then_direct_file_retry(self):
+        self.begin_plain_live()
+        self.complete_plain_live_window()
+        self.assertIsNone(self.controller.experiment.pending["window"]["labview_capture"]["tdms_source"])
+        self.controller.configure_tdms_source(self.tdms_profile())
+        acquisition = self.controller.experiment.pending["window"]["labview_capture"]
+        self.assertEqual(acquisition["tdms_source"]["group"], "converted")
+        self.assertEqual(Experiment.load(self.controller.experiment.path).pending["window"]["labview_capture"], acquisition)
+        wrong = self.write_direct_tdms("wrong.tdms", shift=3600)
+        self.controller.import_tdms(wrong)
+        self.await_import()
+        self.assertIsNone(self.controller.experiment.pending.get("pressure"))
+        self.assertIn("cover", self.controller._pressure_error)
+        corrected = dict(self.tdms_profile(), scale_pa_per_unit=4, calibration_id="corrected-cal")
+        self.controller.configure_tdms_source(corrected)
+        path = self.write_direct_tdms()
+        self.controller.import_tdms(path)
+        self.await_import()
+        trial = self.controller.experiment.pending
+        self.assertIsNotNone(trial.get("pressure"), self.controller.last_message)
+        self.assertEqual(trial["pressure"]["analysis"]["scale_pa_per_unit"], 4)
+        self.assertEqual(trial["pressure"]["calibration_id"], "corrected-cal")
+        self.controller.complete_from_mexa(basis_confirmed=True)
+
+    def test_automatic_tdms_failure_retains_no_window_for_explicit_retry(self):
+        self.controller.configure_tdms_source(self.tdms_profile())
+        self.begin_plain_live()
+        path = self.write_direct_tdms()
+        with patch("flow_controller.core.optimiser_controller.find_tdms_capture",
+                   side_effect=ValueError("Multiple TDMS recordings match this trigger")):
+            self.complete_plain_live_window()
+            self.await_import()
+        pending = self.controller.experiment.pending
+        saved_window = deepcopy(pending["window"])
+        self.assertEqual(pending["status"], "pending")
+        self.assertIsNone(pending.get("pressure"))
+        self.assertIn("Multiple TDMS", self.controller._pressure_error)
+        self.controller.import_tdms(path)
+        self.await_import()
+        self.assertIsNotNone(self.controller.experiment.pending.get("pressure"), self.controller.last_message)
+        self.assertEqual(self.controller.experiment.pending["window"], saved_window)
+        self.assertIsNone(self.controller._pressure_error)
+
+    def test_no_tail_waits_for_actual_samples_after_fractional_delay(self):
+        self.begin_plain_live(delay=3.2)
+        self.live_sample(1)
+        self.live_sample(2)
+        self.session._on_udp_command("stop")
+        for second in range(3, 9):
+            self.live_sample(second)
+        self.assertIsNotNone(self.controller.capture)
+        self.live_sample(9)
+        window = self.controller.experiment.pending["window"]
+        self.assertIsNotNone(window, self.controller.last_message)
+        self.assertEqual(window["mexa"]["duration_s"], 5)
+        self.assertEqual(window["duration_s"], 9)
+        self.assertGreater(datetime.fromisoformat(window["mexa"]["start"]),
+                           datetime.fromisoformat(window["labview_capture"]["no_start"]))
+
+    def test_two_second_pressure_rejected_without_recorded_labview_interval(self):
+        self.capture_window()
+        summary = pressure_for(self.controller.experiment)
+        summary["sample_count"] = 2000
+        summary["end"] = (datetime.fromisoformat(summary["start"]) + timedelta(seconds=1.999)).isoformat()
+        with self.assertRaisesRegex(ValueError, "shorter"):
+            self.controller.experiment.attach_pressure(summary)
 
     def test_arm_requires_local_confirmations_and_fresh_telemetry(self):
         for pilot_off, settled in ((False, True), (True, False)):
