@@ -37,7 +37,7 @@ from ..core.combustion_prefs import (
 from ..core.sequence import Sequence, opening_mismatches
 from ..core.session import (DEFAULT_LOG_DIR, MODE_STAGED, MODE_STANDARD,
                            SEQ_IDLE)
-from ..domain import combustion, roles, rql
+from ..domain import roles, rql
 from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
 from ..core.optimiser_controller import OptimiserController

@@ -199,6 +199,8 @@ class FlowSession(QObject):
     # -- recording -------------------------------------------------------- #
     logging_changed = Signal(bool, object)  # active, path
     udp_changed = Signal(bool, str)
+    labview_command = Signal(str)
+    labview_packet = Signal(object, object)
 
     #: Internal: carries a callable from a worker thread to this thread.
     _invoke = Signal(object)
@@ -214,11 +216,13 @@ class FlowSession(QObject):
         self.calc = CombustionCalculator()
         self.history = GraphHistory()
         self._csv = CsvLogger()
+        self.labview_stop_deferred = False
         self.mexa = MexaController(self)
         self._csv_lock = threading.Lock()
         self._ramps = RampRunner(self._emit_ramp_setpoint, log=self._log)
         self._udp = UdpCommandListener(
             on_command=lambda command: self._post(self._on_udp_command, command),
+            on_packet=lambda packet, sender: self._post(self.labview_packet.emit, packet, sender),
             on_ready=lambda host, port: self._post(self._on_udp_ready, host, port),
             on_error=lambda error, host, port: self._post(
                 self._on_udp_error, error, host, port),
@@ -1536,25 +1540,15 @@ class FlowSession(QObject):
 
     def phi_values(self, samples=None):
         """``(stage 1, stage 2, global)`` equivalence ratios."""
-        flow = lambda key: self.flow_for_role(key, samples)
-        nh3_r, h2_r = flow('nh3_rich'), flow('h2_rich')
-        nh3_l, h2_l = flow('nh3_lean'), flow('h2_lean')
-        air_r, air_l = flow('rich_air'), flow('lean_air')
-        nh3_pilot = flow('nh3_pilot')
-        h2_pilot = flow('h2_pilot')
-        ch4_pilot = flow('ch4_pilot')
-        ch4_stage1 = flow('ch4_stage1')
-        ch4_stage2 = flow('ch4_stage2')
-        return (
-            self.calc.phi(
-                nh3_r + nh3_pilot, h2_r + h2_pilot, air_r,
-                ch4_stage1 + ch4_pilot),
-            self.calc.phi(nh3_l, h2_l, air_l, ch4_stage2),
-            self.calc.phi(
-                nh3_r + nh3_l + nh3_pilot,
-                h2_r + h2_l + h2_pilot, air_r + air_l,
-                ch4_stage1 + ch4_stage2 + ch4_pilot),
-        )
+        stage1, air1, _ = self.combustion_flows(SCOPE_STAGE1, samples)
+        stage2, air2, _ = self.combustion_flows(SCOPE_STAGE2, samples)
+        # Global phi covers the staged rig, including its pilot. General
+        # assignments participate only in the whole-rig combustion estimate.
+        combined = {fuel: stage1[fuel] + stage2[fuel] for fuel in stage1}
+        return tuple(
+            self.calc.phi(fuels['NH3'], fuels['H2'], air, fuels['CH4'])
+            for fuels, air in ((stage1, air1), (stage2, air2),
+                               (combined, air1 + air2)))
 
     # ------------------------------------------------------------------ #
     #  Live combustion estimate                                          #
@@ -2872,16 +2866,19 @@ class FlowSession(QObject):
     def _on_udp_command(self, command):
         """Act on a datagram.  Announcing one is not the same as obeying it.
 
-        ``log`` and ``stop`` exist so that one operator action starts both
-        systems' records at the same instant; a listener that only wrote a
-        line in the syslog would leave the LabVIEW record with no counterpart
-        to line up against, which is the whole point of accepting the trigger.
+        ``log`` and ``stop`` create a flow record alongside the LabVIEW
+        recording. Receipt time is a software association, not hardware clock
+        synchronization. An explicitly armed optimiser also receives the trigger.
         """
         self._log(f"LabVIEW command received: {command}")
         if command == 'log':
             self._udp_start_logging()
         elif command == 'stop':
-            self._udp_stop_logging()
+            if not self.labview_stop_deferred:
+                self._udp_stop_logging()
+            else:
+                self._announce_udp('LabVIEW stopped; completing delayed NO recording')
+        self.labview_command.emit(command)
 
     def _udp_start_logging(self):
         if self._csv.active:

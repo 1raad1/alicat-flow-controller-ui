@@ -1,7 +1,8 @@
 """One-point Bayesian design for the pilot-off NH3/H2 experiment.
 
-No Qt, persistence, serial I/O or actuation. The acquisition integrates over
+No Qt, persistence, serial I/O or actuation. NO optimisation integrates over
 uncertain latent baseline values (Monte Carlo noisy expected improvement).
+Joint NO/pressure mapping instead reduces integrated latent response variance.
 Parameter bounds and flow ceilings are known constraints, not learned safety.
 """
 
@@ -56,8 +57,19 @@ class SearchConfig:
     optimise_power: bool = False
     optimise_split: bool = False
     candidate_pool_size: int | None = None
+    objective_mode: str = "minimise_no"
+    pressure_metric: str = "rms_pa"
+    mapping_no_weight: float = 0.5
 
     def __post_init__(self):
+        if self.objective_mode not in ("minimise_no", "map_no_pressure"):
+            raise ValueError("Objective mode must be minimise_no or map_no_pressure.")
+        if self.pressure_metric not in ("rms_pa", "peak_abs_pa", "dominant_amplitude_pa"):
+            raise ValueError("Pressure metric must be rms_pa, peak_abs_pa or dominant_amplitude_pa.")
+        weight = finite(self.mapping_no_weight, "Mapping NO weight")
+        if not 0 < weight < 1:
+            raise ValueError("Mapping NO weight must be strictly between 0 and 1 so both responses count.")
+        object.__setattr__(self, "mapping_no_weight", weight)
         for name in ("power_kw", "split_rich", "reference_o2", "window_seconds"):
             object.__setattr__(self, name, finite(getattr(self, name), name))
         if self.power_kw <= 0:
@@ -217,11 +229,119 @@ def noisy_expected_improvement(gp, baseline, candidates, rng, draws=128):
     return np.maximum(ei.mean(axis=0), 0), mu_c, np.sqrt(var_c)
 
 
+def _pressure_values(config, completed):
+    values = []
+    for trial in completed:
+        pressure = trial.get("pressure")
+        if not isinstance(pressure, dict) or config.pressure_metric not in pressure:
+            raise ValueError(f"Completed mapping trials require pressure {config.pressure_metric}.")
+        value = finite(pressure[config.pressure_metric], f"Pressure {config.pressure_metric}")
+        if value < 0:
+            raise ValueError("Pressure amplitude must be nonnegative.")
+        values.append(value)
+    return np.asarray(values, dtype=float)
+
+
+def _fit_mapping_models(config, completed, seed):
+    """Independent, standardized latent response models with fitted white noise.
+
+    NO's supplied SEM contributes known observation variance. Pressure summaries
+    have no inferred SEM: pressure observation noise is fitted from the data.
+    """
+    from sklearn.exceptions import ConvergenceWarning
+    from sklearn.gaussian_process import GaussianProcessRegressor
+    from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
+    from threadpoolctl import threadpool_limits
+
+    bounds = np.asarray(config.bounds)
+    x = np.asarray([config.observed_vector(t["window"]) for t in completed])
+    x = (x - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
+    no = np.asarray([finite(t["result"]["corrected_no"], "Corrected NO") for t in completed])
+    pressure = _pressure_values(config, completed)
+    errors = np.asarray([0 if t["result"].get("corrected_sem") is None
+                         else finite(t["result"]["corrected_sem"], "Corrected NO SEM")
+                         for t in completed])
+    if np.any(errors < 0):
+        raise ValueError("Corrected NO SEM must be nonnegative.")
+    models = []
+    for response, sem in ((no, errors), (pressure, np.zeros(len(completed)))):
+        centre, scale = float(response.mean()), float(response.std())
+        # Use actual response units even below 1 Pa; a unit-size floor would
+        # change the acquisition when the same pressure data are rescaled.
+        if scale == 0:
+            scale = max(abs(centre), 1.0)
+        kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
+            [.3] * config.dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+        gp = GaussianProcessRegressor(kernel=kernel, alpha=(sem / scale) ** 2 + 1e-8,
+                                     n_restarts_optimizer=1, random_state=seed)
+        with threadpool_limits(limits=1), warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            gp.fit(x, (response - centre) / scale)
+        models.append((gp, centre, scale))
+    return models
+
+
+def integrated_variance_reduction(gp, reference, candidates):
+    """Fractional reduction in mean reference latent variance from one sample.
+
+    Conditional GP covariance is independent of the as-yet-unobserved response.
+    Future observation variance includes fitted white noise, never latent-only
+    noise-free precision. Reference locations are fixed across all candidates.
+    """
+    _, mean, covariance, cross, variance = _latent_posterior(gp, reference, candidates)
+    reference_variance = max(float(np.maximum(np.diag(covariance), 0).mean()), 1e-12)
+    observation_variance = variance + float(gp.kernel_.k2.noise_level) + 1e-8
+    reduction = np.mean(cross ** 2, axis=0) / observation_variance
+    return np.maximum(reduction / reference_variance, 0), mean, np.sqrt(variance)
+
+
+def _mapping_model_metadata(model, units):
+    gp, centre, scale = model
+    return {
+        "fitted_kernel": str(gp.kernel_),
+        "signal_variance": float(gp.kernel_.k1.k1.constant_value),
+        "matern_length_scales": np.atleast_1d(gp.kernel_.k1.k2.length_scale).astype(float).tolist(),
+        "white_noise_level": float(gp.kernel_.k2.noise_level),
+        "response_centre": centre, "response_scale": scale, "response_units": units,
+    }
+
+
+def predict_mapping(config, trials, points):
+    """Predict latent means and SDs in ppm/Pa at bounded feasible slice points.
+
+    Uses deterministic model fits (seed 0); no candidate selection or actuation.
+    Flow ceilings are campaign-specific and are applied by the slice caller.
+    """
+    from threadpoolctl import threadpool_limits
+    if config.objective_mode != "map_no_pressure":
+        raise ValueError("Mapping predictions require map_no_pressure mode.")
+    completed = [trial for trial in trials if trial["status"] == "completed"]
+    if len(completed) < config.initial_points:
+        raise ValueError("Mapping predictions require the completed initial design.")
+    points = list(points)
+    for point in points:
+        config.targets(point)
+    result = {"no_mean": [], "no_sd": [], "pressure_mean": [], "pressure_sd": []}
+    _pressure_values(config, completed)
+    if not points:
+        return result
+    bounds = np.asarray(config.bounds)
+    x = (np.asarray(points, dtype=float) - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
+    with threadpool_limits(limits=1):
+        models = _fit_mapping_models(config, completed, seed=0)
+        for name, (gp, centre, scale) in zip(("no", "pressure"), models):
+            _, mean, _, _, variance = _latent_posterior(gp, np.empty((0, config.dimensions)), x)
+            result[name + "_mean"] = (mean * scale + centre).tolist()
+            result[name + "_sd"] = (np.sqrt(variance) * scale).tolist()
+    return result
+
+
 def suggest(config, trials, limits=None, seed=0, pool_size=None):
     """Return a feasible suggestion, never a flow command.
 
     Initial design uses space-filling maximin selection from a Sobol pool.
-    Later calls use a Matérn-5/2 GP, fitted residual observation noise and NEI.
+    Later calls use Matérn-5/2 GPs with fitted residual observation noise:
+    NEI for NO minimisation, or integrated variance reduction for joint mapping.
     Rejected/invalid points are excluded from the candidate pool, not given
     fabricated zero emissions. Repeats are explicit operator actions.
     """
@@ -239,8 +359,16 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     pool = qmc.Sobol(dimensions, scramble=True, seed=seed).random_base2(
         int(math.ceil(math.log2(pool_size))))
     sobol_count = len(pool)
+    mapping = config.objective_mode == "map_no_pressure"
     completed = [t for t in trials if t["status"] == "completed"]
-    if completed:
+    if mapping:
+        _pressure_values(config, completed)
+        # Keep quadrature locations independent of response values and of the
+        # exclusion of previous trial locations from the suggestion pool.
+        reference = np.asarray([candidate for candidate in pool
+            if all(config.targets(lower + candidate * span).get(role, 0) <= ceiling
+                   for role, ceiling in (limits or {}).items())])[:256]
+    if completed and not mapping:
         best = min(completed, key=lambda t: t["result"]["corrected_no"])
         centre = (np.asarray(best["point"]) - lower) / span
         pool = np.vstack((pool, np.clip(
@@ -265,6 +393,11 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         "corrected_no": trial["result"]["corrected_no"],
         "corrected_sem": trial["result"].get("corrected_sem"),
     } for trial in completed]
+    if mapping:
+        for payload, trial in zip(training_payload, completed):
+            payload.update(pressure=trial["pressure"], pressure_metric=config.pressure_metric)
+    hash_payload = ({"pressure_metric": config.pressure_metric, "trials": training_payload}
+                    if mapping else training_payload)
     provenance = {
         "algorithm_version": "fcbo-sobol-maximin-v1",
         "seed": int(seed),
@@ -276,9 +409,13 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
                                for role, value in (limits or {}).items()},
         "training_trial_count": len(completed),
         "training_data_sha256": hashlib.sha256(json.dumps(
-            training_payload, sort_keys=True, allow_nan=False,
+            hash_payload, sort_keys=True, allow_nan=False,
             separators=(",", ":")).encode("utf-8")).hexdigest(),
     }
+    if mapping:
+        provenance.update(objective_mode=config.objective_mode,
+                          pressure_metric=config.pressure_metric,
+                          mapping_no_weight=config.mapping_no_weight)
     if len(completed) < config.initial_points:
         if len(tried):
             scores = np.linalg.norm(pool[:, None, :] - tried[None, :, :], axis=2).min(axis=1)
@@ -287,6 +424,34 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
             index = int(np.argmin(np.linalg.norm(pool - .5, axis=1)))
         return {"point": (lower + pool[index] * span).tolist(),
                 "method": "Space-filling initial design", **provenance}
+
+    if mapping:
+        with threadpool_limits(limits=1):
+            models = _fit_mapping_models(config, completed, seed)
+            no_score, no_mean, no_sd = integrated_variance_reduction(models[0][0], reference, pool)
+            pressure_score, pressure_mean, pressure_sd = integrated_variance_reduction(
+                models[1][0], reference, pool)
+        weight = config.mapping_no_weight
+        score = weight * no_score + (1 - weight) * pressure_score
+        index = int(np.argmax(score))
+        _, no_centre, no_scale = models[0]
+        _, pressure_centre, pressure_scale = models[1]
+        return {
+            **provenance,
+            "point": (lower + pool[index] * span).tolist(),
+            "method": "Bayesian NO/pressure integrated variance reduction",
+            "algorithm_version": "fcbo-matern52-no-pressure-ivr-v1",
+            "predicted_no": float(no_mean[index] * no_scale + no_centre),
+            "latent_sd": float(no_sd[index] * no_scale),
+            "predicted_pressure_pa": float(pressure_mean[index] * pressure_scale + pressure_centre),
+            "pressure_latent_sd_pa": float(pressure_sd[index] * pressure_scale),
+            "mapping_score": float(score[index]),
+            "mapping_no_score": float(no_score[index]),
+            "mapping_pressure_score": float(pressure_score[index]),
+            "mapping_reference_count": len(reference),
+            "no_model": _mapping_model_metadata(models[0], "ppm"),
+            "pressure_model": _mapping_model_metadata(models[1], "Pa"),
+        }
 
     x = np.array([config.observed_vector(t["window"]) for t in completed])
     x = (x - lower) / span

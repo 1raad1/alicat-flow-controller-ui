@@ -15,14 +15,16 @@ import uuid
 import numpy as np
 
 from ..domain.bayesian import SearchConfig, corrected_no, finite
+from ..domain.pressure import validate_pressure_summary, pressure_signature
+from ..domain.tdms_capture import validate_tdms_source
 from ..domain.combustion import CombustionCalculator
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from ..domain.roles import ROLES
 from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
-SCHEMA = 2
-SUPPORTED_SCHEMAS = (1, SCHEMA)
+SCHEMA = 3
+SUPPORTED_SCHEMAS = (1, 2, SCHEMA)
 MAX_TRIALS = 500
 MAX_EXPERIMENT_BYTES = 50_000_000
 FLOW_REL_TOL = .03
@@ -70,7 +72,9 @@ class Experiment:
                 "config": config.to_dict(), "trials": [],
                 "analyser_response": {"conditions": {"A": None, "B": None},
                                       "runs": [], "selected_run_id": None},
-                "objective": "dry NO ppm corrected to fixed O2; not total NOx",
+                "objective": ("map corrected dry NO and pressure amplitude"
+                              if config.objective_mode == "map_no_pressure" else
+                              "dry NO ppm corrected to fixed O2; not total NOx"),
                 "pilot": "off during measurements"}
         atomic_save(path, data)
         return cls(path, data)
@@ -85,6 +89,8 @@ class Experiment:
             if data["schema"] not in SUPPORTED_SCHEMAS:
                 raise ValueError("Unsupported experiment file version.")
             experiment = cls(path, data)
+            if data.get("tdms_source") is not None:
+                validate_tdms_source(data["tdms_source"], require_folder=False)
             validate_analyser_response(data.get("analyser_response"))
             trials = data["trials"]
             if not isinstance(trials, list) or len(trials) > MAX_TRIALS:
@@ -102,6 +108,9 @@ class Experiment:
                 experiment.config.request(trial["point"])
                 if trial["status"] not in ("pending", "completed", "invalid"):
                     raise ValueError("Invalid trial status.")
+                if "capture_id" in trial and (not isinstance(trial["capture_id"], str)
+                                               or not 1 <= len(trial["capture_id"]) <= 128):
+                    raise ValueError("Invalid pressure capture ID.")
                 pending += trial["status"] == "pending"
                 if trial.get("window") is not None:
                     validate_window(trial["window"], experiment.config, trial["point"])
@@ -123,6 +132,10 @@ class Experiment:
                     if result.get("corrected_sem") != sem:
                         raise ValueError("Stored NO uncertainty does not match raw readings.")
                     validate_mexa_result(trial["window"], result)
+                    if experiment.config.objective_mode == "map_no_pressure" and not trial.get("pressure"):
+                        raise ValueError("Completed mapping tests require a pressure result.")
+                if trial.get("pressure") is not None:
+                    experiment._validate_pressure(trial["pressure"], trial)
                 if trial.get("condition_log") is not None:
                     validate_condition_log(trial, data, experiment.config)
             if pending > 1:
@@ -140,6 +153,7 @@ class Experiment:
         return next((t for t in self.trials if t["status"] == "pending"), None)
 
     def _commit(self, data):
+        data["schema"] = SCHEMA
         atomic_save(self.path, data)
         self.data = data
 
@@ -226,7 +240,8 @@ class Experiment:
         self.config.request(suggestion["point"])
         data = deepcopy(self.data)
         trial = dict(suggestion, id=str(uuid.uuid4()), number=len(self.trials) + 1,
-                     status="pending", created_at=now_iso(), window=None, result=None)
+                     status="pending", created_at=now_iso(), window=None, result=None,
+                     capture_id=str(uuid.uuid4()))
         data["trials"].append(trial)
         self._commit(data)
         return trial
@@ -248,8 +263,97 @@ class Experiment:
         trial["window"] = deepcopy(window)
         self._commit(data)
 
+    def set_tdms_source(self, source):
+        profile = validate_tdms_source(source)
+        data = deepcopy(self.data)
+        data["tdms_source"] = profile
+        for trial in data["trials"]:
+            if trial["status"] == "pending" and not trial.get("pressure"):
+                acquisition = (trial.get("window") or {}).get("labview_capture")
+                if acquisition is not None:
+                    acquisition["tdms_source"] = deepcopy(profile)
+                    acquisition["pressure_min_seconds"] = profile["min_recording_s"]
+        self._commit(data)
+
+    def ensure_capture_id(self):
+        """Give legacy pending tests a durable identity before external acquisition."""
+        data, trial = self._pending_copy()
+        if not trial.get("capture_id"):
+            trial["capture_id"] = str(uuid.uuid4())
+            self._commit(data)
+        return trial["capture_id"]
+
+    def reset_capture(self):
+        """Invalidate messages from an abandoned acquisition, retaining the condition."""
+        data, trial = self._pending_copy()
+        if trial.get("window"):
+            raise ValueError("A saved window cannot be discarded; mark this test invalid instead.")
+        trial["capture_id"] = str(uuid.uuid4())
+        trial.pop("pressure", None)
+        self._commit(data)
+
+    def _validate_pressure(self, payload, trial):
+        summary = validate_pressure_summary(payload)
+        for key, expected in (("experiment_id", self.data["id"]),
+                              ("trial_id", trial["id"]),
+                              ("capture_id", trial.get("capture_id"))):
+            if summary[key] != expected:
+                raise ValueError(f"Pressure {key} does not match this acquisition.")
+        window = trial.get("window")
+        if not window:
+            raise ValueError("Finish and save the flow/NO window before attaching pressure.")
+        start = datetime.fromisoformat(summary["start"]).timestamp()
+        end = datetime.fromisoformat(summary["end"]).timestamp()
+        flow_start = datetime.fromisoformat(window["start"]).timestamp()
+        flow_end = datetime.fromisoformat(window["end"]).timestamp()
+        acquisition = window.get("labview_capture")
+        minimum = self.config.window_seconds
+        if acquisition:
+            flow_start = datetime.fromisoformat(acquisition["start"]).timestamp()
+            flow_end = datetime.fromisoformat(acquisition["stop"]).timestamp()
+            minimum = acquisition["pressure_min_seconds"]
+            association = summary.get("association")
+            if association and (epoch(association["trigger_start"]) != flow_start
+                                or epoch(association["trigger_end"]) != flow_end):
+                raise ValueError("Pressure association does not match the recorded LabVIEW interval.")
+        # Association tolerance allows the final flow poll to precede recording stop.
+        # This does not provide hardware clock synchronization.
+        if start < flow_start - 2 or end > flow_end + 2 or end <= flow_start or start >= flow_end:
+            raise ValueError("Pressure recording must lie within the recorded LabVIEW interval "
+                             "(2 s boundary tolerance). Check clocks and analyser delay.")
+        if summary["sample_count"] / summary["sample_rate_hz"] < minimum - 1e-6:
+            raise ValueError("Pressure recording is shorter than the campaign measurement window.")
+        signature = self.data.get("pressure_signature")
+        if signature is not None and signature != pressure_signature(summary):
+            raise ValueError("Pressure channel, calibration or analysis settings differ from this campaign. "
+                             "Use the established settings or create a new campaign.")
+        return summary
+
+    def attach_pressure(self, payload):
+        """Attach once, or acknowledge an identical retry, without finalising NO."""
+        if not isinstance(payload, dict):
+            raise ValueError("Pressure result must be a JSON object.")
+        trial = next((t for t in self.trials if t["id"] == payload.get("trial_id")), None)
+        if trial is None or trial["status"] == "invalid":
+            raise ValueError("Pressure result refers to an unknown or invalid test.")
+        summary = self._validate_pressure(payload, trial)
+        previous = trial.get("pressure")
+        if previous is not None:
+            if previous != summary:
+                raise ValueError("This capture already has a different pressure result; it cannot be overwritten.")
+            return False
+        if trial["status"] != "pending":
+            raise ValueError("A completed test cannot be changed.")
+        data, updated = self._pending_copy()
+        updated["pressure"] = summary
+        data.setdefault("pressure_signature", pressure_signature(summary))
+        self._commit(data)
+        return True
+
     def complete(self, no_ppm, o2_percent, no_sem=None, notes="", *, from_mexa=False):
         data, trial = self._pending_copy()
+        if self.config.objective_mode == "map_no_pressure" and not trial.get("pressure"):
+            raise ValueError("Import a valid pressure result before completing a mapping test.")
         validate_window(trial["window"], self.config, trial["point"])
         if bool(trial["window"].get("mexa")) != from_mexa:
             raise ValueError("Use the saved MEXA means for a live window, or manual inputs for a manual window")
@@ -305,19 +409,22 @@ class Experiment:
                       "mexa_channel_statistics_json", "mexa_cycle_statistics_json",
                       "mexa_received_start", "mexa_received_end", "mexa_states_seen_json",
                       "mexa_alarms_seen_json", "mexa_warnings_seen_json",
-                      "response_calibration_json", "condition_log_json"]
+                      "response_calibration_json", "condition_log_json",
+                      "objective_mode", "pressure_metric", "capture_id", "pressure_rms_pa",
+                      "pressure_peak_abs_pa", "pressure_dominant_amplitude_pa", "pressure_dominant_frequency_hz",
+                      "pressure_rms_window_sd_pa", "pressure_start", "pressure_end",
+                      "pressure_raw_file", "pressure_summary_json", "mapping_score",
+                      "suggested_pressure_pa", "suggested_pressure_sd_pa"]
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for t in self.trials:
                 result, window = t.get("result") or {}, t.get("window") or {}
                 mexa = window.get("mexa") or {}
                 condition = t.get("condition_log") or {}
+                pressure = t.get("pressure") or {}
                 observed = window.get("observed_point", [None] * 3)
                 request = self.config.request(t["point"])
-                note = result.get("notes", t.get("reason", ""))
-                # Neutralise spreadsheet formula injection in operator notes.
-                if note.lstrip().startswith(("=", "+", "-", "@")):
-                    note = "'" + note
+                note = csv_text(result.get("notes", t.get("reason", "")))
                 writer.writerow({
                     "test": t["number"], "status": t["status"],
                     "h2_fraction": request.h2_fraction,
@@ -388,7 +495,26 @@ class Experiment:
                     "response_calibration_json": compact_json(
                         condition.get("response_calibration")),
                     "condition_log_json": compact_json(condition),
+                    "objective_mode": self.config.objective_mode,
+                    "pressure_metric": self.config.pressure_metric,
+                    "capture_id": t.get("capture_id"),
+                    "pressure_rms_pa": pressure.get("rms_pa"),
+                    "pressure_peak_abs_pa": pressure.get("peak_abs_pa"),
+                    "pressure_dominant_amplitude_pa": pressure.get("dominant_amplitude_pa"),
+                    "pressure_dominant_frequency_hz": pressure.get("dominant_frequency_hz"),
+                    "pressure_rms_window_sd_pa": pressure.get("rms_window_sd_pa"),
+                    "pressure_start": pressure.get("start"), "pressure_end": pressure.get("end"),
+                    "pressure_raw_file": csv_text(pressure.get("raw_file", "")),
+                    "pressure_summary_json": compact_json(pressure or None),
+                    "mapping_score": t.get("mapping_score"),
+                    "suggested_pressure_pa": t.get("predicted_pressure_pa"),
+                    "suggested_pressure_sd_pa": t.get("pressure_latent_sd_pa"),
                 })
+
+
+def csv_text(value):
+    text = str(value)
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) else text
 
 
 def compact_json(value):
@@ -484,7 +610,7 @@ def build_condition_log(trial, data, config):
     response_run_id = (window or {}).get("response_run_id")
     suggestion_exclusions = {
         "id", "number", "status", "created_at", "window", "result",
-        "condition_log", "reason", "invalidated_at",
+        "condition_log", "reason", "invalidated_at", "pressure", "capture_id",
     }
     suggestion = {key: deepcopy(value) for key, value in trial.items()
                   if key not in suggestion_exclusions}
@@ -511,6 +637,8 @@ def build_condition_log(trial, data, config):
         "invalid_reason": trial.get("reason") if trial["status"] == "invalid" else None,
         "response_calibration": _response_calibration_summary(data, response_run_id),
     }
+    if trial.get("pressure") is not None:
+        record["pressure"] = deepcopy(trial["pressure"])
     _bounded_json(record, "Condition log", max_depth=12, max_items=5000,
                   max_bytes=100_000)
     return record
@@ -519,10 +647,13 @@ def build_condition_log(trial, data, config):
 def validate_condition_log(trial, data, config):
     """Reject inconsistent or unbounded per-condition records while allowing legacy absence."""
     record = trial.get("condition_log")
-    if not isinstance(record, dict) or set(record) != {
+    expected_fields = {
             "schema", "logged_at", "outcome", "trial", "suggestion",
             "requested_condition", "measurement_window", "result", "invalid_reason",
-            "response_calibration"}:
+            "response_calibration"}
+    if trial.get("pressure") is not None:
+        expected_fields.add("pressure")
+    if not isinstance(record, dict) or set(record) != expected_fields:
         raise ValueError("Invalid condition-log fields.")
     _bounded_json(record, "Condition log", max_depth=12, max_items=5000,
                   max_bytes=100_000)
@@ -605,8 +736,7 @@ def validate_response_run(run):
     for key in ("baseline_no_ppm", "final_no_ppm", "baseline_sd_ppm", "final_sd_ppm"):
         if key in run:
             value = _stored_number(run[key], key)
-            ceiling = 5000 if not key.endswith("sd_ppm") else 5000
-            if not 0 <= value <= ceiling:
+            if not 0 <= value <= 5000:
                 raise ValueError(f"{key} is outside the analyser range.")
     if "criteria" in run and not isinstance(run["criteria"], dict):
         raise ValueError("Analyser-response criteria must be an object.")
@@ -707,6 +837,27 @@ def observed_split(flows):
     return rich / (rich + lean)
 
 
+def _validate_role_statistics(statistics, means, targets, samples, kind):
+    label = kind.capitalize()
+    for role, item in statistics.items():
+        if not isinstance(item, dict) or set(item) != {
+                "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
+            raise ValueError(f"Invalid per-role {kind} statistics.")
+        if type(item["count"]) is not int or item["count"] != samples:
+            raise ValueError(f"{label}-statistic sample count does not match the window.")
+        target = _stored_number(item["target_slpm"], f"Target {kind}")
+        mean = _stored_number(item["mean_slpm"], f"Mean {kind}")
+        sd = _stored_number(item["sd_slpm"], f"{label} standard deviation")
+        minimum = _stored_number(item["min_slpm"], f"Minimum {kind}")
+        maximum = _stored_number(item["max_slpm"], f"Maximum {kind}")
+        if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
+                or not np.isclose(mean, means[role], atol=1e-12, rtol=1e-12)
+                or not 0 <= minimum <= MAX_STORED_FLOW
+                or not minimum - 1e-12 <= mean <= maximum + 1e-12
+                or maximum > MAX_STORED_FLOW or sd < 0):
+            raise ValueError(f"Per-role {kind} statistics are inconsistent.")
+
+
 def validate_window(window, config, requested_point=None):
     if not isinstance(window, dict):
         raise ValueError("Capture and finish a valid flow-measurement window first.")
@@ -761,23 +912,8 @@ def validate_window(window, config, requested_point=None):
                 raise ValueError("Saved target flows do not match the requested condition.")
         if not isinstance(statistics, dict) or set(statistics) != set(targets):
             raise ValueError("Flow statistics do not cover every target role.")
-        for role, item in statistics.items():
-            if not isinstance(item, dict) or set(item) != {
-                    "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
-                raise ValueError("Invalid per-role flow statistics.")
-            if type(item["count"]) is not int or item["count"] != window["samples"]:
-                raise ValueError("Flow-statistic sample count does not match the window.")
-            target = _stored_number(item["target_slpm"], "Target flow")
-            mean = _stored_number(item["mean_slpm"], "Mean flow")
-            sd = _stored_number(item["sd_slpm"], "Flow standard deviation")
-            minimum = _stored_number(item["min_slpm"], "Minimum flow")
-            maximum = _stored_number(item["max_slpm"], "Maximum flow")
-            if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
-                    or not np.isclose(mean, window["mean_flows"][role], atol=1e-12, rtol=1e-12)
-                    or not 0 <= minimum <= MAX_STORED_FLOW
-                    or not minimum - 1e-12 <= mean <= maximum + 1e-12
-                    or maximum > MAX_STORED_FLOW or sd < 0):
-                raise ValueError("Per-role flow statistics are inconsistent.")
+        _validate_role_statistics(
+            statistics, window["mean_flows"], targets, window["samples"], "flow")
     mean_setpoints = window.get("mean_setpoints")
     setpoint_statistics = window.get("setpoint_statistics")
     if (mean_setpoints is None) != (setpoint_statistics is None):
@@ -788,23 +924,8 @@ def validate_window(window, config, requested_point=None):
                 or not isinstance(setpoint_statistics, dict)
                 or set(setpoint_statistics) != set(targets)):
             raise ValueError("Setpoint statistics do not match the target-flow roles.")
-        for role, item in setpoint_statistics.items():
-            if not isinstance(item, dict) or set(item) != {
-                    "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
-                raise ValueError("Invalid per-role setpoint statistics.")
-            if type(item["count"]) is not int or item["count"] != window["samples"]:
-                raise ValueError("Setpoint-statistic sample count does not match the window.")
-            target = _stored_number(item["target_slpm"], "Target setpoint")
-            mean = _stored_number(item["mean_slpm"], "Mean setpoint")
-            sd = _stored_number(item["sd_slpm"], "Setpoint standard deviation")
-            minimum = _stored_number(item["min_slpm"], "Minimum setpoint")
-            maximum = _stored_number(item["max_slpm"], "Maximum setpoint")
-            if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
-                    or not np.isclose(mean, mean_setpoints[role], atol=1e-12, rtol=1e-12)
-                    or not 0 <= minimum <= MAX_STORED_FLOW
-                    or not minimum - 1e-12 <= mean <= maximum + 1e-12
-                    or maximum > MAX_STORED_FLOW or sd < 0):
-                raise ValueError("Per-role setpoint statistics are inconsistent.")
+        _validate_role_statistics(
+            setpoint_statistics, mean_setpoints, targets, window["samples"], "setpoint")
     assignments = window.get("assignments")
     if not isinstance(assignments, dict):
         raise ValueError("Measurement assignments must be an object.")
@@ -820,6 +941,43 @@ def validate_window(window, config, requested_point=None):
         raise ValueError("Invalid continuous flow-log reference.")
     if "mexa" in window:
         validate_mexa_window(window, config)
+    if "labview_capture" in window:
+        validate_labview_capture(window, config)
+
+
+def validate_labview_capture(window, config):
+    """Keep physical pressure timing separate from the later analyser window."""
+    capture = window["labview_capture"]
+    fields = {"start", "stop", "no_start", "no_end", "delay_s",
+              "pressure_min_seconds", "tdms_source"}
+    if not isinstance(capture, dict) or set(capture) != fields:
+        raise ValueError("Invalid LabVIEW acquisition timing record.")
+    times = {}
+    for key in ("start", "stop", "no_start", "no_end"):
+        _iso_timestamp(capture[key], f"LabVIEW {key}")
+        stamp = datetime.fromisoformat(capture[key])
+        if stamp.tzinfo is None:
+            raise ValueError("LabVIEW acquisition timestamps must include a timezone.")
+        times[key] = stamp.timestamp()
+    delay = _stored_number(capture["delay_s"], "LabVIEW analyser delay")
+    minimum = _stored_number(capture["pressure_min_seconds"], "Minimum pressure duration")
+    start, stop, no_start, no_end = (times[k] for k in ("start", "stop", "no_start", "no_end"))
+    first = datetime.fromisoformat(window["start"]).timestamp()
+    last = datetime.fromisoformat(window["end"]).timestamp()
+    if (not 0 <= delay <= 3600 or not 0 < minimum <= 3600
+            or not first - 2 <= start < stop <= last + 1e-6
+            or abs(no_start - start - delay) > .001
+            or no_end < stop + delay - .001 or no_end > last + .001
+            or no_end - no_start < config.window_seconds - .001):
+        raise ValueError("LabVIEW, pressure and delayed NO timing are inconsistent.")
+    if capture["tdms_source"] is not None:
+        profile = validate_tdms_source(capture["tdms_source"], require_folder=False)
+        if minimum != profile["min_recording_s"]:
+            raise ValueError("Pressure duration differs from the TDMS settings.")
+    if window.get("mexa"):
+        actual = window["mexa"]
+        if epoch(actual["start"]) < no_start - .001 or epoch(actual["end"]) > no_end + .001:
+            raise ValueError("NO samples lie outside the delay-compensated averaging interval.")
 
 
 def validate_mexa_window(window, config):
@@ -835,9 +993,11 @@ def validate_mexa_window(window, config):
     start, end = epoch(data["start"]), epoch(data["end"])
     flow_start = datetime.fromisoformat(window["start"]).timestamp()
     flow_end = datetime.fromisoformat(window["end"]).timestamp()
+    acquisition = window.get("labview_capture")
+    coverage_start = epoch(acquisition["no_start"]) if acquisition else flow_start
     if (abs((end - start) - number(data["duration_s"], "MEXA duration")) > .001
             or end - start < config.window_seconds or not flow_start <= start < end <= flow_end
-            or start - flow_start > 5 or flow_end - end > 5):
+            or start < coverage_start or start - coverage_start > 5 or flow_end - end > 5):
         raise ValueError("MEXA measurement does not cover the saved flow window")
     corrected_no(data["no_ppm"], data["o2_percent"], config.reference_o2)
     for key in ("no", "o2"):
@@ -939,9 +1099,6 @@ class MeasurementWindow:
         if len(self.rows) < 3:
             raise ValueError("At least three fresh polling passes are required.")
         duration = (self.stamps[-1] - self.stamps[0]).total_seconds()
-        means = {key: float(np.mean([row[key] for row in self.rows])) for key in self.targets}
-        mean_setpoints = {key: float(np.mean([row[key] for row in self.setpoint_rows]))
-                          for key in self.targets}
         def summaries(rows):
             result = {}
             for key, target in self.targets.items():
@@ -955,6 +1112,8 @@ class MeasurementWindow:
             return result
         statistics = summaries(self.rows)
         setpoint_statistics = summaries(self.setpoint_rows)
+        means = {key: item["mean_slpm"] for key, item in statistics.items()}
+        mean_setpoints = {key: item["mean_slpm"] for key, item in setpoint_statistics.items()}
         point, power = observed_condition(means)
         split = observed_split(means)
         window = {"start": self.stamps[0].astimezone(timezone.utc).isoformat(),

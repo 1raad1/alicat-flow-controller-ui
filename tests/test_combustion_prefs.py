@@ -114,6 +114,14 @@ class CleanTests(unittest.TestCase):
         self.assertEqual(prefs['stage2_inlets'], 4)
         self.assertEqual(prefs['interval'], 5)
 
+    def test_nonfinite_counts_fall_back_without_losing_other_settings(self):
+        for field in ('interval', 'stage2_inlets'):
+            for value in (float('inf'), float('-inf'), float('nan'), '1e999'):
+                with self.subTest(field=field, value=value):
+                    prefs = combustion_prefs.clean({field: value, 'stage1_mm': 25})
+                    self.assertEqual(prefs[field], combustion_prefs.DEFAULTS[field])
+                    self.assertEqual(prefs['stage1_mm'], 25.0)
+
     def test_unknown_keys_are_dropped(self):
         prefs = combustion_prefs.clean({'inlet_mm': 30, 'colour': 'blue'})
         self.assertNotIn('colour', prefs)
@@ -134,6 +142,15 @@ class LoadAndSaveTests(unittest.TestCase):
         self.path.write_text('{"inlet_mm": 25,', encoding='utf-8')
         self.assertEqual(combustion_prefs.load(self.path),
                          dict(combustion_prefs.DEFAULTS))
+
+    def test_overflowing_json_counts_do_not_prevent_loading_preferences(self):
+        self.path.write_text(
+            '{"interval": 1e999, "stage2_inlets": -1e999, "stage1_mm": 25}',
+            encoding='utf-8')
+        prefs = combustion_prefs.load(self.path)
+        self.assertEqual(prefs['interval'], 1)
+        self.assertEqual(prefs['stage2_inlets'], 1)
+        self.assertEqual(prefs['stage1_mm'], 25.0)
 
     def test_settings_survive_a_round_trip(self):
         prefs = dict(combustion_prefs.DEFAULTS,

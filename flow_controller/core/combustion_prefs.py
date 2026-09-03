@@ -111,6 +111,17 @@ def path():
     return Path(__file__).resolve().parents[2] / FILENAME
 
 
+def _clean_dimension(value, ceiling):
+    """Positive inlet dimension, capped at its ceiling; otherwise undeclared."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not number > 0.0 or number != number or number == float('inf'):
+        return None
+    return min(number, ceiling)
+
+
 def clean_diameter(value):
     """One declared bore in millimetres, or ``None`` for no declaration.
 
@@ -118,24 +129,12 @@ def clean_diameter(value):
     something tiny: a bore of nothing would give an infinite velocity, and the
     absent declaration is the safe reading of the number.
     """
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not number > 0.0 or number != number or number == float('inf'):
-        return None
-    return min(number, MAX_DIAMETER_MM)
+    return _clean_dimension(value, MAX_DIAMETER_MM)
 
 
 def clean_area(value):
     """One declared inlet area in square millimetres, or ``None``."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not number > 0.0 or number != number or number == float('inf'):
-        return None
-    return min(number, MAX_AREA_MM2)
+    return _clean_dimension(value, MAX_AREA_MM2)
 
 
 def clean_geometry(value):
@@ -144,22 +143,23 @@ def clean_geometry(value):
     return mode if mode in GEOMETRY_MODES else GEOMETRY_DIAMETER
 
 
-def clean_interval(value):
-    """Passes between refreshes: a whole number, at least 1."""
+def _clean_count(value, ceiling, default):
+    """Bound a whole-number setting, falling back for unreadable values."""
     try:
         number = int(float(value))
-    except (TypeError, ValueError):
-        return DEFAULTS['interval']
-    return max(1, min(number, MAX_INTERVAL))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(1, min(number, ceiling))
+
+
+def clean_interval(value):
+    """Passes between refreshes: a whole number, at least 1."""
+    return _clean_count(value, MAX_INTERVAL, DEFAULTS['interval'])
 
 
 def clean_inlet_count(value):
     """Number of identical Stage 2 inlets: a whole number, at least one."""
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError):
-        return DEFAULTS['stage2_inlets']
-    return max(1, min(number, MAX_INLET_COUNT))
+    return _clean_count(value, MAX_INLET_COUNT, DEFAULTS['stage2_inlets'])
 
 
 def clean_live(value):

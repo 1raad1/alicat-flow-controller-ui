@@ -2,10 +2,7 @@
 
 import sys
 
-
-def main(argv=None):
-    from flow_controller.ui.qt_main_window import main as qt_main
-    return qt_main()
+from flow_controller.__main__ import main
 
 
 if __name__ == "__main__":

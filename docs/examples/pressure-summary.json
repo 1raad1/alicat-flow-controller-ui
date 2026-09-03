@@ -1,0 +1,35 @@
+{
+  "protocol": "flow-pressure-v1",
+  "type": "pressure_summary",
+  "request_id": "replace-with-capture-id:summary",
+  "experiment_id": "replace-with-exported-experiment-id",
+  "trial_id": "replace-with-exported-trial-id",
+  "capture_id": "replace-with-exported-capture-id",
+  "start": "2026-09-03T12:00:00+00:00",
+  "end": "2026-09-03T12:00:29.999+00:00",
+  "sample_rate_hz": 1000,
+  "sample_count": 30000,
+  "units": "Pa",
+  "channel": "combustor_pressure",
+  "calibration_id": "example-calibration-replace-before-use",
+  "rms_pa": 2.0,
+  "peak_abs_pa": 2.8284271247461903,
+  "dominant_frequency_hz": 100.0,
+  "dominant_amplitude_pa": 2.0,
+  "rms_window_sd_pa": 0.0,
+  "quality": {
+    "clipped": false,
+    "nonfinite": false
+  },
+  "analysis": {
+    "id": "labview-welch-flattop-v1",
+    "band_hz": [10, 400],
+    "window": "flattop",
+    "segment_samples": 1000,
+    "overlap_samples": 500,
+    "detrend": "constant",
+    "amplitude_convention": "rms_spectrum",
+    "scale_pa_per_unit": 1.0,
+    "offset_pa": 0.0
+  }
+}

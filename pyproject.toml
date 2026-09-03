@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 xlsx = ["openpyxl>=3.1,<4"]
+pressure = ["npTDMS>=1.10,<2"]
 
 [project.scripts]
 flow-controller-v3 = "flow_controller.ui.qt_main_window:main"
