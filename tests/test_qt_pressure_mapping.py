@@ -9,12 +9,90 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6.QtCore import Qt, QEventLoop, QTimer
+from PySide6.QtCore import Qt, QCoreApplication, QEvent, QEventLoop, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog
+from shiboken6 import isValid
 
 from tests import test_qt_optimiser as qt_base
 from flow_controller.ui.qt_optimiser import ExperimentDialog, OptimiserPane, TdmsSourceDialog
+from flow_controller.ui import qt_optimiser
+
+
+class ApplicationWorkerTests(unittest.TestCase):
+    setUpClass = classmethod(qt_base.QtOptimiserTests.setUpClass.__func__)
+
+    def workers(self):
+        yield qt_optimiser.TdmsInspectionWorker("sample.tdms"), qt_optimiser._TDMS_INSPECTORS
+        yield qt_optimiser.MappingWorker(None, [], np.zeros((1, 1)), {}), qt_optimiser._MAP_WORKERS
+
+    def finish(self, worker, registry):
+        self.assertTrue(worker.wait(5000), "Worker did not finish")
+        self.app.processEvents()
+        self.assertNotIn(worker, registry)
+
+    def test_worker_errors_reach_ui_and_release_ownership(self):
+        for worker, registry in self.workers():
+            with self.subTest(worker=type(worker).__name__):
+                errors, results = [], []
+                worker.failed.connect(errors.append)
+                worker.succeeded.connect(results.append)
+                with patch.object(type(worker), "_compute", side_effect=ValueError("Unreadable data")):
+                    worker.start()
+                    self.finish(worker, registry)
+                self.assertEqual(errors, ["Unreadable data"])
+                self.assertEqual(results, [])
+
+    def test_interruption_suppresses_both_success_and_error(self):
+        for raises in (False, True):
+            for worker, registry in self.workers():
+                with self.subTest(worker=type(worker).__name__, raises=raises):
+                    entered, release = threading.Event(), threading.Event()
+                    errors, results = [], []
+                    worker.failed.connect(errors.append)
+                    worker.succeeded.connect(results.append)
+
+                    def compute():
+                        entered.set()
+                        release.wait(5)
+                        if raises:
+                            raise ValueError("Cancelled operation failed")
+                        return "Cancelled result"
+
+                    with patch.object(type(worker), "_compute", side_effect=compute):
+                        worker.start()
+                        try:
+                            self.assertTrue(entered.wait(5))
+                            worker.requestInterruption()
+                        finally:
+                            release.set()
+                            self.finish(worker, registry)
+                    self.assertEqual(errors, [])
+                    self.assertEqual(results, [])
+
+    def test_inspection_outlives_destroyed_dialog(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def inspect(_path):
+            entered.set()
+            release.wait(5)
+            return []
+
+        dialog = TdmsSourceDialog()
+        with patch("flow_controller.ui.qt_optimiser.inspect_tdms", side_effect=inspect):
+            dialog.inspect_sample("sample.tdms")
+            worker = dialog.worker
+            try:
+                self.assertTrue(entered.wait(5))
+                dialog.deleteLater()
+                QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                self.assertFalse(isValid(dialog))
+                self.assertTrue(isValid(worker))
+                self.assertIs(worker.parent(), self.app)
+                self.assertIn(worker, qt_optimiser._TDMS_INSPECTORS)
+            finally:
+                release.set()
+                self.finish(worker, qt_optimiser._TDMS_INSPECTORS)
 
 
 class QtPressureMappingTests(unittest.TestCase):

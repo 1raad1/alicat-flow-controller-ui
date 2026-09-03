@@ -92,6 +92,43 @@ class StagedCombustionTests(unittest.TestCase):
                     global_phi,
                     self.session.calc.phi(nh3, h2, 50.0, ch4 + 3.0))
 
+    def test_general_assignments_do_not_enter_staged_phi(self):
+        expected = self.session.phi_values(self.samples)
+        self.session.selection.update({
+            'F': ('NH3', 'General'),
+            'G': ('Air', 'General'),
+            'H': ('N2', 'Zone 1'),
+        })
+        self.session._rebuild_assignments()
+        self.samples.update({unit: {'flow': 100.0} for unit in 'FGH'})
+
+        self.assertEqual(self.session.phi_values(self.samples), expected)
+        fuels, air, inert = self.session.combustion_flows(samples=self.samples)
+        self.assertEqual(fuels['NH3'], 100.0)
+        self.assertEqual(air, 150.0)
+        self.assertEqual(inert, 100.0)
+
+    def test_mixed_stage_fuels_and_pilot_match_explicit_balance(self):
+        self.session.selection.update({
+            'F': ('NH3', 'Zone 1'), 'G': ('H2', 'Zone 1'),
+            'H': ('NH3', 'Zone 2'), 'I': ('H2', 'Zone 2'),
+        })
+        self.samples.update({unit: {'flow': value} for unit, value in
+                             zip('FGHI', (4.0, 5.0, 6.0, 7.0))})
+        for gas in ('NH3', 'H2', 'CH4'):
+            with self.subTest(pilot=gas):
+                self.session.selection['C'] = (gas, 'Pilot')
+                self.session._rebuild_assignments()
+                pilot_nh3, pilot_h2, pilot_ch4 = (float(gas == fuel)
+                                                for fuel in ('NH3', 'H2', 'CH4'))
+                expected = (
+                    self.session.calc.phi(4 + pilot_nh3, 5 + pilot_h2, 20, 2 + pilot_ch4),
+                    self.session.calc.phi(6, 7, 30, 3),
+                    self.session.calc.phi(10 + pilot_nh3, 12 + pilot_h2, 50, 5 + pilot_ch4),
+                )
+                for actual, target in zip(self.session.phi_values(self.samples), expected):
+                    self.assertAlmostEqual(actual, target)
+
 
 if __name__ == '__main__':
     unittest.main()

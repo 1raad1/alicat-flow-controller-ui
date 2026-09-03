@@ -206,7 +206,8 @@ Zero commands, stopping monitoring, and application shutdown cancel replay.
 New experiments can **Minimise NO** or **Map NO + pressure**. Mapping learns
 separate NO and pressure responses and suggests conditions that reduce uncertainty
 across both maps. Choose RMS pressure, peak excursion or dominant spectral amplitude
-as the pressure response. The Maps tab shows two-variable slices and their uncertainty.
+as the pressure response. **Operating-space maps** shows two-variable slices and
+their uncertainty.
 
 Choose the LabVIEW TDMS folder and converted pressure channel in the flow app,
 then arm the current trial and use LabVIEW's existing `log`/`stop` triggers.
@@ -227,7 +228,9 @@ For the algorithms, equations, file format and code map, see the
 
 ### Create and run an experiment
 
-1. Expand **Bayesian optimiser** and choose **New experiment**. Enter the nominal
+1. Expand **Bayesian optimiser** and choose **New experiment**. Select
+   **Minimise NO** or **Map NO + pressure**. For mapping, select the pressure
+   response and NO mapping weight. Enter the nominal
    NH3/H2 thermal input, stage-1 fuel split, and permitted bounds for H2 volume
    percentage, stage-1 phi and overall phi. Optionally select thermal input or
    stage-1 fuel split to add them as fourth and fifth search variables, then enter
@@ -249,17 +252,39 @@ For the algorithms, equations, file format and code map, see the
    sends no commands. Review every field and the transition procedure before
    applying through the usual controls. Existing MAX FLOW limits and ramps
    still apply. Do not assume that safe endpoints imply a safe transition.
-4. After switching the pilot off and allowing the burner, sample line and
-   analyser to settle, check both confirmations. For live measurements, connect
+4. For mapping, open **TDMS source…** in **Current test**. Choose the LabVIEW
+   recording folder, inspect a sample TDMS file and select its pressure waveform.
+   Declare the pressure units or Pa-per-stored-unit scale, offset and calibration
+   identifier; a group named `converted` does not establish the units. Set the
+   minimum pressure recording duration and spectral settings. Follow the
+   [TDMS setup guide](docs/LABVIEW_PRESSURE_MAPPING.md#configure-the-tdms-source)
+   for timing and calibration checks. TDMS reading needs the optional dependency
+   described under [Manual installation](#manual-installation).
+5. After switching the pilot off and allowing the burner and flows to settle,
+   check both confirmations. Allow the analyser to settle or select an appropriate
+   calibrated response delay. For live measurements, connect
    the bridge in the **MEXA analyser** tab with **Save received MEXA logs on
-   this PC** enabled, then select **Capture NO/O2 automatically**. Click
-   **Start window**. With live capture off, average
-   the analyser's uncorrected dry NO and O2 manually over that window.
-5. Click **Finish window** after both streams cover the minimum duration.
-   Live capture fills and locks the NO/O2 means; manual mode lets you enter
-   those means and an optional NO standard error. Add notes, confirm the
-   uncorrected dry basis, then **Save result**. No flows change on save.
-6. Suggest the next test. Use the **History** tab to inspect results, repeat
+   this PC** enabled, then select **Capture NO/O2 automatically from the MEXA
+   network link**. With live capture off, average the analyser's uncorrected dry
+   NO and O2 manually over the saved measurement window.
+6. For **Minimise NO**, click **Start window**, then **Finish window** once the
+   required flow and, for live capture, analyser samples cover the minimum duration.
+   For **Map NO + pressure**, set **LabVIEW UDP host** to `127.0.0.1` and
+   **LabVIEW UDP port** to `61557`, then click **Start Listener** if needed.
+   Click **Arm LabVIEW trigger** and use LabVIEW's existing recording controls
+   to send `log` and `stop`. Meet the source profile's minimum pressure duration.
+   Keep the same condition steady after `stop` while the app collects the selected
+   NO delay tail and any additional samples needed for minimum averaging coverage.
+7. For mapping, wait for the automatic TDMS search and processing to finish,
+   then review the attached pressure metrics. If matching fails or is ambiguous,
+   use **Choose TDMS file…** to select the intended recording; the same waveform
+   validation still applies. A mapping test needs a valid pressure result before
+   it can be completed. Live capture fills and locks the NO/O2 means; manual mode
+   lets you enter those means and an optional NO standard error. Add notes,
+   confirm **Uncorrected dry averages from this saved window**, then click
+   **Save result**. Pressure processing does not save the result automatically.
+   No flows change on save.
+8. Suggest the next test. Use the **History** tab to inspect results, repeat
    a completed point, or export CSV. Repeating a point creates a separate test.
 
 The **NO response time** tab can store two settled live conditions and run one
@@ -329,17 +354,37 @@ excluded from fitting rather than treated as zero emissions.
 ### Model and records
 
 The initial design selects spread-out points from an N-dimensional scrambled
-Sobol candidate pool. Subsequent suggestions fit a Matérn-5/2 Gaussian process and maximise
-Monte Carlo noisy expected improvement over a feasible candidate pool. The model
-uses measured blend, equivalence ratios, and any selected power or split variables
+Sobol candidate pool. In **Minimise NO**, subsequent suggestions fit a Matérn-5/2
+Gaussian process and maximise Monte Carlo noisy expected improvement over a
+feasible candidate pool. **Map NO + pressure** fits separate standardized
+Gaussian processes for corrected dry NO and the chosen pressure response. It
+selects points by weighted expected uncertainty reduction across both maps. The
+NO mapping weight balances the two learning objectives; it is not a combined
+NO/pressure performance score. Each model uses measured blend, equivalence ratios,
+and any selected power or split variables
 from the captured flow window, with the requested settings retained alongside them.
-It fits residual observation
-noise and accepts an optional per-test NO standard error. O2 uncertainty and
+The models fit residual observation noise; the NO model also accepts an optional
+per-test NO standard error. O2 uncertainty and
 systematic calibration bias are not propagated. Suggestions respect the declared
 search region and current flow ceilings; no flame-safety boundary is learned.
 
-The `.fcbo.json` campaign is the authoritative record. Experiment changes are
-written atomically after each suggestion, completed window and result. Every
+After the initial completed design, use **Operating-space maps** to select two
+axes and click **Refresh maps**. Other variables stay at the selected completed
+test's measured condition, or their bounds midpoint. **Show uncertainty (latent
+SD)** switches between predicted means and uncertainty. Blank cells exceed
+bounds or flow ceilings. These maps do not classify flame stability.
+
+Pressure RMS and peak excursion use the mean-subtracted waveform. Peak excursion
+is the largest absolute deviation from its mean. Dominant spectral amplitude is
+the RMS amplitude at the strongest in-band Welch spectrum bin, reported in Pa
+with its frequency separately. It is not peak-to-peak pressure or a PSD value.
+The spectral frequency band does not filter the RMS or peak calculation.
+
+The `.fcbo.json` campaign is the authoritative record. This version writes
+campaign schema 3 and loads schema 1/2 campaigns in **Minimise NO** mode. Keep
+copies before switching versions; older applications cannot read schema 3.
+Experiment changes are written atomically after each suggestion, completed window
+and result. Every
 newly completed or invalid condition receives a schema-1 `condition_log` inside
 that JSON. A condition log is a self-contained per-condition audit record: it
 freezes the trial and suggestion provenance, requested variables and target
@@ -347,6 +392,9 @@ flows, separate controller-setpoint and measured-flow statistics, assignments,
 rig contexts and audit-log path, all available MEXA channel statistics and
 receiver provenance, the corrected result or invalid reason, and the response
 calibration summary used for that window.
+Pressure results retain the waveform metrics, calibration and source provenance,
+including the TDMS path, SHA-256 and selected sample interval. Keep the source
+TDMS files alongside the campaign for later waveform analysis.
 Auxiliary MEXA channels are informational and are not separately validated.
 The calibration summary stores the raw sample count and SHA-256 digest rather
 than copying its high-frequency raw samples.
@@ -422,6 +470,16 @@ python -m pip install -e .
 ```
 
 Add `.[xlsx]` for Excel export.
+
+LabVIEW TDMS import requires optional `npTDMS` support. Install it into the
+environment that runs the flow app:
+
+```powershell
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements-pressure.txt
+```
+
+For a package installation, use `python -m pip install -e ".[pressure]"` with
+that environment's Python. NO-only campaigns do not require this dependency.
 
 ## First connection
 

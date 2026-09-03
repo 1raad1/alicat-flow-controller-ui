@@ -12,7 +12,9 @@ from unittest.mock import patch
 import numpy as np
 
 from flow_controller.domain.bayesian import SearchConfig, corrected_no, suggest
-from flow_controller.core.optimisation import Experiment, MeasurementWindow, observed_condition
+from flow_controller.core.optimisation import (
+    Experiment, MeasurementWindow, observed_condition, validate_window,
+)
 
 
 def config(**kwargs):
@@ -545,6 +547,83 @@ class ExperimentTests(unittest.TestCase):
         for point in ([.15, 1.05, .5], [.65, 1.6, .85]):
             result = window_for(self.config, point)
             np.testing.assert_allclose(result["observed_point"], point, rtol=1e-12)
+
+    def test_flow_and_setpoint_statistics_reject_invalid_records(self):
+        original = window_for(self.config, self.point)
+        role = next(iter(original["target_flows"]))
+        for kind in ("flow", "setpoint"):
+            label = kind.capitalize()
+            inconsistent = f"Per-role {kind} statistics are inconsistent."
+            cases = [
+                ("missing field", "sd_slpm", None, f"Invalid per-role {kind} statistics."),
+                ("extra field", "extra", 1, f"Invalid per-role {kind} statistics."),
+                ("wrong count", "count", 2,
+                 f"{label}-statistic sample count does not match the window."),
+                ("float count", "count", 3.0,
+                 f"{label}-statistic sample count does not match the window."),
+                ("boolean count", "count", True,
+                 f"{label}-statistic sample count does not match the window."),
+                ("string number", "sd_slpm", "0",
+                 f"{label} standard deviation must be a finite JSON number."),
+                ("boolean number", "sd_slpm", False,
+                 f"{label} standard deviation must be a finite JSON number."),
+                ("mean disagreement", "mean_slpm", 0, inconsistent),
+                ("target disagreement", "target_slpm", 0, inconsistent),
+                ("negative deviation", "sd_slpm", -1, inconsistent),
+                ("negative minimum", "min_slpm", -1, inconsistent),
+                ("excessive maximum", "max_slpm", 1_000_001, inconsistent),
+                ("mean outside bounds", "max_slpm", 0, inconsistent),
+            ]
+            for name, field, value, expected in cases:
+                with self.subTest(kind=kind, case=name):
+                    window = deepcopy(original)
+                    record = window[f"{kind}_statistics"][role]
+                    if value is None:
+                        del record[field]
+                    else:
+                        record[field] = value
+                    with self.assertRaises(ValueError) as raised:
+                        validate_window(window, self.config, self.point)
+                    self.assertEqual(str(raised.exception), expected)
+            for field in ("target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"):
+                for value in (float("nan"), float("inf"), float("-inf")):
+                    with self.subTest(kind=kind, field=field, value=value):
+                        window = deepcopy(original)
+                        window[f"{kind}_statistics"][role][field] = value
+                        with self.assertRaises(ValueError):
+                            validate_window(window, self.config, self.point)
+
+    def test_legacy_window_can_omit_statistics(self):
+        window = window_for(self.config, self.point)
+        for key in ("target_flows", "flow_statistics", "mean_setpoints", "setpoint_statistics"):
+            del window[key]
+        validate_window(window, self.config, self.point)
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window)
+        reopened = Experiment.load(self.path)
+        self.assertEqual(reopened.pending["window"], window)
+
+    def test_window_summarises_varying_flows_and_setpoints(self):
+        targets = self.config.targets(self.point)
+        window = MeasurementWindow(self.config, targets, {})
+        stamp = datetime(2026, 8, 27, 12)
+        for seconds, flow_factor, setpoint_factor in ((0, .99, .995), (2, 1, 1), (5, 1.01, 1.005)):
+            window.add(
+                stamp + timedelta(seconds=seconds),
+                {key: value * flow_factor for key, value in targets.items()},
+                {key: value * setpoint_factor for key, value in targets.items()},
+            )
+        result = window.finish()
+        for kind, mean_key, spread in (("flow", "mean_flows", .01),
+                                       ("setpoint", "mean_setpoints", .005)):
+            for role, target in targets.items():
+                with self.subTest(kind=kind, role=role):
+                    statistic = result[f"{kind}_statistics"][role]
+                    self.assertEqual(result[mean_key][role], statistic["mean_slpm"])
+                    self.assertAlmostEqual(statistic["mean_slpm"], target)
+                    self.assertAlmostEqual(statistic["sd_slpm"], target * spread)
+                    self.assertAlmostEqual(statistic["min_slpm"], target * (1 - spread))
+                    self.assertAlmostEqual(statistic["max_slpm"], target * (1 + spread))
 
 
 if __name__ == "__main__":

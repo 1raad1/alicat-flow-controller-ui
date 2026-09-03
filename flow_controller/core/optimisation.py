@@ -424,10 +424,7 @@ class Experiment:
                 pressure = t.get("pressure") or {}
                 observed = window.get("observed_point", [None] * 3)
                 request = self.config.request(t["point"])
-                note = result.get("notes", t.get("reason", ""))
-                # Neutralise spreadsheet formula injection in operator notes.
-                if note.lstrip().startswith(("=", "+", "-", "@")):
-                    note = "'" + note
+                note = csv_text(result.get("notes", t.get("reason", "")))
                 writer.writerow({
                     "test": t["number"], "status": t["status"],
                     "h2_fraction": request.h2_fraction,
@@ -739,8 +736,7 @@ def validate_response_run(run):
     for key in ("baseline_no_ppm", "final_no_ppm", "baseline_sd_ppm", "final_sd_ppm"):
         if key in run:
             value = _stored_number(run[key], key)
-            ceiling = 5000 if not key.endswith("sd_ppm") else 5000
-            if not 0 <= value <= ceiling:
+            if not 0 <= value <= 5000:
                 raise ValueError(f"{key} is outside the analyser range.")
     if "criteria" in run and not isinstance(run["criteria"], dict):
         raise ValueError("Analyser-response criteria must be an object.")
@@ -841,6 +837,27 @@ def observed_split(flows):
     return rich / (rich + lean)
 
 
+def _validate_role_statistics(statistics, means, targets, samples, kind):
+    label = kind.capitalize()
+    for role, item in statistics.items():
+        if not isinstance(item, dict) or set(item) != {
+                "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
+            raise ValueError(f"Invalid per-role {kind} statistics.")
+        if type(item["count"]) is not int or item["count"] != samples:
+            raise ValueError(f"{label}-statistic sample count does not match the window.")
+        target = _stored_number(item["target_slpm"], f"Target {kind}")
+        mean = _stored_number(item["mean_slpm"], f"Mean {kind}")
+        sd = _stored_number(item["sd_slpm"], f"{label} standard deviation")
+        minimum = _stored_number(item["min_slpm"], f"Minimum {kind}")
+        maximum = _stored_number(item["max_slpm"], f"Maximum {kind}")
+        if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
+                or not np.isclose(mean, means[role], atol=1e-12, rtol=1e-12)
+                or not 0 <= minimum <= MAX_STORED_FLOW
+                or not minimum - 1e-12 <= mean <= maximum + 1e-12
+                or maximum > MAX_STORED_FLOW or sd < 0):
+            raise ValueError(f"Per-role {kind} statistics are inconsistent.")
+
+
 def validate_window(window, config, requested_point=None):
     if not isinstance(window, dict):
         raise ValueError("Capture and finish a valid flow-measurement window first.")
@@ -895,23 +912,8 @@ def validate_window(window, config, requested_point=None):
                 raise ValueError("Saved target flows do not match the requested condition.")
         if not isinstance(statistics, dict) or set(statistics) != set(targets):
             raise ValueError("Flow statistics do not cover every target role.")
-        for role, item in statistics.items():
-            if not isinstance(item, dict) or set(item) != {
-                    "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
-                raise ValueError("Invalid per-role flow statistics.")
-            if type(item["count"]) is not int or item["count"] != window["samples"]:
-                raise ValueError("Flow-statistic sample count does not match the window.")
-            target = _stored_number(item["target_slpm"], "Target flow")
-            mean = _stored_number(item["mean_slpm"], "Mean flow")
-            sd = _stored_number(item["sd_slpm"], "Flow standard deviation")
-            minimum = _stored_number(item["min_slpm"], "Minimum flow")
-            maximum = _stored_number(item["max_slpm"], "Maximum flow")
-            if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
-                    or not np.isclose(mean, window["mean_flows"][role], atol=1e-12, rtol=1e-12)
-                    or not 0 <= minimum <= MAX_STORED_FLOW
-                    or not minimum - 1e-12 <= mean <= maximum + 1e-12
-                    or maximum > MAX_STORED_FLOW or sd < 0):
-                raise ValueError("Per-role flow statistics are inconsistent.")
+        _validate_role_statistics(
+            statistics, window["mean_flows"], targets, window["samples"], "flow")
     mean_setpoints = window.get("mean_setpoints")
     setpoint_statistics = window.get("setpoint_statistics")
     if (mean_setpoints is None) != (setpoint_statistics is None):
@@ -922,23 +924,8 @@ def validate_window(window, config, requested_point=None):
                 or not isinstance(setpoint_statistics, dict)
                 or set(setpoint_statistics) != set(targets)):
             raise ValueError("Setpoint statistics do not match the target-flow roles.")
-        for role, item in setpoint_statistics.items():
-            if not isinstance(item, dict) or set(item) != {
-                    "count", "target_slpm", "mean_slpm", "sd_slpm", "min_slpm", "max_slpm"}:
-                raise ValueError("Invalid per-role setpoint statistics.")
-            if type(item["count"]) is not int or item["count"] != window["samples"]:
-                raise ValueError("Setpoint-statistic sample count does not match the window.")
-            target = _stored_number(item["target_slpm"], "Target setpoint")
-            mean = _stored_number(item["mean_slpm"], "Mean setpoint")
-            sd = _stored_number(item["sd_slpm"], "Setpoint standard deviation")
-            minimum = _stored_number(item["min_slpm"], "Minimum setpoint")
-            maximum = _stored_number(item["max_slpm"], "Maximum setpoint")
-            if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
-                    or not np.isclose(mean, mean_setpoints[role], atol=1e-12, rtol=1e-12)
-                    or not 0 <= minimum <= MAX_STORED_FLOW
-                    or not minimum - 1e-12 <= mean <= maximum + 1e-12
-                    or maximum > MAX_STORED_FLOW or sd < 0):
-                raise ValueError("Per-role setpoint statistics are inconsistent.")
+        _validate_role_statistics(
+            setpoint_statistics, mean_setpoints, targets, window["samples"], "setpoint")
     assignments = window.get("assignments")
     if not isinstance(assignments, dict):
         raise ValueError("Measurement assignments must be an object.")
@@ -1112,9 +1099,6 @@ class MeasurementWindow:
         if len(self.rows) < 3:
             raise ValueError("At least three fresh polling passes are required.")
         duration = (self.stamps[-1] - self.stamps[0]).total_seconds()
-        means = {key: float(np.mean([row[key] for row in self.rows])) for key in self.targets}
-        mean_setpoints = {key: float(np.mean([row[key] for row in self.setpoint_rows]))
-                          for key in self.targets}
         def summaries(rows):
             result = {}
             for key, target in self.targets.items():
@@ -1128,6 +1112,8 @@ class MeasurementWindow:
             return result
         statistics = summaries(self.rows)
         setpoint_statistics = summaries(self.setpoint_rows)
+        means = {key: item["mean_slpm"] for key, item in statistics.items()}
+        mean_setpoints = {key: item["mean_slpm"] for key, item in setpoint_statistics.items()}
         point, power = observed_condition(means)
         split = observed_split(means)
         window = {"start": self.stamps[0].astimezone(timezone.utc).isoformat(),

@@ -1,8 +1,9 @@
 # Bayesian optimiser technical manual
 
 This manual explains the Bayesian experiment workflow implemented by Flow
-Controller v3. It covers the numerical techniques, equations, records, new
-variable controls and the boundaries between calculation, operator approval and
+Controller v3. It covers NO minimisation, joint NO/pressure mapping, LabVIEW
+TDMS acquisition, numerical techniques, records, variable controls and the
+boundaries between calculation, operator approval and
 actuation. Code links point to the implementation at the time this manual was
 written; use the named symbol if later edits move a line.
 
@@ -12,14 +13,28 @@ this particular burner, analyser, search region or software implementation.
 Unless a paragraph says otherwise, numerical tolerances, persistence counts,
 timeouts and safety gates are application-specific engineering choices.
 
+For the current recording procedure, start with [LabVIEW/TDMS capture](#labviewtdms-capture-workflow).
+The [LabVIEW setup guide](LABVIEW_PRESSURE_MAPPING.md) gives the full source-profile
+and file-selection instructions. [Mapping acquisition](#mapping-acquisition-and-operating-space-maps)
+explains how the next mapping test is selected.
+
 ## 1. Purpose and operating boundary
 
-The optimiser searches for low dry NO, corrected to a fixed dry-O2 reference,
-in a pilot-off NH3/H2 rich-quench-lean experiment. It proposes one operating
-point at a time. A proposal does **not** send a controller command. The operator
+The optimiser supports two campaign modes for a pilot-off NH3/H2
+rich-quench-lean experiment:
+
+| Mode | What the next proposal seeks |
+| --- | --- |
+| **Minimise NO** | Lower dry NO corrected to a fixed dry-O2 reference. |
+| **Map NO + pressure** | Reduce uncertainty in separate maps of corrected dry NO and one selected pressure response. |
+
+Both modes propose one operating point at a time. A proposal does **not** send a controller command. The operator
 must review the calculated flows, load them into the existing target fields,
 apply them through the normal controls, wait for the rig and analyser to settle,
-and explicitly start a measurement window.
+and start a measurement window or locally arm the LabVIEW recording trigger.
+The objective mode, pressure response and mapping weight are fixed when the
+campaign is created. Existing campaigns without these settings open in
+**Minimise NO** mode.
 
 Parameter bounds and controller MAX FLOW values are feasibility constraints.
 They are not learned flame-stability limits and they do not establish that a
@@ -29,23 +44,23 @@ The staged rig may use NH3, H2, or CH4 for its single pilot assignment. Those
 assignments are registered in
 [`roles.py:12`](../flow_controller/domain/roles.py#L12), and the selected pilot fuel is
 included in the Stage 1 and global live combustion balances in
-[`session.py:1443`](../flow_controller/core/session.py#L1443). The optimiser deliberately
+[`session.py:1447`](../flow_controller/core/session.py#L1447). The optimiser deliberately
 excludes pilot flow from its NH3/H2 search mixture: every assigned pilot line
 must read zero before a measurement window can start. That check is implemented
 by `_checked_readings()` in
-[`optimiser_controller.py:195`](../flow_controller/core/optimiser_controller.py#L195).
+[`optimiser_controller.py:258`](../flow_controller/core/optimiser_controller.py#L258).
 
 The separation is visible in the controller:
 
 - suggestion calculation runs in a background worker at
-  [`optimiser_controller.py:19`](../flow_controller/core/optimiser_controller.py#L19);
+  [`optimiser_controller.py:24`](../flow_controller/core/optimiser_controller.py#L24);
 - `ask()` requests and saves one proposal at
-  [`optimiser_controller.py:111`](../flow_controller/core/optimiser_controller.py#L111);
+  [`optimiser_controller.py:174`](../flow_controller/core/optimiser_controller.py#L174);
 - `prepare_targets()` fills fields without sending commands at
-  [`optimiser_controller.py:179`](../flow_controller/core/optimiser_controller.py#L179);
+  [`optimiser_controller.py:242`](../flow_controller/core/optimiser_controller.py#L242);
 - capture and completion require separate operator actions at
-  [`optimiser_controller.py:242`](../flow_controller/core/optimiser_controller.py#L242)
-  and [`optimiser_controller.py:380`](../flow_controller/core/optimiser_controller.py#L380).
+  [`optimiser_controller.py:651`](../flow_controller/core/optimiser_controller.py#L651)
+  and [`optimiser_controller.py:842`](../flow_controller/core/optimiser_controller.py#L842).
 
 ## 2. Search variables
 
@@ -64,10 +79,10 @@ New campaigns may add either or both of:
    and greater than 0 but no greater than 1.
 
 The variable registry is at
-[`bayesian.py:23`](../flow_controller/domain/bayesian.py#L23). Configuration,
+[`bayesian.py:24`](../flow_controller/domain/bayesian.py#L24). Configuration,
 dimensionality, bound validation and backward-compatible defaults are implemented
 by `SearchConfig` at
-[`bayesian.py:49`](../flow_controller/domain/bayesian.py#L49). Old experiment
+[`bayesian.py:50`](../flow_controller/domain/bayesian.py#L50). Old experiment
 files omit the two optimisation flags and therefore reopen as the original
 three-variable campaigns.
 
@@ -79,15 +94,18 @@ The order of the saved `point` array is:
 
 The optional coordinates appear only when their corresponding configuration
 flag is true. `SearchConfig.values()` validates and names this array at
-[`bayesian.py:122`](../flow_controller/domain/bayesian.py#L122), and
+[`bayesian.py:134`](../flow_controller/domain/bayesian.py#L134), and
 `SearchConfig.request()` converts it into a flow-calculation request at
-[`bayesian.py:134`](../flow_controller/domain/bayesian.py#L134).
+[`bayesian.py:146`](../flow_controller/domain/bayesian.py#L146).
 
 ### Creating a campaign
 
 In **New Bayesian experiment**:
 
-1. Enter the nominal/fixed power and stage-1 split.
+1. Choose **Minimise NO** or **Map NO + pressure**. For mapping, choose the
+   pressure response and **NO mapping weight (0–1)**. The default weight is 0.5;
+   it must be strictly between 0 and 1 so that both maps contribute. Enter the
+   nominal/fixed power and stage-1 split.
 2. Enter bounds for H2 fraction, stage-1 phi and overall phi.
 3. Select **Optimise thermal input** and/or **Optimise stage-1 fuel split** only
    when those variables should be searched.
@@ -103,9 +121,9 @@ In **New Bayesian experiment**:
 7. Confirm the reporting basis and the independently checked operating region.
 
 The dynamic dialog is implemented at
-[`qt_optimiser.py:41`](../flow_controller/ui/qt_optimiser.py#L41), with conversion
+[`qt_optimiser.py:332`](../flow_controller/ui/qt_optimiser.py#L332), with conversion
 from percentages to fractions at
-[`qt_optimiser.py:151`](../flow_controller/ui/qt_optimiser.py#L151).
+[`qt_optimiser.py:478`](../flow_controller/ui/qt_optimiser.py#L478).
 
 **Use current O₂** copies one reading, not a time average. Let the chosen
 baseline condition settle before using it. The reading must be fresh, real
@@ -113,13 +131,13 @@ baseline condition settle before using it. The reading must be fresh, real
 receiver logging enabled. If it fails these checks, the dialog shows an error
 and leaves the reference unchanged. The copy and its acquisition time are
 displayed by
-[`qt_optimiser.py:175`](../flow_controller/ui/qt_optimiser.py#L175), using the
+[`qt_optimiser.py:502`](../flow_controller/ui/qt_optimiser.py#L502), using the
 existing sample checks at
 [`mexa_controller.py:195`](../flow_controller/core/mexa_controller.py#L195).
 
 You can edit the copied value or click again before saving. The dialog passes
 the field into `reference_o2` (the reporting oxygen percentage for the campaign)
-at [`qt_optimiser.py:166`](../flow_controller/ui/qt_optimiser.py#L166). Saving fixes
+at [`qt_optimiser.py:493`](../flow_controller/ui/qt_optimiser.py#L493). Saving fixes
 this value for the campaign; later readings do not update it. The button sends
 no flow commands and performs no calibration; measured O2 still varies with
 each test condition.
@@ -127,8 +145,8 @@ each test condition.
 Here $d$ is the number of selected search variables, so it is 3, 4, or 5. The
 program requires at least $d+1$ completed initial points. This validation rule
 is implemented at
-[`bayesian.py:74`](../flow_controller/domain/bayesian.py#L74) and
-[`bayesian.py:77`](../flow_controller/domain/bayesian.py#L77). It is only a
+[`bayesian.py:86`](../flow_controller/domain/bayesian.py#L86) and
+[`bayesian.py:89`](../flow_controller/domain/bayesian.py#L89). It is only a
 validity floor, not a claim that $d+1$ tests fully
 characterise the response. Higher-dimensional searches normally need more
 initial measurements and a larger candidate pool.
@@ -354,19 +372,19 @@ $$
 $$
 
 The comparison is implemented at
-[`optimisation.py:926`](../flow_controller/core/optimisation.py#L926) to
-[`optimisation.py:930`](../flow_controller/core/optimisation.py#L930). The
+[`optimisation.py:1086`](../flow_controller/core/optimisation.py#L1086) to
+[`optimisation.py:1090`](../flow_controller/core/optimisation.py#L1090). The
 window requires at least three fresh flow passes and the configured duration;
 those checks are at
-[`optimisation.py:939`](../flow_controller/core/optimisation.py#L939) to
-[`optimisation.py:942`](../flow_controller/core/optimisation.py#L942) and
-[`optimisation.py:723`](../flow_controller/core/optimisation.py#L723) to
-[`optimisation.py:725`](../flow_controller/core/optimisation.py#L725).
+[`optimisation.py:1099`](../flow_controller/core/optimisation.py#L1099) to
+[`optimisation.py:1098`](../flow_controller/core/optimisation.py#L1098) and
+[`optimisation.py:874`](../flow_controller/core/optimisation.py#L874) to
+[`optimisation.py:876`](../flow_controller/core/optimisation.py#L876).
 
 The arithmetic mean of each flow is converted back into observed H2 fraction,
 stage-1 phi, overall phi and thermal power at
-[`optimisation.py:687`](../flow_controller/core/optimisation.py#L687) to
-[`optimisation.py:697`](../flow_controller/core/optimisation.py#L697). Here the
+[`optimisation.py:817`](../flow_controller/core/optimisation.py#L817) to
+[`optimisation.py:827`](../flow_controller/core/optimisation.py#L827). Here the
 subscript `obs` means reconstructed from the averaged measured flows. In
 particular,
 
@@ -375,9 +393,9 @@ x_{H2,obs}=\frac{\dot V_{H2,1}+\dot V_{H2,2}}
 {\dot V_{NH3,1}+\dot V_{NH3,2}+\dot V_{H2,1}+\dot V_{H2,2}}.
 $$
 
-Implemented at [`optimisation.py:690`](../flow_controller/core/optimisation.py#L690),
-[`optimisation.py:691`](../flow_controller/core/optimisation.py#L691), and
-[`optimisation.py:694`](../flow_controller/core/optimisation.py#L694). Observed
+Implemented at [`optimisation.py:820`](../flow_controller/core/optimisation.py#L820),
+[`optimisation.py:821`](../flow_controller/core/optimisation.py#L821), and
+[`optimisation.py:824`](../flow_controller/core/optimisation.py#L824). Observed
 Stage 1 fuel split is
 
 $$
@@ -385,14 +403,15 @@ s_{obs}=\frac{\dot V_{NH3,1}+\dot V_{H2,1}}
 {\dot V_{NH3,1}+\dot V_{H2,1}+\dot V_{NH3,2}+\dot V_{H2,2}},
 $$
 
-implemented at [`optimisation.py:700`](../flow_controller/core/optimisation.py#L700)
-to [`optimisation.py:707`](../flow_controller/core/optimisation.py#L707). The model
+implemented at [`optimisation.py:830`](../flow_controller/core/optimisation.py#L830)
+to [`optimisation.py:837`](../flow_controller/core/optimisation.py#L837). The model
 uses these observed values rather than assuming that requested values were
 reached exactly. `SearchConfig.observed_vector()` assembles the model input at
-[`bayesian.py:140`](../flow_controller/domain/bayesian.py#L140).
+[`bayesian.py:152`](../flow_controller/domain/bayesian.py#L152).
 
-The **objective** is the scalar quantity the optimiser minimises. Here it is
-raw dry NO corrected to a reference oxygen concentration. Let $NO_{raw}$ be
+In **Minimise NO** mode, the objective is raw dry NO corrected to a reference
+oxygen concentration. Mapping mode uses the same corrected NO as one of its
+two measured responses. Let $NO_{raw}$ be
 the uncorrected dry nitric-oxide concentration in ppm, $NO_{corr}$ the corrected
 concentration in ppm, $O_{2,meas}$ the measured dry oxygen concentration in
 volume %, and $O_{2,ref}$ the reporting reference in volume %. Then
@@ -409,15 +428,15 @@ calculation. The separate reporting constant is defined at
 [`gas_properties.py:21`](../flow_controller/domain/gas_properties.py#L21) and
 [`gas_properties.py:22`](../flow_controller/domain/gas_properties.py#L22), then
 imported by the optimiser at
-[`bayesian.py:18`](../flow_controller/domain/bayesian.py#L18) and
-[`bayesian.py:22`](../flow_controller/domain/bayesian.py#L22). The correction
+[`bayesian.py:19`](../flow_controller/domain/bayesian.py#L19) and
+[`bayesian.py:23`](../flow_controller/domain/bayesian.py#L23). The correction
 factor is calculated at
-[`bayesian.py:179`](../flow_controller/domain/bayesian.py#L179), and applied at
-[`bayesian.py:183`](../flow_controller/domain/bayesian.py#L183). If a manual NO
+[`bayesian.py:191`](../flow_controller/domain/bayesian.py#L191), and applied at
+[`bayesian.py:195`](../flow_controller/domain/bayesian.py#L195). If a manual NO
 **standard error of the mean (SEM)** is supplied, it estimates the uncertainty
 of the sample mean in ppm; the same correction factor is applied to it at
-[`bayesian.py:180`](../flow_controller/domain/bayesian.py#L180) and
-[`bayesian.py:183`](../flow_controller/domain/bayesian.py#L183). O2
+[`bayesian.py:192`](../flow_controller/domain/bayesian.py#L192) and
+[`bayesian.py:195`](../flow_controller/domain/bayesian.py#L195). O2
 uncertainty and systematic analyser/calibration bias are not propagated. The
 objective is corrected NO concentration, not total NOx, NO2, NH3 slip, N2O,
 combustion efficiency or emissions per unit energy.
@@ -432,9 +451,138 @@ channel into total NOx or a mass-per-energy emission factor.
 
 Window validation recomputes the observed condition from saved mean flows and
 checks all selected-variable bounds at
-[`optimisation.py:739`](../flow_controller/core/optimisation.py#L739) to
-[`optimisation.py:822`](../flow_controller/core/optimisation.py#L822). This makes
+[`optimisation.py:890`](../flow_controller/core/optimisation.py#L890) to
+[`optimisation.py:943`](../flow_controller/core/optimisation.py#L943). This makes
 the saved flow record the source of the model coordinates.
+
+### LabVIEW/TDMS capture workflow
+
+Use the LabVIEW VI's existing recording controls and UDP `log`/`stop`
+messages. The normal workflow requires no LabVIEW code changes, JSON messages,
+exported request IDs or additional manifest files.
+
+1. Install TDMS support in the flow application's Python environment if needed:
+
+   ```powershell
+   & "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements-pressure.txt
+   ```
+
+2. Create a **Map NO + pressure** campaign. In **Current test**, open
+   **TDMS source…**, choose the recording folder, inspect a representative
+   `.tdms` file, and select its time-domain pressure channel. The folder must
+   be readable by the flow PC; the search does not include subfolders.
+3. Declare the units and calibration of the values returned by npTDMS. Set
+   **Known pressure units** to Pa or kPa, or enter a custom scale, then check
+   the offset and enter the calibration identifier. Conversion is
+   `pressure_pa = stored_value × scale_pa_per_unit + offset_pa`.
+   npTDMS has already applied any NI scaling represented in the file. A group
+   named `converted` does not establish its physical units, and `FFT` channels
+   are spectra rather than eligible time-domain waveforms.
+4. Set **Minimum pressure recording (s)**, independently of the NO averaging
+   duration. Its default is 1 s. Review the spectral band, segment length,
+   overlap and any known clipping bounds. The default segment is 4096 samples
+   with 2048-sample overlap; it must fit the pressure record. Use waveform
+   timing where available. Enable the trigger-time fallback only if LabVIEW
+   writes one new recording per trigger and the file lacks a start timestamp.
+5. Suggest a test, load its target fields, review and apply the flows through
+   the normal controls, and settle the burner. Start the LabVIEW UDP listener
+   at `127.0.0.1:61557`. Confirm pilot off and settled burner/flows. For live
+   NO/O2, enable automatic MEXA capture and receiver logging, and select the
+   applicable response calibration.
+6. Click **Arm LabVIEW trigger**, then start the LabVIEW recording that sends
+   `log`. Arming snapshots the folder so automatic selection can distinguish
+   a new or changed TDMS file. Stop recording in LabVIEW with its existing
+   `stop` command after meeting the configured pressure duration.
+7. Keep the operating condition steady after `stop`. The flow application
+   continues collecting until the response delay, minimum NO duration and
+   fresh flow/MEXA coverage are satisfied. It then saves the measurement
+   window and processes the matching TDMS file in a background worker.
+8. Review the pressure result and saved NO/O2 averages, confirm their
+   uncorrected dry basis, and click **Save result**. Manual NO/O2 capture
+   requires entering the averages for the recorded window. A mapping test
+   cannot be completed without valid pressure data. Attaching pressure does
+   not automatically save the NO result or change flows.
+
+Without local arming, `log` and `stop` retain their ordinary flow-CSV logging
+behaviour. In **Minimise NO** mode, **Start window** and **Finish window** remain
+available for the existing manual or live NO/O2 procedure. The mapping UI uses
+the armed trigger route to record the physical pressure interval.
+
+The trigger and completion paths are `arm_labview()`,
+`_legacy_labview_command()`, `_legacy_ready()` and `finish_window()` in
+[`optimiser_controller.py`](../flow_controller/core/optimiser_controller.py).
+Here `legacy` names the existing plain-text LabVIEW command format; this is the
+current TDMS workflow.
+
+### Pressure interval, NO delay and file association
+
+Let $t_0$ be receipt of `log`, $t_1$ receipt of `stop`, $d$ the selected live
+response delay, and $W$ the campaign's minimum NO averaging duration, all in
+seconds on their corresponding clocks. The planned collection deadline is
+
+$$
+t_{end,min}=\max(t_1+d,\ t_0+d+W).
+$$
+
+Completion may occur later because the flow window and, for live capture, at
+least three fresh MEXA records must provide the required time coverage. The
+NO average uses eligible analyser records acquired from $t_0+d$ through the
+final flow timestamp. Flow statistics cover the full capture from the initial
+poll through completion. Pressure selection covers the physical $t_0$–$t_1$
+recording interval, with a 2 s association tolerance, rather than the later
+NO collection. Manual NO/O2 mode uses zero automatic response delay.
+
+For example, a 2 s pressure recording, 10 s selected response delay and 30 s
+NO averaging minimum require at least about 40 s from `log`, or 38 s after
+`stop`, before sufficient sample coverage can finish the capture. A short
+pressure recording can therefore accompany a longer NO window only while
+the burner remains at the same condition. UDP receipt times and the
+association tolerance do not provide hardware synchronisation. The one-hour
+capture limit still applies; an excessive delay plus averaging duration can
+reach that limit before completion.
+
+Automatic file discovery waits for a new or changed file to remain unchanged
+for 2 s, with a default 60 s search timeout after NO collection finishes.
+It validates channel, timing, calibration and file completeness. A single
+recording that matches the trigger interval can be used whole; a continuous
+waveform is cropped to the trigger interval. File modification time is never
+used as the waveform's start timestamp. Missing, ambiguous, incomplete or
+changed recordings are reported rather than silently replaced by the newest
+file. After the worker finishes, **Choose TDMS file…** retries with the
+operator-selected recording and the same waveform checks.
+
+The saved pressure summary retains the source path and SHA-256, selected
+sample offset, original sample count, timing source and trigger association.
+The source TDMS file is not modified. `find_tdms_capture()` and
+`process_tdms_capture()` implement these rules in
+[`tdms_capture.py`](../flow_controller/domain/tdms_capture.py).
+
+### Pressure response definitions
+
+For calibrated samples $p_i$ in Pa, the processor removes the complete selected
+record's mean, giving $p'_i=p_i-\bar p$. The available responses are:
+
+| UI response | Saved field | Calculation |
+| --- | --- | --- |
+| RMS | `rms_pa` | $\sqrt{N^{-1}\sum_i (p'_i)^2}$, in Pa. |
+| Peak excursion | `peak_abs_pa` | $\max_i \lvert p'_i\rvert$, in Pa; not peak-to-peak. |
+| Dominant spectral amplitude | `dominant_amplitude_pa` | Square root of the strongest in-band Welch spectrum bin, in Pa RMS. |
+
+Welch processing uses periodic flattop windows, constant segment detrending
+and `scaling="spectrum"`. The frequency of the strongest bin is stored as
+`dominant_frequency_hz`. The selected frequency band restricts that bin
+search; it does not band-pass the RMS or peak calculation. Optional
+`rms_window_sd_pa` is the population SD of RMS values from complete,
+nonoverlapping segments of the mean-removed signal. It is zero with fewer
+than two segments and is not a standard error for the pressure mean.
+
+Nonfinite samples and samples touching declared clipping limits are rejected.
+Omitting clipping bounds leaves clipping unchecked. The first attached
+pressure result fixes a comparison signature containing sample rate, channel,
+calibration identifier, units and analysis settings. Record duration is
+excluded from that signature. These calculations and checks are implemented
+by `pressure_metrics()` and `pressure_signature()` in
+[`pressure.py`](../flow_controller/domain/pressure.py).
 
 ## 5. NO response-time calibration
 
@@ -450,8 +598,8 @@ burner. This distinction is stated by the detector itself at
 [`analyser_response.py:1`](../flow_controller/domain/analyser_response.py#L1) to
 [`analyser_response.py:5`](../flow_controller/domain/analyser_response.py#L5)
 and in the response-test interface at
-[`qt_optimiser.py:326`](../flow_controller/ui/qt_optimiser.py#L326) to
-[`qt_optimiser.py:334`](../flow_controller/ui/qt_optimiser.py#L334).
+[`qt_optimiser.py:686`](../flow_controller/ui/qt_optimiser.py#L686) to
+[`qt_optimiser.py:701`](../flow_controller/ui/qt_optimiser.py#L701).
 
 Gas-analyser studies distinguish transport delay from analyser rise time and
 show that sample tubing, connectors, internal gas exchange and acquisition
@@ -483,11 +631,11 @@ received MEXA audit log. Then use the **NO response time** tab:
    commands B, confirms the B flows and detects the final NO plateau.
 
 The buttons and result panel are created at
-[`qt_optimiser.py:338`](../flow_controller/ui/qt_optimiser.py#L338) to
-[`qt_optimiser.py:376`](../flow_controller/ui/qt_optimiser.py#L376), and the
+[`qt_optimiser.py:898`](../flow_controller/ui/qt_optimiser.py#L898) to
+[`qt_optimiser.py:936`](../flow_controller/ui/qt_optimiser.py#L936), and the
 confirmation dialog is at
-[`qt_optimiser.py:378`](../flow_controller/ui/qt_optimiser.py#L378) to
-[`qt_optimiser.py:393`](../flow_controller/ui/qt_optimiser.py#L393).
+[`qt_optimiser.py:938`](../flow_controller/ui/qt_optimiser.py#L938) to
+[`qt_optimiser.py:953`](../flow_controller/ui/qt_optimiser.py#L953).
 
 A stored condition is a snapshot of settled target flows, measured flows,
 controller assignments, capture time and, when available, the corresponding
@@ -496,8 +644,8 @@ at [`analyser_response_controller.py:106`](../flow_controller/core/analyser_resp
 to [`analyser_response_controller.py:142`](../flow_controller/core/analyser_response_controller.py#L142).
 Storing either endpoint clears selection of an earlier calibration because that
 calibration belongs to the old A-to-B transition; persistence is implemented at
-[`optimisation.py:153`](../flow_controller/core/optimisation.py#L153) to
-[`optimisation.py:161`](../flow_controller/core/optimisation.py#L161).
+[`optimisation.py:167`](../flow_controller/core/optimisation.py#L167) to
+[`optimisation.py:175`](../flow_controller/core/optimisation.py#L175).
 
 Start is refused unless both conditions use the same assignments, at least one
 target differs, the current rig has returned to A, live flow data are fresh and
@@ -514,12 +662,12 @@ spanning at least 15 s. The command then uses the existing
 to [`analyser_response_controller.py:264`](../flow_controller/core/analyser_response_controller.py#L264).
 That path retains the controller assignment, command ceiling, zero lock and
 configured ramp behaviour at
-[`session.py:1392`](../flow_controller/core/session.py#L1392) to
-[`session.py:1429`](../flow_controller/core/session.py#L1429). The final queue
+[`session.py:1396`](../flow_controller/core/session.py#L1396) to
+[`session.py:1433`](../flow_controller/core/session.py#L1433). The final queue
 also rechecks the ceiling and blocks nonzero commands while an operator or
 watchdog zero lock is active at
-[`session.py:1335`](../flow_controller/core/session.py#L1335) to
-[`session.py:1360`](../flow_controller/core/session.py#L1360).
+[`session.py:1339`](../flow_controller/core/session.py#L1339) to
+[`session.py:1364`](../flow_controller/core/session.py#L1364).
 
 This is only a sharp step when the affected line is permitted to move directly.
 If a ramp rate is configured, the software applies that ramp; if ramping is
@@ -528,8 +676,8 @@ step. The displayed policy is assembled at
 [`analyser_response_controller.py:160`](../flow_controller/core/analyser_response_controller.py#L160)
 to [`analyser_response_controller.py:181`](../flow_controller/core/analyser_response_controller.py#L181),
 and configured ramps are executed at
-[`session.py:2029`](../flow_controller/core/session.py#L2029) to
-[`session.py:2062`](../flow_controller/core/session.py#L2062). A ramped test
+[`session.py:2023`](../flow_controller/core/session.py#L2023) to
+[`session.py:2056`](../flow_controller/core/session.py#L2056). A ramped test
 therefore includes the commanded ramp duration and is not equivalent to an
 instantaneous-input response test.
 
@@ -768,27 +916,28 @@ standard.
 
 ### Use in future optimiser windows
 
-A successful run is selected for that campaign. For a future **live** MEXA
-window, total observation time is
+A successful run is selected for that campaign. For a **live** MEXA window
+started with **Start window**, the minimum planned observation time is
 
 $$
 t_{total}=t_{pre-delay}+t_{averaging},
 $$
 
 where $t_{pre-delay}$ is the selected response calibration's recommended delay
-and $t_{averaging}$ is the campaign's configured averaging-window duration. The
-averaging duration is not lengthened or replaced. These properties are calculated
-at [`optimisation.py:205`](../flow_controller/core/optimisation.py#L205) to
-[`optimisation.py:219`](../flow_controller/core/optimisation.py#L219).
+and $t_{averaging}$ is the campaign's configured minimum averaging duration.
+Fresh-sample coverage and the operator's **Finish window** action determine
+the actual end. These properties are calculated
+at [`optimisation.py:219`](../flow_controller/core/optimisation.py#L219) to
+[`optimisation.py:233`](../flow_controller/core/optimisation.py#L233).
 
-When a live window starts, the controller waits through $t_{pre-delay}$ before
+On this Start/Finish path, the controller waits through $t_{pre-delay}$ before
 constructing `LiveWindow` and `MeasurementWindow`. It rechecks the MEXA link and
 flow tracking throughout the wait, then starts the unchanged averaging window.
 This sequence is implemented at
-[`optimiser_controller.py:242`](../flow_controller/core/optimiser_controller.py#L242)
-to [`optimiser_controller.py:282`](../flow_controller/core/optimiser_controller.py#L282)
-and [`optimiser_controller.py:352`](../flow_controller/core/optimiser_controller.py#L352)
-to [`optimiser_controller.py:372`](../flow_controller/core/optimiser_controller.py#L372).
+[`optimiser_controller.py:651`](../flow_controller/core/optimiser_controller.py#L651)
+to [`optimiser_controller.py:693`](../flow_controller/core/optimiser_controller.py#L693)
+and [`optimiser_controller.py:808`](../flow_controller/core/optimiser_controller.py#L808)
+to [`optimiser_controller.py:828`](../flow_controller/core/optimiser_controller.py#L828).
 
 Transient samples received during the delay remain in the receiver's JSONL and
 CSV audit logs, whose write path is at
@@ -800,8 +949,17 @@ delay. Its accepted samples and arithmetic channel means are implemented at
 [`records.py:319`](../mexa_bridge/records.py#L319). Manual-input windows
 do not use the automatic delay because `start_window()` assigns zero delay unless
 live capture is selected at
-[`optimiser_controller.py:242`](../flow_controller/core/optimiser_controller.py#L242)
-to [`optimiser_controller.py:266`](../flow_controller/core/optimiser_controller.py#L266).
+[`optimiser_controller.py:651`](../flow_controller/core/optimiser_controller.py#L651)
+to [`optimiser_controller.py:677`](../flow_controller/core/optimiser_controller.py#L677).
+
+The armed LabVIEW path starts flow capture at `log` and retains it through the
+post-`stop` collection. It filters the saved NO/O2 average to exclude the
+initial delay, then finishes automatically once its deadline and sample
+coverage are satisfied. Its timing is recorded under `labview_capture`,
+including `delay_s`, `no_start` and `no_end`. See
+[pressure interval and NO delay](#pressure-interval-no-delay-and-file-association)
+for the deadline equation; do not apply the Start/Finish timing fields to that
+physical pressure interval.
 
 The campaign JSON retains conditions A and B, all retained response runs, the
 selected-run ID, criteria, timings, baseline/final statistics, source ID,
@@ -809,16 +967,16 @@ receiver-log provenance and accepted raw NO samples. Record construction and
 persistence are at
 [`analyser_response_controller.py:328`](../flow_controller/core/analyser_response_controller.py#L328)
 to [`analyser_response_controller.py:366`](../flow_controller/core/analyser_response_controller.py#L366)
-and [`optimisation.py:168`](../flow_controller/core/optimisation.py#L168) to
-[`optimisation.py:210`](../flow_controller/core/optimisation.py#L210). Each live
+and [`optimisation.py:182`](../flow_controller/core/optimisation.py#L182) to
+[`optimisation.py:224`](../flow_controller/core/optimisation.py#L224). Each live
 trial window also stores `pre_window_delay_s`, `response_run_id` and
 `total_observation_s` at
-[`optimiser_controller.py:306`](../flow_controller/core/optimiser_controller.py#L306)
-to [`optimiser_controller.py:322`](../flow_controller/core/optimiser_controller.py#L322).
+[`optimiser_controller.py:718`](../flow_controller/core/optimiser_controller.py#L718)
+to [`optimiser_controller.py:749`](../flow_controller/core/optimiser_controller.py#L749).
 CSV export includes those fields plus the MEXA source, sequence range, sample
 count, channel SDs and receiver audit-log path at
-[`optimisation.py:278`](../flow_controller/core/optimisation.py#L278) to
-[`optimisation.py:391`](../flow_controller/core/optimisation.py#L391).
+[`optimisation.py:382`](../flow_controller/core/optimisation.py#L382) to
+[`optimisation.py:512`](../flow_controller/core/optimisation.py#L512).
 
 ### Rejection, timeout and cancellation
 
@@ -872,8 +1030,8 @@ automatic return-to-A command and does not zero the rig. This avoids introducing
 an unreviewed recovery transition; it also means the operator remains responsible
 for the physical condition after a partial or completed A-to-B move. The warning
 is explicit in the start dialog at
-[`qt_optimiser.py:384`](../flow_controller/ui/qt_optimiser.py#L384) to
-[`qt_optimiser.py:393`](../flow_controller/ui/qt_optimiser.py#L393), and cancel
+[`qt_optimiser.py:944`](../flow_controller/ui/qt_optimiser.py#L944) to
+[`qt_optimiser.py:953`](../flow_controller/ui/qt_optimiser.py#L953), and cancel
 behaviour is implemented at
 [`analyser_response_controller.py:403`](../flow_controller/core/analyser_response_controller.py#L403)
 to [`analyser_response_controller.py:416`](../flow_controller/core/analyser_response_controller.py#L416).
@@ -894,8 +1052,8 @@ Owen analysed randomized scrambling of Sobol' and related digital nets
 the points as a finite feasible candidate pool, then applying the centre and
 maximin rules below, is this program's experimental-design policy.
 This rounding and generation are implemented at
-[`bayesian.py:237`](../flow_controller/domain/bayesian.py#L237) and
-[`bayesian.py:238`](../flow_controller/domain/bayesian.py#L238).
+[`bayesian.py:357`](../flow_controller/domain/bayesian.py#L357) and
+[`bayesian.py:358`](../flow_controller/domain/bayesian.py#L358).
 
 Let $u=(u_1,\ldots,u_d)$ be a normalized candidate, so each $u_j$ is a
 dimensionless coordinate from 0 to 1. The **unit hypercube** is the set of all
@@ -908,9 +1066,9 @@ x_j=l_j+u_j(h_j-l_j),
 $$
 
 implemented by forming the lower-bound and span arrays at
-[`bayesian.py:235`](../flow_controller/domain/bayesian.py#L235) and
-[`bayesian.py:236`](../flow_controller/domain/bayesian.py#L236), then applying
-the equation at [`bayesian.py:253`](../flow_controller/domain/bayesian.py#L253).
+[`bayesian.py:355`](../flow_controller/domain/bayesian.py#L355) and
+[`bayesian.py:356`](../flow_controller/domain/bayesian.py#L356), then applying
+the equation at [`bayesian.py:381`](../flow_controller/domain/bayesian.py#L381).
 
 Candidates that violate a current controller flow ceiling are removed. Already
 tried points, including invalid trials, are also removed so that the optimiser
@@ -926,32 +1084,34 @@ Here $u^*$ is the selected candidate, $T$ is the set of normalized previously
 tried points, $v$ is one member of $T$, and $\lVert u-v\rVert_2$ is Euclidean
 distance: the square root of the sum of squared coordinate differences.
 Distances to tried points are calculated at
-[`bayesian.py:282`](../flow_controller/domain/bayesian.py#L282), and the largest
+[`bayesian.py:419`](../flow_controller/domain/bayesian.py#L419), and the largest
 minimum distance is selected at
-[`bayesian.py:283`](../flow_controller/domain/bayesian.py#L283). For the very
+[`bayesian.py:420`](../flow_controller/domain/bayesian.py#L420). For the very
 first point, distance from the centre vector $(0.5,\ldots,0.5)$ is minimised at
-[`bayesian.py:285`](../flow_controller/domain/bayesian.py#L285). Invalid tests
+[`bayesian.py:422`](../flow_controller/domain/bayesian.py#L422). Invalid tests
 occupy their attempted location but are never assigned a fabricated emissions
 result and never enter the Gaussian-process fit.
 
 This space-filling rule is used while the number of completed tests is less
 than the configured initial-design size. During that period the program does
 not fit the Matérn GP or calculate NEI. The branch and returned method are
-implemented at [`bayesian.py:280`](../flow_controller/domain/bayesian.py#L280)
-to [`bayesian.py:286`](../flow_controller/domain/bayesian.py#L286). The initial
+implemented at [`bayesian.py:413`](../flow_controller/domain/bayesian.py#L413)
+to [`bayesian.py:423`](../flow_controller/domain/bayesian.py#L423). The initial
 tests therefore establish coverage of the search space before the optimiser
 has enough recordings to make model-based proposals.
 
 The configured pool size is rounded upward to the next power of two for Sobol
-generation. Once completed data exist, 128 extra candidates are sampled near
-the best observed point. A denser pool provides better numerical coverage but
+generation. In NO minimisation mode, once completed data exist, 128 extra
+candidates are sampled near the best observed point. Mapping uses the Sobol
+pool without this concentration around the lowest-NO observation. A denser pool provides better numerical coverage but
 does not add experimental information.
 
 ## 7. Gaussian-process surrogate
 
 A **Gaussian process (GP) surrogate** is a probability model over possible
 response functions. It supplies a predicted corrected NO and uncertainty at
-unmeasured inputs. After the configured number of completed initial tests, the
+unmeasured inputs. This section describes the NO minimisation model; mapping
+fits two independent response models as described below. After the configured number of completed initial tests, the
 program normalises every selected input coordinate. If $x_{ij}$ is the physical
 value of variable $j$ in completed test $i$, then
 
@@ -968,8 +1128,8 @@ papers do not establish the physical safety or validity of this search region.
 Williams and Rasmussen give the standard GP conditioning equations for
 predictive mean and variance in their Eqs. 1–2 [[R10](#ref-r10)].
 
-Implemented at [`bayesian.py:289`](../flow_controller/domain/bayesian.py#L289)
-and [`bayesian.py:290`](../flow_controller/domain/bayesian.py#L290).
+Implemented at [`bayesian.py:426`](../flow_controller/domain/bayesian.py#L426)
+and [`bayesian.py:455`](../flow_controller/domain/bayesian.py#L455).
 
 Let $y_i$ be corrected NO for test $i$, in ppm; $\bar y$ its arithmetic mean;
 and $s_y=\max(\operatorname{std}(y),1\ \mathrm{ppm})$ its output scale. The
@@ -980,10 +1140,10 @@ $$
 $$
 
 The mean and scale are calculated at
-[`bayesian.py:291`](../flow_controller/domain/bayesian.py#L291) and
-[`bayesian.py:292`](../flow_controller/domain/bayesian.py#L292), and the
+[`bayesian.py:456`](../flow_controller/domain/bayesian.py#L456) and
+[`bayesian.py:457`](../flow_controller/domain/bayesian.py#L457), and the
 standardization is applied during fitting at
-[`bayesian.py:300`](../flow_controller/domain/bayesian.py#L300).
+[`bayesian.py:465`](../flow_controller/domain/bayesian.py#L465).
 
 A **kernel** is the GP covariance function: it specifies how strongly two input
 points are statistically related. The surrogate uses a constant-amplitude
@@ -999,8 +1159,8 @@ fitted positive covariance amplitude; $r$ is their scaled distance;
 $\sigma_w$ is the fitted standard deviation of independent residual observation
 noise; and $\delta_{u,u'}$ is 1 when its two arguments refer to the same
 observation and 0 otherwise. The kernel classes and numerical bounds are
-selected at [`bayesian.py:294`](../flow_controller/domain/bayesian.py#L294) and
-[`bayesian.py:295`](../flow_controller/domain/bayesian.py#L295).
+selected at [`bayesian.py:459`](../flow_controller/domain/bayesian.py#L459) and
+[`bayesian.py:460`](../flow_controller/domain/bayesian.py#L460).
 
 Snoek, Larochelle and Adams give the ARD Matérn-5/2 covariance in this form in
 their Section 3.1 and Eq. 5, and motivate it as a less extremely smooth
@@ -1023,8 +1183,8 @@ $$
 Here $\ell_j$ is the positive, dimensionless length scale for variable $j$.
 There is one $\ell_j$ per selected variable because the code passes an array of
 $d$ initial scales to `Matern` at
-[`bayesian.py:294`](../flow_controller/domain/bayesian.py#L294) and
-[`bayesian.py:295`](../flow_controller/domain/bayesian.py#L295). A short length
+[`bayesian.py:459`](../flow_controller/domain/bayesian.py#L459) and
+[`bayesian.py:460`](../flow_controller/domain/bayesian.py#L460). A short length
 scale permits rapid variation along that coordinate; a long fitted scale
 indicates a smoother or weakly identified effect over the declared range.
 
@@ -1050,8 +1210,8 @@ condition in $X$; $\boldsymbol{\beta}$ is the fitted vector of observation
 weights stored as `gp.alpha_` (the scikit-learn attribute name); and $\mu(u_*)$
 is the GP's posterior mean of the standardized corrected-NO response. This
 calculation is implemented at
-[`bayesian.py:190`](../flow_controller/domain/bayesian.py#L190) to
-[`bayesian.py:193`](../flow_controller/domain/bayesian.py#L193).
+[`bayesian.py:202`](../flow_controller/domain/bayesian.py#L202) to
+[`bayesian.py:205`](../flow_controller/domain/bayesian.py#L205).
 
 The candidate's latent posterior variance is
 
@@ -1063,9 +1223,9 @@ where $\sigma^2(u_*)$ is uncertainty about the underlying noise-free response;
 $k(u_*,u_*)$ is the fitted signal-kernel variance before conditioning on the
 data; $v_*$ is the triangular-solve vector produced from the training
 covariance; and the superscript $T$ denotes vector transpose. The triangular
-solve is at [`bayesian.py:192`](../flow_controller/domain/bayesian.py#L192), and the
+solve is at [`bayesian.py:204`](../flow_controller/domain/bayesian.py#L204), and the
 candidate variances are calculated at
-[`bayesian.py:197`](../flow_controller/domain/bayesian.py#L197). Thus the GP,
+[`bayesian.py:209`](../flow_controller/domain/bayesian.py#L209). Thus the GP,
 rather than the Matérn covariance alone, produces the two quantities used by
 the acquisition calculation: predicted mean $\mu(u_*)$ and latent standard
 deviation $\sigma(u_*)=\sqrt{\sigma^2(u_*)}$.
@@ -1078,12 +1238,15 @@ $$
 $$
 
 where $\alpha_i$ is the diagonal variance added for observation $i$. The SEM is
-divided by $s_y$ at [`bayesian.py:293`](../flow_controller/domain/bayesian.py#L293),
+divided by $s_y$ at [`bayesian.py:458`](../flow_controller/domain/bayesian.py#L458),
 then squared and given the $10^{-8}$ numerical floor at
-[`bayesian.py:296`](../flow_controller/domain/bayesian.py#L296). The separate
+[`bayesian.py:461`](../flow_controller/domain/bayesian.py#L461). The separate
 `WhiteKernel` fits residual noise not supplied by the per-test SEM values.
 
 ## 8. Noisy expected improvement
+
+This acquisition rule applies to **Minimise NO**. **Map NO + pressure** uses
+the variance-reduction rule at the end of this section.
 
 **Expected improvement (EI)** scores a candidate by the expected amount that
 its objective will beat the current best value. Ordinary EI treats the best
@@ -1123,10 +1286,10 @@ data; a **baseline** is a previously measured input used to define the best
 value; and $K_{BB}$ is the latent covariance matrix between all baseline
 points. The implementation deliberately selects only the non-white-noise part
 of the fitted kernel at
-[`bayesian.py:189`](../flow_controller/domain/bayesian.py#L189). The posterior
+[`bayesian.py:201`](../flow_controller/domain/bayesian.py#L201). The posterior
 mean and baseline/candidate covariance blocks are assembled at
-[`bayesian.py:190`](../flow_controller/domain/bayesian.py#L190) to
-[`bayesian.py:198`](../flow_controller/domain/bayesian.py#L198).
+[`bayesian.py:202`](../flow_controller/domain/bayesian.py#L202) to
+[`bayesian.py:210`](../flow_controller/domain/bayesian.py#L210).
 
 For numerical stability the implementation adds **jitter**, a very small
 positive value $\epsilon$, to the covariance diagonal:
@@ -1138,8 +1301,8 @@ $$
 
 where $I$ is the identity matrix and $(K_{BB})_{ii}$ is baseline variance $i$.
 The jitter and Cholesky factorization are implemented at
-[`bayesian.py:206`](../flow_controller/domain/bayesian.py#L206) and
-[`bayesian.py:207`](../flow_controller/domain/bayesian.py#L207).
+[`bayesian.py:218`](../flow_controller/domain/bayesian.py#L218) and
+[`bayesian.py:219`](../flow_controller/domain/bayesian.py#L219).
 
 **Monte Carlo integration** approximates an expectation by averaging random
 draws. For each of $M=128$ draws, the program samples one plausible latent
@@ -1153,9 +1316,9 @@ Here $f_B^{(m)}$ is draw $m$ of all baseline latent values; $\mathcal N$ denotes
 a multivariate normal distribution; $\mu_B$ is the baseline posterior-mean
 vector; and $\widetilde K_{BB}$ is the jittered posterior covariance. The draws
 are formed from its Cholesky factor at
-[`bayesian.py:207`](../flow_controller/domain/bayesian.py#L207) to
-[`bayesian.py:208`](../flow_controller/domain/bayesian.py#L208). The default
-$M=128$ is declared at [`bayesian.py:201`](../flow_controller/domain/bayesian.py#L201).
+[`bayesian.py:219`](../flow_controller/domain/bayesian.py#L219) to
+[`bayesian.py:220`](../flow_controller/domain/bayesian.py#L220). The default
+$M=128$ is declared at [`bayesian.py:213`](../flow_controller/domain/bayesian.py#L213).
 
 Each draw is a **fantasy**, a plausible noise-free history used only inside the
 acquisition calculation. The program conditions the candidate distribution on
@@ -1169,8 +1332,8 @@ $$
 where $\mu_c$ is the candidate posterior mean before conditioning and $K_{Bc}$
 is covariance between baseline points and candidate $c$. The linear solve and
 conditional mean are implemented at
-[`bayesian.py:209`](../flow_controller/domain/bayesian.py#L209) and
-[`bayesian.py:210`](../flow_controller/domain/bayesian.py#L210). The candidate's
+[`bayesian.py:221`](../flow_controller/domain/bayesian.py#L221) and
+[`bayesian.py:222`](../flow_controller/domain/bayesian.py#L222). The candidate's
 conditional standard deviation is
 
 $$
@@ -1178,7 +1341,7 @@ $$
 $$
 
 where $K_{cc}$ is the candidate latent variance and $K_{cB}=K_{Bc}^T$.
-Implemented at [`bayesian.py:211`](../flow_controller/domain/bayesian.py#L211),
+Implemented at [`bayesian.py:223`](../flow_controller/domain/bayesian.py#L223),
 with a $10^{-12}$ lower variance floor to avoid division by zero.
 
 Let the fantasy's best, meaning lowest, latent baseline be
@@ -1192,8 +1355,8 @@ z^{(m)}=\frac{\Delta^{(m)}}{\sigma_c}.
 $$
 
 These two quantities are implemented at
-[`bayesian.py:212`](../flow_controller/domain/bayesian.py#L212) and
-[`bayesian.py:213`](../flow_controller/domain/bayesian.py#L213). The conditional
+[`bayesian.py:224`](../flow_controller/domain/bayesian.py#L224) and
+[`bayesian.py:225`](../flow_controller/domain/bayesian.py#L225). The conditional
 analytic expected improvement for minimisation is
 
 $$
@@ -1207,8 +1370,8 @@ argument, and $\varphi$ is the standard-normal probability density function
 (PDF). This closed-form expression is the minimisation form of Eq. 15 in Jones,
 Schonlau and Welch [[R7](#ref-r7)]. The `ndtr` call
 implements $\Phi$ and the exponential term implements
-$\varphi$ at [`bayesian.py:204`](../flow_controller/domain/bayesian.py#L204) and
-[`bayesian.py:214`](../flow_controller/domain/bayesian.py#L214). The noisy
+$\varphi$ at [`bayesian.py:216`](../flow_controller/domain/bayesian.py#L216) and
+[`bayesian.py:226`](../flow_controller/domain/bayesian.py#L226). The noisy
 expected improvement is the Monte Carlo mean
 
 $$
@@ -1216,7 +1379,7 @@ NEI=\frac1M\sum_{m=1}^{M}EI^{(m)},\qquad M=128.
 $$
 
 The mean and non-negative clipping are implemented at
-[`bayesian.py:215`](../flow_controller/domain/bayesian.py#L215). The feasible
+[`bayesian.py:227`](../flow_controller/domain/bayesian.py#L227). The feasible
 candidate with the largest NEI is selected:
 
 $$
@@ -1227,13 +1390,13 @@ where $u_{\mathrm{next}}$ is the next normalized operating condition;
 $\mathcal F$ is the finite set of feasible, untried candidates; $u$ is one
 candidate in that set; and $\arg\max$ means the candidate at which NEI is
 largest. This selection is implemented at
-[`bayesian.py:301`](../flow_controller/domain/bayesian.py#L301) and
-[`bayesian.py:302`](../flow_controller/domain/bayesian.py#L302). The displayed
+[`bayesian.py:466`](../flow_controller/domain/bayesian.py#L466) and
+[`bayesian.py:467`](../flow_controller/domain/bayesian.py#L467). The displayed
 `predicted_no` is the latent posterior mean, `latent_sd` ($\sigma$ in the UI
 description) is its latent standard deviation, and `expected_improvement` is
 NEI. All three are converted from the standardized model scale back to ppm at
-[`bayesian.py:314`](../flow_controller/domain/bayesian.py#L314) to
-[`bayesian.py:319`](../flow_controller/domain/bayesian.py#L319).
+[`bayesian.py:479`](../flow_controller/domain/bayesian.py#L479) to
+[`bayesian.py:484`](../flow_controller/domain/bayesian.py#L484).
 
 Consequently, the program does not select the largest predicted NO, the
 largest Matérn-kernel value, the most distant condition, or necessarily the
@@ -1241,19 +1404,80 @@ lowest posterior-mean NO. After initialization, it selects the feasible
 candidate with the largest NEI because that score represents the best current
 balance between possible lower NO and uncertainty.
 
+### Mapping acquisition and operating-space maps
+
+After the completed initial design, **Map NO + pressure** fits two independent
+Matérn-5/2 Gaussian processes: one for corrected dry NO and one for the chosen
+pressure response. Both use measured flow-derived input coordinates. Each
+response is centred and scaled by its own sample-set standard deviation
+(`ddof=0`); a constant response uses `max(abs(mean), 1)` as its scale. This
+differs from the NO-only fit's minimum scale of 1 ppm. Optional corrected NO
+SEM supplies known observation variance. Pressure observation noise is fitted;
+block-RMS spread is not treated as a pressure SEM. The implementation is
+`_fit_mapping_models()` in [`bayesian.py`](../flow_controller/domain/bayesian.py).
+
+The candidate score measures the fractional reduction in average latent
+variance across a common reference set. For response $j$, let $C_j(r,x)$ be
+the fitted latent posterior covariance between reference point $r$ and
+candidate $x$, $v_j(x)$ its latent variance, and $\sigma^2_{n,j}$ the fitted
+white-noise variance, all in that model's standardised units. The implemented
+score is
+
+$$
+R_j(x)=
+\frac{\frac{1}{M}\sum_{r\in\mathcal R} C_j(r,x)^2}
+{\left(v_j(x)+\sigma^2_{n,j}+10^{-8}\right)
+ \max\left(\frac{1}{M}\sum_{r\in\mathcal R}v_j(r),10^{-12}\right)}.
+$$
+
+Here $\mathcal R$ contains up to 256 feasible points from the Sobol pool and
+$M$ is its size. It is fixed across candidates for one suggestion, chosen
+before previously attempted points are removed from the candidate set, and
+independent of measured response values. Negative numerical scores are
+clamped to zero. The selected next test maximises
+
+$$
+S(x)=wR_{NO}(x)+(1-w)R_{pressure}(x),\qquad 0<w<1.
+$$
+
+The default $w=0.5$ balances fractional uncertainty reduction in the two maps.
+Changing the weight does not define a combined emissions/pressure performance
+objective. A mapping proposal may have higher NO or pressure than a previous
+test because it is selected for information. The calculations are implemented
+by `integrated_variance_reduction()` and the mapping branch of `suggest()` in
+[`bayesian.py`](../flow_controller/domain/bayesian.py). The stored algorithm ID
+is `fcbo-matern52-no-pressure-ivr-v1`.
+
+After the initial completed design, use **Operating-space maps**, select
+**Horizontal** and **Vertical** variables, then click **Refresh maps**. The
+plots evaluate a 20 × 20 slice. Other variables remain at the selected
+completed test's measured condition, or at their bounds midpoint. **Show
+uncertainty (latent SD)** switches between predicted means and latent standard
+deviations. Infeasible cells are blank, and changing the campaign, slice or
+flow ceilings requires refreshing the predictions. Mean plots show ppm for
+corrected NO and Pa for pressure, with Pa RMS for spectral amplitude.
+
+`predict_mapping()` uses deterministic seed-0 fits for these displays; no
+candidate is selected and no flow command is sent. Rendering and worker
+lifetime are handled in [`qt_optimiser.py`](../flow_controller/ui/qt_optimiser.py).
+These maps do not classify flame stability or establish a safe operating
+region, and the application does not automatically choose a stopping point.
+
 ## 9. Experiment records and export
 
-An experiment is stored as `.fcbo.json`. New campaigns use campaign schema 2;
-the loader also accepts legacy schema-1 campaigns. The campaign JSON is the
+An experiment is stored as `.fcbo.json`. New campaigns use campaign schema 3;
+the loader also accepts schema-1 and schema-2 campaigns. Files without an
+objective mode retain NO minimisation. Keep a copy before modifying a campaign
+with this version: earlier applications cannot read schema 3. The campaign JSON is the
 authoritative scientific record. A **condition log** is the self-contained audit
 record stored in a finalised trial under `condition_log`. Every newly completed
 or invalid condition receives condition-log schema 1 before the campaign is
 saved. Completion and invalidation attach the log at
-[`optimisation.py:251`](../flow_controller/core/optimisation.py#L251) to
-[`optimisation.py:276`](../flow_controller/core/optimisation.py#L276). The whole
+[`optimisation.py:353`](../flow_controller/core/optimisation.py#L353) to
+[`optimisation.py:380`](../flow_controller/core/optimisation.py#L380). The whole
 campaign snapshot is written to a temporary file, flushed to disk and atomically
-replaced at [`optimisation.py:41`](../flow_controller/core/optimisation.py#L41) to
-[`optimisation.py:55`](../flow_controller/core/optimisation.py#L55); **atomic**
+replaced at [`optimisation.py:43`](../flow_controller/core/optimisation.py#L43) to
+[`optimisation.py:57`](../flow_controller/core/optimisation.py#L57); **atomic**
 here means that a failed replacement leaves the preceding complete JSON file in
 place rather than a partly written condition.
 
@@ -1271,22 +1495,26 @@ condition:
   flow audit-log path. A **rig boundary context** is the compact snapshot of assigned units,
   declared limits, prepared targets and live operating metadata taken at the
   start or end of the averaging window; its capture is implemented at
-  [`optimiser_controller.py:226`](../flow_controller/core/optimiser_controller.py#L226)
-  to [`optimiser_controller.py:240`](../flow_controller/core/optimiser_controller.py#L240);
+  [`optimiser_controller.py:289`](../flow_controller/core/optimiser_controller.py#L289)
+  to [`optimiser_controller.py:303`](../flow_controller/core/optimiser_controller.py#L303);
 - all available MEXA channel and acquisition-cycle statistics, receiver-time
   bounds, states, alarms, warnings, sequence provenance and receiver audit-log
   path for live capture;
+- pressure results and their channel, calibration, analysis settings, source
+  file/hash and timing association; plain-trigger windows also retain
+  `labview_capture` with physical start/stop, NO start/end, response delay,
+  minimum pressure duration and the TDMS source profile;
 - the corrected result and notes for a completed condition, or the operator's
   invalid reason for an invalid condition; and
 - the response-time calibration selected for that window, frozen as a bounded
   summary rather than linked only to mutable campaign-level history.
 
 Record construction is at
-[`optimisation.py:477`](../flow_controller/core/optimisation.py#L477) to
-[`optimisation.py:516`](../flow_controller/core/optimisation.py#L516), and loading
+[`optimisation.py:603`](../flow_controller/core/optimisation.py#L603) to
+[`optimisation.py:644`](../flow_controller/core/optimisation.py#L644), and loading
 checks that the log agrees with the saved trial, window and outcome at
-[`optimisation.py:519`](../flow_controller/core/optimisation.py#L519) to
-[`optimisation.py:542`](../flow_controller/core/optimisation.py#L542). MEXA
+[`optimisation.py:647`](../flow_controller/core/optimisation.py#L647) to
+[`optimisation.py:673`](../flow_controller/core/optimisation.py#L673). MEXA
 `NO` and `O2` are validated for optimisation. Auxiliary channels such as CO,
 CO2, HC, AFR, lambda, RPM, oil temperature and PEF are stored when available but
 are explicitly informational and are not separately validated; missing values
@@ -1301,8 +1529,8 @@ setpoint and measured-flow series separate: `mean_setpoints` and
 `setpoint_statistics` describe commands, while `mean_flows` and
 `flow_statistics` describe measured delivery. Their collection from the same
 polling pass is shown at
-[`optimiser_controller.py:203`](../flow_controller/core/optimiser_controller.py#L203)
-to [`optimiser_controller.py:224`](../flow_controller/core/optimiser_controller.py#L224).
+[`optimiser_controller.py:266`](../flow_controller/core/optimiser_controller.py#L266)
+to [`optimiser_controller.py:287`](../flow_controller/core/optimiser_controller.py#L287).
 
 For either setpoints, measured flows or an available MEXA channel, let the
 retained values be $x_1,\ldots,x_n$. The saved arithmetic mean, sample standard
@@ -1316,8 +1544,8 @@ $$
 
 The same summary function calculates setpoint and measured-flow statistics with
 `numpy.mean`, `numpy.std(..., ddof=1)`, `numpy.min` and `numpy.max` at
-[`optimisation.py:942`](../flow_controller/core/optimisation.py#L942) to
-[`optimisation.py:957`](../flow_controller/core/optimisation.py#L957). MEXA uses
+[`optimisation.py:1098`](../flow_controller/core/optimisation.py#L1098) to
+[`optimisation.py:1114`](../flow_controller/core/optimisation.py#L1114). MEXA uses
 `statistics.mean`, `statistics.stdev`, `min` and `max` at
 [`records.py:249`](../mexa_bridge/records.py#L249) to
 [`records.py:265`](../mexa_bridge/records.py#L265). Here `ddof=1` and
@@ -1333,8 +1561,8 @@ NO_{corr}=NO_{raw}\frac{20.9-O_{2,ref}}{20.9-O_{2,meas}}.
 $$
 
 Range checks, the correction factor and optional NO-SEM scaling are implemented
-at [`bayesian.py:166`](../flow_controller/domain/bayesian.py#L166) to
-[`bayesian.py:183`](../flow_controller/domain/bayesian.py#L183). The live MEXA
+at [`bayesian.py:178`](../flow_controller/domain/bayesian.py#L178) to
+[`bayesian.py:195`](../flow_controller/domain/bayesian.py#L195). The live MEXA
 path first calculates arithmetic channel means at
 [`records.py:264`](../mexa_bridge/records.py#L264) to
 [`records.py:269`](../mexa_bridge/records.py#L269); it does not average
@@ -1350,12 +1578,12 @@ $$
 where canonical JSON here means sorted keys, finite values and compact
 separators. Each suggestion stores the digest of the exact training payload—trial
 ID, observed coordinates, corrected NO and corrected SEM—at
-[`bayesian.py:260`](../flow_controller/domain/bayesian.py#L260) to
-[`bayesian.py:278`](../flow_controller/domain/bayesian.py#L278). The later
+[`bayesian.py:388`](../flow_controller/domain/bayesian.py#L388) to
+[`bayesian.py:411`](../flow_controller/domain/bayesian.py#L411). The later
 Matérn-5/2/NEI stage also stores the fitted kernel, signal variance, length
 scales, white-noise level, response normalization and Monte Carlo draw count at
-[`bayesian.py:289`](../flow_controller/domain/bayesian.py#L289) to
-[`bayesian.py:319`](../flow_controller/domain/bayesian.py#L319). This connects a
+[`bayesian.py:426`](../flow_controller/domain/bayesian.py#L426) to
+[`bayesian.py:484`](../flow_controller/domain/bayesian.py#L484). This connects a
 condition to the Matérn Gaussian-process and noisy expected improvement (NEI)
 calculation described in Section 8.
 
@@ -1363,30 +1591,30 @@ A selected response calibration can contain thousands of high-frequency raw
 samples. Its frozen condition-log summary therefore stores `raw_sample_count`
 and `raw_samples_sha256` instead of duplicating the `raw_samples` array. The
 count and digest are produced at
-[`optimisation.py:459`](../flow_controller/core/optimisation.py#L459) to
-[`optimisation.py:474`](../flow_controller/core/optimisation.py#L474). The digest
+[`optimisation.py:585`](../flow_controller/core/optimisation.py#L585) to
+[`optimisation.py:600`](../flow_controller/core/optimisation.py#L600). The digest
 supports identity and change detection; it does not reconstruct the omitted
 samples.
 
 CSV is an on-demand view, not the authoritative record. Export starts at
-[`optimisation.py:278`](../flow_controller/core/optimisation.py#L278). It now
+[`optimisation.py:382`](../flow_controller/core/optimisation.py#L382). It now
 includes flattened trial, suggestion, model, flow, rig and MEXA provenance
 fields, separate JSON cells for setpoint and measured-flow summaries, other JSON
 cells for nested structures, and the complete compact
 `condition_log_json` cell. Stable JSON-cell encoding is implemented at
-[`optimisation.py:394`](../flow_controller/core/optimisation.py#L394) to
-[`optimisation.py:397`](../flow_controller/core/optimisation.py#L397), and the
+[`optimisation.py:520`](../flow_controller/core/optimisation.py#L520) to
+[`optimisation.py:523`](../flow_controller/core/optimisation.py#L523), and the
 expanded rows are assembled at
-[`optimisation.py:310`](../flow_controller/core/optimisation.py#L310) to
-[`optimisation.py:390`](../flow_controller/core/optimisation.py#L390). Operator
+[`optimisation.py:419`](../flow_controller/core/optimisation.py#L419) to
+[`optimisation.py:497`](../flow_controller/core/optimisation.py#L497). Operator
 notes that begin like spreadsheet formulas are prefixed to prevent formula
 execution when the CSV is opened.
 
 Raw high-frequency data remain in separate acquisition files. The condition log
 retains their audit paths and bounded summaries: the flow window stores its
 continuous-log reference at
-[`optimisation.py:971`](../flow_controller/core/optimisation.py#L971) to
-[`optimisation.py:976`](../flow_controller/core/optimisation.py#L976), while the
+[`optimisation.py:1130`](../flow_controller/core/optimisation.py#L1130) to
+[`optimisation.py:1135`](../flow_controller/core/optimisation.py#L1135), while the
 MEXA receiver writes each packet to separate JSONL and CSV logs at
 [`records.py:128`](../mexa_bridge/records.py#L128) to
 [`records.py:166`](../mexa_bridge/records.py#L166). Keep those raw files
@@ -1394,6 +1622,25 @@ with the campaign JSON when packet-level or flow-pass reconstruction is required
 The flow audit path is absent when continuous flow logging was not active; live
 MEXA capture, by contrast, requires its receiver audit log before a window can
 start.
+
+For mapping, each trial also stores a `capture_id` and a validated `pressure`
+summary. The campaign keeps its `tdms_source` profile and the comparison
+`pressure_signature` fixed by the first attached pressure result. A saved NO
+window can wait for a pressure-file retry without losing its averages.
+`Experiment.attach_pressure()` accepts an identical retry but rejects an
+attempt to replace an existing result with different pressure data. Mapping
+completion and model fitting require valid pressure for every completed test.
+
+CSV export includes the objective mode, pressure metric and capture ID, all
+pressure amplitudes and dominant frequency, raw-file reference, full pressure
+summary JSON, mapping score, and suggested pressure mean and latent SD. Keep
+the raw TDMS files alongside the flow and MEXA audit logs to reconstruct the
+measurement from source samples.
+
+The existing `flow-pressure-v1` JSON summary and file-ready routes remain for
+advanced integrations. **Export LabVIEW request…** and the payloads under
+[`docs/examples`](examples) support those routes; they are optional and are
+not prerequisites for the plain `log`/`stop` TDMS procedure.
 
 ## 10. Choosing the dimensionality
 
@@ -1439,6 +1686,12 @@ global minimum. Before accepting a result:
 The implementation has no automatic statistical stopping rule. The operator
 decides whether the expected improvement, uncertainty, repeats and experimental
 budget justify another trial.
+
+For mapping campaigns, assess uncertainty across the relevant operating region
+and repeat selected conditions to check both NO and pressure reproducibility.
+The mapping score describes information gain under the fitted models; it is
+not a burner-performance ranking. Pressure amplitudes alone are not an
+automatic stable/unstable classification.
 
 ## 12. Literature and standards basis
 
@@ -1516,3 +1769,18 @@ coverage is in
 [`tests/test_qt_optimiser.py`](../tests/test_qt_optimiser.py), including dynamic
 dialog configuration, field-only target loading and an optimised-power
 measurement round trip.
+
+Mapping acquisition, pressure-unit scaling and separate model predictions are
+covered by [`tests/test_pressure_mapping.py`](../tests/test_pressure_mapping.py).
+Pressure metrics and payload checks are covered by
+[`tests/test_pressure.py`](../tests/test_pressure.py). TDMS timing, calibration,
+file completeness and ambiguous-file handling are covered by
+[`tests/test_tdms_capture.py`](../tests/test_tdms_capture.py). Trigger arming,
+delayed collection, saved NO windows, pressure attachment and recovery are
+covered by [`tests/test_pressure_integration.py`](../tests/test_pressure_integration.py).
+The source dialog, map controls and background-worker lifetime are covered by
+[`tests/test_qt_pressure_mapping.py`](../tests/test_qt_pressure_mapping.py).
+
+These tests use synthetic records and hardware-free sessions. They do not
+replace checks against the actual LabVIEW channel, calibration, clocks,
+analyser and burner installation.

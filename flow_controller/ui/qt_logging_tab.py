@@ -31,9 +31,9 @@ from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QLineEdit,
                                QVBoxLayout, QWidget)
 
 from ..domain.graphing import parse_axis_limits
+from ..core.session import DEFAULT_LOG_DIR
 from . import qt_theme as theme
 from .qt_graph_panel import GRAPH_METRICS, QtGraphPanel
-from .qt_operation_tab import DEFAULT_LOG_DIR
 from .qt_widgets import Card, divider, label, row
 
 #: ``(key, caption, default minimum, default maximum)`` for every axis the

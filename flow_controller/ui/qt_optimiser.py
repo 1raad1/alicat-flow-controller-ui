@@ -42,33 +42,46 @@ def inspect_tdms(path):
     return inspect(path)
 
 
-class TdmsInspectionWorker(QThread):
+class _ApplicationWorker(QThread):
+    """Keep background work alive until it finishes, even if its pane closes."""
+
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path):
+    def __init__(self):
         super().__init__(QApplication.instance())
-        self.path = str(path)
-        _TDMS_INSPECTORS.add(self)
+        self._registry.add(self)
         self.finished.connect(self._release)
         QApplication.instance().aboutToQuit.connect(self._shutdown)
 
     def run(self):
         try:
-            channels = inspect_tdms(self.path)
+            result = self._compute()
             if not self.isInterruptionRequested():
-                self.succeeded.emit(channels)
+                self.succeeded.emit(result)
         except Exception as exc:
             if not self.isInterruptionRequested():
                 self.failed.emit(str(exc))
 
     def _release(self):
-        _TDMS_INSPECTORS.discard(self)
+        self._registry.discard(self)
         self.deleteLater()
 
     def _shutdown(self):
         self.requestInterruption()
         self.wait()
+
+
+class TdmsInspectionWorker(_ApplicationWorker):
+    _registry = _TDMS_INSPECTORS
+
+    def __init__(self, path):
+        path = str(path)
+        super().__init__()
+        self.path = path
+
+    def _compute(self):
+        return inspect_tdms(self.path)
 
 
 class TdmsSourceDialog(QDialog):
@@ -277,41 +290,25 @@ class TdmsSourceDialog(QDialog):
         super().closeEvent(event)
 
 
-class MappingWorker(QThread):
-    succeeded = Signal(object)
-    failed = Signal(str)
+class MappingWorker(_ApplicationWorker):
+    _registry = _MAP_WORKERS
 
     def __init__(self, config, trials, points, context):
-        super().__init__(QApplication.instance())
-        self.config, self.trials = config, deepcopy(trials)
-        self.points, self.context = points.copy(), context
-        _MAP_WORKERS.add(self)
-        self.finished.connect(self._release)
-        QApplication.instance().aboutToQuit.connect(self._shutdown)
+        trials, points = deepcopy(trials), points.copy()
+        super().__init__()
+        self.config, self.trials = config, trials
+        self.points, self.context = points, context
 
-    def run(self):
-        try:
-            from ..domain.bayesian import predict_mapping
-            feasible = self.context["feasible"]
-            predictions = predict_mapping(self.config, self.trials, self.points[feasible])
-            result = {}
-            for name, values in predictions.items():
-                grid = np.full(len(self.points), np.nan)
-                grid[feasible] = values
-                result[name] = grid
-            if not self.isInterruptionRequested():
-                self.succeeded.emit((result, self.context))
-        except Exception as exc:
-            if not self.isInterruptionRequested():
-                self.failed.emit(str(exc))
-
-    def _release(self):
-        _MAP_WORKERS.discard(self)
-        self.deleteLater()
-
-    def _shutdown(self):
-        self.requestInterruption()
-        self.wait()
+    def _compute(self):
+        from ..domain.bayesian import predict_mapping
+        feasible = self.context["feasible"]
+        predictions = predict_mapping(self.config, self.trials, self.points[feasible])
+        result = {}
+        for name, values in predictions.items():
+            grid = np.full(len(self.points), np.nan)
+            grid[feasible] = values
+            result[name] = grid
+        return result, self.context
 
 
 def note(text):

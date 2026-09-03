@@ -1540,25 +1540,15 @@ class FlowSession(QObject):
 
     def phi_values(self, samples=None):
         """``(stage 1, stage 2, global)`` equivalence ratios."""
-        flow = lambda key: self.flow_for_role(key, samples)
-        nh3_r, h2_r = flow('nh3_rich'), flow('h2_rich')
-        nh3_l, h2_l = flow('nh3_lean'), flow('h2_lean')
-        air_r, air_l = flow('rich_air'), flow('lean_air')
-        nh3_pilot = flow('nh3_pilot')
-        h2_pilot = flow('h2_pilot')
-        ch4_pilot = flow('ch4_pilot')
-        ch4_stage1 = flow('ch4_stage1')
-        ch4_stage2 = flow('ch4_stage2')
-        return (
-            self.calc.phi(
-                nh3_r + nh3_pilot, h2_r + h2_pilot, air_r,
-                ch4_stage1 + ch4_pilot),
-            self.calc.phi(nh3_l, h2_l, air_l, ch4_stage2),
-            self.calc.phi(
-                nh3_r + nh3_l + nh3_pilot,
-                h2_r + h2_l + h2_pilot, air_r + air_l,
-                ch4_stage1 + ch4_stage2 + ch4_pilot),
-        )
+        stage1, air1, _ = self.combustion_flows(SCOPE_STAGE1, samples)
+        stage2, air2, _ = self.combustion_flows(SCOPE_STAGE2, samples)
+        # Global phi covers the staged rig, including its pilot. General
+        # assignments participate only in the whole-rig combustion estimate.
+        combined = {fuel: stage1[fuel] + stage2[fuel] for fuel in stage1}
+        return tuple(
+            self.calc.phi(fuels['NH3'], fuels['H2'], air, fuels['CH4'])
+            for fuels, air in ((stage1, air1), (stage2, air2),
+                               (combined, air1 + air2)))
 
     # ------------------------------------------------------------------ #
     #  Live combustion estimate                                          #
