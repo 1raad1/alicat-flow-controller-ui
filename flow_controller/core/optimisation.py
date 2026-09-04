@@ -23,8 +23,8 @@ from ..domain.roles import ROLES
 from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
-SCHEMA = 3
-SUPPORTED_SCHEMAS = (1, 2, SCHEMA)
+SCHEMA = 4
+SUPPORTED_SCHEMAS = (1, 2, 3, SCHEMA)
 MAX_TRIALS = 500
 MAX_EXPERIMENT_BYTES = 50_000_000
 FLOW_REL_TOL = .03
@@ -72,7 +72,7 @@ class Experiment:
                 "config": config.to_dict(), "trials": [],
                 "analyser_response": {"conditions": {"A": None, "B": None},
                                       "runs": [], "selected_run_id": None},
-                "objective": ("map corrected dry NO and pressure amplitude"
+                "objective": ("map corrected dry NO and two pressure spectral amplitudes"
                               if config.objective_mode == "map_no_pressure" else
                               "dry NO ppm corrected to fixed O2; not total NOx"),
                 "pilot": "off during measurements"}
@@ -413,8 +413,12 @@ class Experiment:
                       "objective_mode", "pressure_metric", "capture_id", "pressure_rms_pa",
                       "pressure_peak_abs_pa", "pressure_dominant_amplitude_pa", "pressure_dominant_frequency_hz",
                       "pressure_rms_window_sd_pa", "pressure_start", "pressure_end",
+                      "pressure_1_label", "pressure_1_dominant_amplitude_pa", "pressure_1_dominant_frequency_hz",
+                      "pressure_2_label", "pressure_2_dominant_amplitude_pa", "pressure_2_dominant_frequency_hz",
                       "pressure_raw_file", "pressure_summary_json", "mapping_score",
-                      "suggested_pressure_pa", "suggested_pressure_sd_pa"]
+                      "suggested_pressure_pa", "suggested_pressure_sd_pa",
+                      "suggested_pressure_1_pa", "suggested_pressure_1_sd_pa",
+                      "suggested_pressure_2_pa", "suggested_pressure_2_sd_pa"]
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for t in self.trials:
@@ -422,6 +426,12 @@ class Experiment:
                 mexa = window.get("mexa") or {}
                 condition = t.get("condition_log") or {}
                 pressure = t.get("pressure") or {}
+                pressure_channels = {item.get("id"): item for item in pressure.get("transducers", [])
+                                     if isinstance(item, dict)}
+                pressure_1 = pressure_channels.get("pressure_1", {})
+                pressure_2 = pressure_channels.get("pressure_2", {})
+                pressure_1_metrics = pressure_1.get("metrics", {})
+                pressure_2_metrics = pressure_2.get("metrics", {})
                 observed = window.get("observed_point", [None] * 3)
                 request = self.config.request(t["point"])
                 note = csv_text(result.get("notes", t.get("reason", "")))
@@ -504,11 +514,21 @@ class Experiment:
                     "pressure_dominant_frequency_hz": pressure.get("dominant_frequency_hz"),
                     "pressure_rms_window_sd_pa": pressure.get("rms_window_sd_pa"),
                     "pressure_start": pressure.get("start"), "pressure_end": pressure.get("end"),
+                    "pressure_1_label": pressure_1.get("label"),
+                    "pressure_1_dominant_amplitude_pa": pressure_1_metrics.get("dominant_amplitude_pa"),
+                    "pressure_1_dominant_frequency_hz": pressure_1_metrics.get("dominant_frequency_hz"),
+                    "pressure_2_label": pressure_2.get("label"),
+                    "pressure_2_dominant_amplitude_pa": pressure_2_metrics.get("dominant_amplitude_pa"),
+                    "pressure_2_dominant_frequency_hz": pressure_2_metrics.get("dominant_frequency_hz"),
                     "pressure_raw_file": csv_text(pressure.get("raw_file", "")),
                     "pressure_summary_json": compact_json(pressure or None),
                     "mapping_score": t.get("mapping_score"),
                     "suggested_pressure_pa": t.get("predicted_pressure_pa"),
                     "suggested_pressure_sd_pa": t.get("pressure_latent_sd_pa"),
+                    "suggested_pressure_1_pa": t.get("predicted_pressure_1_pa"),
+                    "suggested_pressure_1_sd_pa": t.get("pressure_1_latent_sd_pa"),
+                    "suggested_pressure_2_pa": t.get("predicted_pressure_2_pa"),
+                    "suggested_pressure_2_sd_pa": t.get("pressure_2_latent_sd_pa"),
                 })
 
 

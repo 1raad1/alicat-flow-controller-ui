@@ -203,13 +203,14 @@ Zero commands, stopping monitoring, and application shutdown cancel replay.
 
 ## Bayesian optimiser
 
-New experiments can **Minimise NO** or **Map NO + pressure**. Mapping learns
-separate NO and pressure responses and suggests conditions that reduce uncertainty
-across both maps. Choose RMS pressure, peak excursion or dominant spectral amplitude
-as the pressure response. **Operating-space maps** shows two-variable slices and
-their uncertainty.
+New experiments can **Minimise NO** or **Map NO + pressure**. New mapping
+campaigns learn separate responses for corrected NO and the dominant spectral
+amplitude from each of two pressure transducers. Suggestions reduce uncertainty
+across all three maps. **Operating-space maps** shows two-variable slices and
+their uncertainty. Existing one-transducer campaigns retain their saved pressure
+response and continue to open.
 
-Choose the LabVIEW TDMS folder and converted pressure channel in the flow app,
+Choose the LabVIEW TDMS folder and both converted pressure channels in the flow app,
 then arm the current trial and use LabVIEW's existing `log`/`stop` triggers.
 The flow app continues recording after stop to cover the selected NO delay and
 minimum averaging time, then reads the matching TDMS waveform in the background.
@@ -229,8 +230,9 @@ For the algorithms, equations, file format and code map, see the
 ### Create and run an experiment
 
 1. Expand **Bayesian optimiser** and choose **New experiment**. Select
-   **Minimise NO** or **Map NO + pressure**. For mapping, select the pressure
-   response and NO mapping weight. Enter the nominal
+   **Minimise NO** or **Map NO + pressure**. For mapping, set the NO mapping
+   weight. The two pressure maps use the peak in-band Welch spectral amplitude.
+   Enter the nominal
    NH3/H2 thermal input, stage-1 fuel split, and permitted bounds for H2 volume
    percentage, stage-1 phi and overall phi. Optionally select thermal input or
    stage-1 fuel split to add them as fourth and fifth search variables, then enter
@@ -253,10 +255,13 @@ For the algorithms, equations, file format and code map, see the
    applying through the usual controls. Existing MAX FLOW limits and ramps
    still apply. Do not assume that safe endpoints imply a safe transition.
 4. For mapping, open **TDMS source…** in **Current test**. Choose the LabVIEW
-   recording folder, inspect a sample TDMS file and select its pressure waveform.
-   Declare the pressure units or Pa-per-stored-unit scale, offset and calibration
-   identifier; a group named `converted` does not establish the units. Set the
-   minimum pressure recording duration and spectral settings. Follow the
+   recording folder, inspect a sample TDMS file and select a distinct waveform for
+   **Pressure transducer 1** and **Pressure transducer 2**. The display labels are
+   editable, while the saved IDs remain `pressure_1` and `pressure_2`. Declare the
+   units or Pa-per-stored-unit scale, offset, calibration identifier and optional
+   clipping bounds independently for each channel; a group named `converted` does
+   not establish the units. Set the shared minimum pressure recording duration and
+   spectral settings. Follow the
    [TDMS setup guide](docs/LABVIEW_PRESSURE_MAPPING.md#configure-the-tdms-source)
    for timing and calibration checks. TDMS reading needs the optional dependency
    described under [Manual installation](#manual-installation).
@@ -277,8 +282,9 @@ For the algorithms, equations, file format and code map, see the
    NO delay tail and any additional samples needed for minimum averaging coverage.
 7. For mapping, wait for the automatic TDMS search and processing to finish,
    then review the attached pressure metrics. If matching fails or is ambiguous,
-   use **Choose TDMS file…** to select the intended recording; the same waveform
-   validation still applies. A mapping test needs a valid pressure result before
+   use **Choose TDMS file…** to select the intended recording; both waveform
+   selections and their common timing are validated. A mapping test needs a valid
+   two-transducer pressure result before
    it can be completed. Live capture fills and locks the NO/O2 means; manual mode
    lets you enter those means and an optional NO standard error. Add notes,
    confirm **Uncorrected dry averages from this saved window**, then click
@@ -357,10 +363,12 @@ The initial design selects spread-out points from an N-dimensional scrambled
 Sobol candidate pool. In **Minimise NO**, subsequent suggestions fit a Matérn-5/2
 Gaussian process and maximise Monte Carlo noisy expected improvement over a
 feasible candidate pool. **Map NO + pressure** fits separate standardized
-Gaussian processes for corrected dry NO and the chosen pressure response. It
-selects points by weighted expected uncertainty reduction across both maps. The
-NO mapping weight balances the two learning objectives; it is not a combined
-NO/pressure performance score. Each model uses measured blend, equivalence ratios,
+Gaussian processes for corrected dry NO and the dominant in-band spectral
+amplitude of each pressure transducer. It selects points by weighted expected
+uncertainty reduction across all three maps. The configured weight applies to NO;
+the remaining weight is divided equally between the two pressure maps. This is an
+information-gathering score rather than a combined NO/stability performance score.
+Each model uses measured blend, equivalence ratios,
 and any selected power or split variables
 from the captured flow window, with the requested settings retained alongside them.
 The models fit residual observation noise; the NO model also accepts an optional
@@ -374,15 +382,20 @@ test's measured condition, or their bounds midpoint. **Show uncertainty (latent
 SD)** switches between predicted means and uncertainty. Blank cells exceed
 bounds or flow ceilings. These maps do not classify flame stability.
 
-Pressure RMS and peak excursion use the mean-subtracted waveform. Peak excursion
+Pressure RMS and peak excursion use each mean-subtracted waveform. Peak excursion
 is the largest absolute deviation from its mean. Dominant spectral amplitude is
 the RMS amplitude at the strongest in-band Welch spectrum bin, reported in Pa
-with its frequency separately. It is not peak-to-peak pressure or a PSD value.
-The spectral frequency band does not filter the RMS or peak calculation.
+with its frequency separately. New dual-transducer mapping uses this value from
+each channel as its two pressure responses. It is not peak-to-peak pressure or a
+PSD value. The dominant frequency, RMS, peak excursion and variation in windowed
+RMS remain in the record for diagnosis; they do not drive the new mapping
+acquisition. The spectral frequency band does not filter the RMS or peak
+calculation.
 
 The `.fcbo.json` campaign is the authoritative record. This version writes
-campaign schema 3 and loads schema 1/2 campaigns in **Minimise NO** mode. Keep
-copies before switching versions; older applications cannot read schema 3.
+campaign schema 4 and loads schema 1–3 campaigns, including existing
+one-transducer mapping campaigns. Keep copies before switching versions; older
+applications cannot read schema 4.
 Experiment changes are written atomically after each suggestion, completed window
 and result. Every
 newly completed or invalid condition receives a schema-1 `condition_log` inside
@@ -392,9 +405,10 @@ flows, separate controller-setpoint and measured-flow statistics, assignments,
 rig contexts and audit-log path, all available MEXA channel statistics and
 receiver provenance, the corrected result or invalid reason, and the response
 calibration summary used for that window.
-Pressure results retain the waveform metrics, calibration and source provenance,
-including the TDMS path, SHA-256 and selected sample interval. Keep the source
-TDMS files alongside the campaign for later waveform analysis.
+Pressure results retain both channels' labels, waveform metrics, calibrations and
+source provenance, including the shared TDMS path, SHA-256 and selected sample
+interval. Keep the source TDMS files alongside the campaign for later waveform
+analysis.
 Auxiliary MEXA channels are informational and are not separately validated.
 The calibration summary stores the raw sample count and SHA-256 digest rather
 than copying its high-frequency raw samples.

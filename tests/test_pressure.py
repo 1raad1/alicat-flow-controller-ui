@@ -40,6 +40,34 @@ def manifest(path):
 
 
 class PressureValidationTests(unittest.TestCase):
+    def test_dual_summary_validation_and_signature(self):
+        base = summary()
+        metrics = {key: base.get(key, 0) for key in ("rms_pa", "peak_abs_pa", "dominant_frequency_hz",
+                                                    "dominant_amplitude_pa", "rms_window_sd_pa")}
+        dual = {key: base[key] for key in ("protocol", "type", "experiment_id", "trial_id",
+                                           "capture_id", "start", "end", "sample_rate_hz",
+                                           "sample_count", "units")}
+        dual.update(raw_file="C:/capture.tdms", raw_sha256="a" * 64)
+        dual["association"] = {
+            "mode": "tdms-retrospective", "trigger_start": base["start"], "trigger_end": base["end"],
+            "timing_source": "tdms_waveform", "sample_offset": 0,
+            "source_sample_count": base["sample_count"], "source_start": base["start"]}
+        dual["transducers"] = [{"id": f"pressure_{index}", "label": f"PT{index}",
+                                 "channel": f"raw/p{index}", "calibration_id": f"cal-{index}",
+                                 "analysis": deepcopy(base["analysis"]),
+                                 "quality": deepcopy(base["quality"]), "metrics": deepcopy(metrics)}
+                                for index in (1, 2)]
+        valid = pressure.validate_pressure_summary(dual)
+        self.assertEqual(valid["transducers"][1]["id"], "pressure_2")
+        self.assertEqual(len(pressure.pressure_signature(valid)["transducers"]), 2)
+        for mutate in (lambda x: x["transducers"].pop(),
+                       lambda x: x["transducers"][1].update(id="pressure_1"),
+                       lambda x: x["transducers"][1].update(label="pt1"),
+                       lambda x: x["transducers"][0]["metrics"].update(dominant_amplitude_pa=float("nan"))):
+            bad = deepcopy(dual)
+            mutate(bad)
+            with self.assertRaises(ValueError):
+                pressure.validate_pressure_summary(bad)
     def test_normalized_detached_summary_and_signature(self):
         data = summary()
         data.update(request_id="request-1", raw_sha256="AB" * 32)

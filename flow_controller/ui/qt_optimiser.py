@@ -36,6 +36,17 @@ _MAP_WORKERS = set()
 _TDMS_INSPECTORS = set()
 
 
+def _dual_transducers(value):
+    """Return canonical transducers without confusing legacy pressure objects."""
+    items = value.get("transducers") if isinstance(value, dict) else None
+    return items if isinstance(items, list) and len(items) == 2 else None
+
+
+def _transducer_metric(item, key):
+    metrics = item.get("metrics") if isinstance(item, dict) else None
+    return metrics.get(key) if isinstance(metrics, dict) else None
+
+
 def inspect_tdms(path):
     """Lazy reader import keeps optional file dependencies out of UI startup."""
     from ..domain.tdms_capture import inspect_tdms as inspect
@@ -87,14 +98,19 @@ class TdmsInspectionWorker(_ApplicationWorker):
 class TdmsSourceDialog(QDialog):
     """Configure an existing LabVIEW waveform source without changing LabVIEW."""
 
-    def __init__(self, source=None, parent=None):
+    TRANSDUCER_IDS = ("pressure_1", "pressure_2")
+    DEFAULT_LABELS = ("Pressure transducer 1", "Pressure transducer 2")
+
+    def __init__(self, source=None, parent=None, *, dual=None):
         super().__init__(parent)
         self.setWindowTitle("TDMS pressure source")
-        self.resize(theme.scale(660), theme.scale(720))
+        self.resize(theme.scale(920), theme.scale(760))
         self.source = None
         self.worker = None
         self._sample_path = None
         self._source = dict(source or {})
+        self.dual = ("transducers" in self._source if dual is None and self._source else
+                     True if dual is None else bool(dual))
         outer = QVBoxLayout(self)
         outer.addWidget(note(
             "Use the TDMS files LabVIEW already records. The app matches a new recording "
@@ -124,47 +140,102 @@ class TdmsSourceDialog(QDialog):
         self.inspect_button = QPushButton("Inspect sample TDMS…")
         self.inspect_button.clicked.connect(self._choose_sample)
         form.addRow(self.inspect_button)
-        self.channel_picker = QComboBox()
-        self.channel_picker.setAccessibleName("TDMS waveform channel")
-        self.channel_picker.setPlaceholderText("Inspect a file to list waveform channels")
-        self.channel_picker.currentIndexChanged.connect(self._channel_selected)
-        form.addRow("Waveform in sample file", self.channel_picker)
-        self.metadata = note("Select a time-domain waveform. FFT/spectrum channels are excluded.")
-        self.metadata.setObjectName("")
-        form.addRow(self.metadata)
-        self.pressure_units = QComboBox()
-        self.pressure_units.setAccessibleName("Known units of stored pressure values")
-        self.pressure_units.addItem("Custom / enter calibration scale", "custom")
-        self.pressure_units.addItem("Values already in Pa", "pa")
-        self.pressure_units.addItem("Values already in kPa", "kpa")
-        self.pressure_units.setToolTip(
-            "Choose the units you know the stored values represent. TDMS unit labels and group names "
-            "are not used to infer this selection.")
+        body.addLayout(form)
+
+        transducers = self._source.get("transducers") or []
+        if not self.dual:
+            transducers = [self._source]
+        self.sensor_entries = {}
+        self.channel_pickers = {}
+        self.metadata_by_id = {}
+        self.pressure_units_by_id = {}
+        sensor_grid = QGridLayout()
+        sensor_grid.addWidget(QLabel("Setting"), 0, 0)
+        for column, sensor_id in enumerate(self.TRANSDUCER_IDS[:2 if self.dual else 1], 1):
+            saved = dict(transducers[column - 1]) if column <= len(transducers) else {}
+            label_default = self.DEFAULT_LABELS[column - 1]
+            fields = {}
+            label_entry = QLineEdit(str(saved.get("label", label_default)))
+            label_entry.setMaxLength(64)
+            label_entry.setAccessibleName(f"{sensor_id} display label")
+            fields["label"] = label_entry
+            sensor_grid.addWidget(label_entry, 0, column)
+
+            picker = QComboBox()
+            picker.setAccessibleName(f"{sensor_id} TDMS waveform channel")
+            picker.setPlaceholderText("Inspect a file to list waveform channels")
+            picker.currentIndexChanged.connect(
+                lambda _index, identity=sensor_id: self._channel_selected(identity))
+            self.channel_pickers[sensor_id] = picker
+            if column == 1:
+                sensor_grid.addWidget(QLabel("Waveform in sample file"), 1, 0)
+            sensor_grid.addWidget(picker, 1, column)
+
+            metadata = note("Select a time-domain waveform. FFT/spectrum channels are excluded.")
+            metadata.setObjectName("")
+            metadata.setWordWrap(True)
+            self.metadata_by_id[sensor_id] = metadata
+            if column == 1:
+                sensor_grid.addWidget(QLabel("Sample metadata"), 2, 0)
+            sensor_grid.addWidget(metadata, 2, column)
+
+            units = QComboBox()
+            units.setAccessibleName(f"{sensor_id} known units of stored pressure values")
+            units.addItem("Custom / enter calibration scale", "custom")
+            units.addItem("Values already in Pa", "pa")
+            units.addItem("Values already in kPa", "kpa")
+            units.setToolTip("Choose documented stored units; TDMS metadata does not infer calibration.")
+            units.currentIndexChanged.connect(
+                lambda _index, identity=sensor_id: self._pressure_units_changed(identity))
+            self.pressure_units_by_id[sensor_id] = units
+
+            for row_number, (key, title, default, placeholder) in enumerate((
+                ("group", "TDMS group", "", "Choose or enter the group"),
+                ("channel", "TDMS channel", "", "Choose or enter the channel"),
+                ("units", "Known pressure units", None, ""),
+                ("scale_pa_per_unit", "Pressure scale (Pa per stored unit)", "", "Required calibration scale"),
+                ("offset_pa", "Pressure offset (Pa)", 0, "0"),
+                ("calibration_id", "Calibration identifier", "", "Required calibration reference"),
+                ("clip_min", "Lower clipping limit (stored units)", None, "Optional"),
+                ("clip_max", "Upper clipping limit (stored units)", None, "Optional"),
+            ), 3):
+                if column == 1:
+                    sensor_grid.addWidget(QLabel(title), row_number, 0)
+                if key == "units":
+                    sensor_grid.addWidget(units, row_number, column)
+                    continue
+                value = saved.get(key, default)
+                entry = QLineEdit("" if value is None else str(value))
+                entry.setPlaceholderText(placeholder)
+                entry.setAccessibleName(f"{sensor_id} {title}")
+                fields[key] = entry
+                sensor_grid.addWidget(entry, row_number, column)
+            self.sensor_entries[sensor_id] = fields
+        body.addLayout(sensor_grid)
+
+        shared_form = QFormLayout()
         for key, label, default, placeholder in (
-            ("group", "TDMS group", "", "Choose a waveform above or enter its group"),
-            ("channel", "TDMS channel", "", "Choose a waveform above or enter its name"),
-            ("scale_pa_per_unit", "Pressure scale (Pa per stored unit)", "", "Required; enter the documented calibration"),
-            ("offset_pa", "Pressure offset (Pa)", 0, "0"),
-            ("calibration_id", "Calibration identifier", "", "Required; certificate, sensor or conversion reference"),
             ("sample_rate_hz", "Fallback sample rate (Hz)", None, "Optional; TDMS timing takes precedence"),
             ("min_recording_s", "Minimum pressure recording (s)", 1.0, "Independent of the NO averaging window"),
             ("band_low_hz", "Spectrum lower frequency (Hz)", 0, "0"),
             ("band_high_hz", "Spectrum upper frequency (Hz)", None, "Blank = Nyquist"),
             ("segment_samples", "Spectral segment (samples)", 4096, "4096"),
             ("overlap_samples", "Spectral overlap (samples)", 2048, "2048"),
-            ("clip_min", "Lower clipping limit (stored units)", None, "Optional"),
-            ("clip_max", "Upper clipping limit (stored units)", None, "Optional"),
         ):
-            if key == "scale_pa_per_unit":
-                form.addRow("Known pressure units", self.pressure_units)
             value = self._source.get(key, default)
             entry = QLineEdit("" if value is None else str(value))
             entry.setPlaceholderText(placeholder)
             entry.setAccessibleName(label)
             self.entries[key] = entry
-            form.addRow(label, entry)
-        self.pressure_units.currentIndexChanged.connect(self._pressure_units_changed)
-        body.addLayout(form)
+            shared_form.addRow(label, entry)
+        body.addLayout(shared_form)
+
+        # Compatibility aliases for the established one-channel tests and callers.
+        primary = self.TRANSDUCER_IDS[0]
+        self.entries.update(self.sensor_entries[primary])
+        self.channel_picker = self.channel_pickers[primary]
+        self.metadata = self.metadata_by_id[primary]
+        self.pressure_units = self.pressure_units_by_id[primary]
         body.addWidget(note(
             "Pressure = stored value × scale + offset. A group called 'converted' does not "
             "establish its units. Enter scale 1 only when you know its values already represent Pa."))
@@ -180,9 +251,9 @@ class TdmsSourceDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         outer.addWidget(self.buttons)
 
-    def _pressure_units_changed(self, *_args):
-        units = self.pressure_units.currentData()
-        entry = self.entries["scale_pa_per_unit"]
+    def _pressure_units_changed(self, sensor_id="pressure_1"):
+        units = self.pressure_units_by_id[sensor_id].currentData()
+        entry = self.sensor_entries[sensor_id]["scale_pa_per_unit"]
         entry.setReadOnly(units != "custom")
         if units in ("pa", "kpa"):
             entry.setText("1" if units == "pa" else "1000")
@@ -215,40 +286,45 @@ class TdmsSourceDialog(QDialog):
         self.worker.start()
 
     def _inspected(self, channels):
-        self.channel_picker.blockSignals(True)
-        self.channel_picker.clear()
-        selected = -1
-        preferred, preference = -1, -1
-        for channel in channels:
-            if channel.get("is_spectrum"):
-                continue
-            if (channel["group"] == self.entries["group"].text()
-                    and channel["channel"] == self.entries["channel"].text()):
-                selected = self.channel_picker.count()
-            score = (2 if "converted" in channel["group"].casefold() else 0)
-            score += int(channel["channel"].casefold() == "pd_cc_3_1")
-            if score > preference:
-                preferred, preference = self.channel_picker.count(), score
-            self.channel_picker.addItem(f"{channel['group']} / {channel['channel']}", channel)
-        self.channel_picker.setCurrentIndex(selected if selected >= 0 else
-                                           preferred)
-        self.channel_picker.blockSignals(False)
-        if self.channel_picker.count():
+        candidates = [channel for channel in channels if not channel.get("is_spectrum")]
+        used = set()
+        for sensor_id, picker in self.channel_pickers.items():
+            picker.blockSignals(True)
+            picker.clear()
+            for channel in candidates:
+                picker.addItem(f"{channel['group']} / {channel['channel']}", channel)
+            fields = self.sensor_entries[sensor_id]
+            selected = next((index for index, channel in enumerate(candidates)
+                             if channel["group"] == fields["group"].text()
+                             and channel["channel"] == fields["channel"].text()), -1)
+            if selected < 0:
+                ranked = sorted(range(len(candidates)), key=lambda index: (
+                    2 * ("converted" in candidates[index]["group"].casefold())
+                    + (candidates[index]["channel"].casefold() == "pd_cc_3_1")), reverse=True)
+                selected = next((index for index in ranked if index not in used), -1)
+            if selected >= 0:
+                used.add(selected)
+            picker.setCurrentIndex(selected)
+            picker.blockSignals(False)
+        if candidates:
             if not self.entries["folder"].text().strip():
                 self.entries["folder"].setText(str(Path(self._sample_path).resolve().parent))
-            self._channel_selected()
+            for sensor_id in self.channel_pickers:
+                self._channel_selected(sensor_id)
         else:
-            self.metadata.setText("No time-domain waveform channels found. Spectrum channels cannot be selected.")
+            for metadata in self.metadata_by_id.values():
+                metadata.setText("No time-domain waveform channels found. Spectrum channels cannot be selected.")
 
-    def _channel_selected(self, *_args):
-        channel = self.channel_picker.currentData()
+    def _channel_selected(self, sensor_id="pressure_1"):
+        channel = self.channel_pickers[sensor_id].currentData()
         if not channel:
             return
-        self.entries["group"].setText(channel["group"])
-        self.entries["channel"].setText(channel["channel"])
+        fields = self.sensor_entries[sensor_id]
+        fields["group"].setText(channel["group"])
+        fields["channel"].setText(channel["channel"])
         rate = channel.get("sample_rate_hz")
         rate_text = f"{rate:g} Hz" if rate else "no sample-rate metadata"
-        self.metadata.setText(
+        self.metadata_by_id[sensor_id].setText(
             f"{channel.get('samples', 0):,} samples · {rate_text} · stored unit: {channel.get('unit') or 'unspecified'}\n"
             f"TDMS start: {channel.get('start') or 'not recorded'}")
 
@@ -262,10 +338,12 @@ class TdmsSourceDialog(QDialog):
             return
         try:
             from ..domain.tdms_capture import validate_tdms_source
-            values = {key: entry.text().strip() for key, entry in self.entries.items()}
-            for key in ("sample_rate_hz", "band_high_hz", "clip_min", "clip_max"):
+            shared_keys = ("folder", "sample_rate_hz", "min_recording_s", "band_low_hz",
+                           "band_high_hz", "segment_samples", "overlap_samples")
+            values = {key: self.entries[key].text().strip() for key in shared_keys}
+            for key in ("sample_rate_hz", "band_high_hz"):
                 values[key] = None if not values[key] else finite(values[key], key)
-            for key in ("scale_pa_per_unit", "offset_pa", "min_recording_s", "band_low_hz"):
+            for key in ("min_recording_s", "band_low_hz"):
                 values[key] = finite(values[key], key)
             for key in ("segment_samples", "overlap_samples"):
                 number = finite(values[key], key)
@@ -273,6 +351,37 @@ class TdmsSourceDialog(QDialog):
                     raise ValueError(f"{key} must be a whole number.")
                 values[key] = int(number)
             values["use_trigger_time"] = self.use_trigger_time.isChecked()
+            if self.dual:
+                values["transducers"] = []
+                labels, channels = set(), set()
+                for sensor_id in self.TRANSDUCER_IDS:
+                    fields = {key: entry.text().strip()
+                              for key, entry in self.sensor_entries[sensor_id].items()}
+                    label_key = fields["label"].casefold()
+                    if not fields["label"] or len(fields["label"]) > 64:
+                        raise ValueError(f"{sensor_id} label must contain 1 to 64 characters.")
+                    if label_key in labels:
+                        raise ValueError("Pressure transducer labels must be distinct.")
+                    labels.add(label_key)
+                    pair = (fields["group"], fields["channel"])
+                    if pair in channels:
+                        raise ValueError("Pressure transducer group/channel selections must be distinct.")
+                    channels.add(pair)
+                    for key in ("clip_min", "clip_max"):
+                        fields[key] = None if not fields[key] else finite(fields[key], f"{sensor_id} {key}")
+                    for key in ("scale_pa_per_unit", "offset_pa"):
+                        fields[key] = finite(fields[key], f"{sensor_id} {key}")
+                    fields["id"] = sensor_id
+                    values["transducers"].append(fields)
+            else:
+                fields = {key: entry.text().strip()
+                          for key, entry in self.sensor_entries["pressure_1"].items()
+                          if key != "label"}
+                for key in ("clip_min", "clip_max"):
+                    fields[key] = None if not fields[key] else finite(fields[key], key)
+                for key in ("scale_pa_per_unit", "offset_pa"):
+                    fields[key] = finite(fields[key], key)
+                values.update(fields)
             self.source = validate_tdms_source(values)
         except (ValueError, OSError) as exc:
             self.error.setText(str(exc))
@@ -330,9 +439,10 @@ def point_text(config, point):
 
 
 class ExperimentDialog(QDialog):
-    def __init__(self, request=None, parent=None, *, mexa=None):
+    def __init__(self, request=None, parent=None, *, mexa=None, dual_pressure=None):
         super().__init__(parent)
         self._mexa = mexa
+        self._dual_pressure = request is None if dual_pressure is None else bool(dual_pressure)
         self.setWindowTitle("New Bayesian experiment")
         self.resize(theme.scale(600), theme.scale(650))
         outer = QVBoxLayout(self)
@@ -472,7 +582,15 @@ class ExperimentDialog(QDialog):
 
     def _mapping_options(self):
         mapping = self.objective_mode.currentData() == "map_no_pressure"
-        self.pressure_metric.setEnabled(mapping)
+        if mapping and self._dual_pressure:
+            self.pressure_metric.setCurrentIndex(
+                self.pressure_metric.findData("dominant_amplitude_pa"))
+        self.pressure_metric.setEnabled(mapping and not self._dual_pressure)
+        self.pressure_metric.setToolTip(
+            "New mapping campaigns use dominant spectral amplitude for both pressure transducers."
+            if mapping and self._dual_pressure else
+            "Select the pressure response used by this existing one-transducer campaign."
+            if mapping else "Pressure mapping is not selected.")
         self.entries["mapping_weight"].setEnabled(mapping)
 
     def _update_initial_points(self):
@@ -692,6 +810,7 @@ class OptimiserPane(Card):
         self.outcome_plot.setLabel("left", "Pressure RMS", units="Pa")
         self.outcome_plot.setTitle("Observed outcomes")
         self.outcome_plot.showGrid(x=True, y=True, alpha=.15)
+        self.outcome_plot.addLegend()
         layout.addWidget(self.outcome_plot)
         line = QHBoxLayout()
         self.repeat_button = self._button("Repeat selected", self._repeat, line)
@@ -732,7 +851,7 @@ class OptimiserPane(Card):
         row.addWidget(self.map_uncertainty)
         layout.addLayout(row)
         self.map_plots, self.map_images, self.map_colours = [], [], []
-        for title, unit in (("Corrected dry NO", "ppm"), ("Pressure", "Pa")):
+        for title, unit in (("Corrected dry NO", "ppm"), ("Pressure", "Pa"), ("Pressure", "Pa")):
             plot = pg.PlotWidget(background=theme.BG)
             plot.setFixedHeight(theme.scale(240))
             plot.setTitle(title)
@@ -826,6 +945,8 @@ class OptimiserPane(Card):
                    "x_name": x_name, "y_name": y_name,
                    "feasible": feasible,
                    "metric": config.pressure_metric,
+                   "transducers": deepcopy(_dual_transducers(
+                       getattr(self.controller, "tdms_source", None))),
                    "slice_label": self.map_slice_label.text()}
         self.map_worker = MappingWorker(config, experiment.trials, points, context)
         self.map_worker.succeeded.connect(self._maps_ready)
@@ -841,7 +962,8 @@ class OptimiserPane(Card):
             return None
         fixed, _origin = self._slice()
         return (str(experiment.path), repr(experiment.trials), self.map_x.currentData(),
-                self.map_y.currentData(), tuple(fixed), tuple(sorted(self.controller.limits().items())))
+                self.map_y.currentData(), tuple(fixed), tuple(sorted(self.controller.limits().items())),
+                repr(getattr(self.controller, "tdms_source", None)))
 
     def _maps_ready(self, payload):
         result, context = payload
@@ -866,7 +988,13 @@ class OptimiserPane(Card):
         yl, yu, ys = MAP_VARIABLES[context["y_name"]]
         x, y = context["x"] * xs, context["y"] * ys
         dx, dy = x[1] - x[0], y[1] - y[0]
-        for index, key in enumerate(("no", "pressure")):
+        transducers = context.get("transducers")
+        descriptors = ([('no', "Corrected dry NO", "ppm")]
+                       + ([(item["id"], item["label"], "Pa RMS") for item in transducers]
+                          if transducers else
+                          [("pressure", PRESSURE_LABELS[context["metric"]],
+                            PRESSURE_UNITS[context["metric"]])]))
+        for index, (key, label, unit) in enumerate(descriptors):
             values = np.asarray(result[f"{key}_{suffix}"]).reshape(20, 20)
             image, plot = self.map_images[index], self.map_plots[index]
             image.setImage(values, autoLevels=False)
@@ -874,18 +1002,21 @@ class OptimiserPane(Card):
                                 x[-1] - x[0] + dx, y[-1] - y[0] + dy))
             low, high = float(np.nanmin(values)), float(np.nanmax(values))
             self.map_colours[index].setLevels((low, high if high > low else low + 1e-9))
-            self.map_colours[index].getAxis("left").setLabel(
-                "ppm" if index == 0 else PRESSURE_UNITS[context["metric"]])
+            self.map_colours[index].getAxis("left").setLabel(unit)
             plot.setLabel("bottom", xl, units=xu or None)
             plot.setLabel("left", yl, units=yu or None)
-            title = ("Corrected dry NO (ppm)" if index == 0 else
-                     PRESSURE_LABELS[context["metric"]] + f" ({PRESSURE_UNITS[context['metric']]})")
+            title = f"{label} ({unit})"
             plot.setTitle(title + (" — latent SD" if uncertainty else " — predicted mean"))
             plot.setRange(xRange=(x[0], x[-1]), yRange=(y[0], y[-1]), padding=0)
+        for index, plot in enumerate(self.map_plots):
+            plot.setVisible(index < len(descriptors))
 
     def _update_map_controls(self):
         experiment = self.controller.experiment
         mapping = bool(experiment and experiment.config.objective_mode == "map_no_pressure")
+        dual = bool(_dual_transducers(getattr(self.controller, "tdms_source", None)))
+        for index, plot in enumerate(self.map_plots):
+            plot.setVisible(index < (3 if dual else 2))
         count = sum(t["status"] == "completed" for t in experiment.trials) if experiment else 0
         self.map_refresh_button.setEnabled(bool(mapping and count >= experiment.config.initial_points
                                                and self.map_worker is None and not self.controller.busy))
@@ -976,7 +1107,7 @@ class OptimiserPane(Card):
         if not self._switch_ok():
             return
         dialog = ExperimentDialog(self.controller.session.autocalc_request, self,
-                                  mexa=self.controller.session.mexa)
+                                  mexa=self.controller.session.mexa, dual_pressure=True)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -1117,19 +1248,38 @@ class OptimiserPane(Card):
         def pressure_value(key):
             value = (pressure or {}).get(key)
             return "—" if value is None else f"{value:.5g}"
-        self.pressure_label.setText(
-            "Pressure: RMS " + pressure_value("rms_pa") + " Pa · peak excursion "
-            + pressure_value("peak_abs_pa") + " Pa\nDominant frequency "
-            + pressure_value("dominant_frequency_hz") + " Hz · spectral amplitude "
-            + pressure_value("dominant_amplitude_pa") + " Pa RMS" if pressure else
-            ("Pressure summary required before saving this mapping result." if mapping else
-             "No pressure summary attached."))
+        measured = _dual_transducers(pressure)
+        if measured:
+            lines = []
+            for item in measured:
+                metric = lambda key, current=item: (_transducer_metric(current, key))
+                shown = lambda key: "—" if metric(key) is None else f"{metric(key):.5g}"
+                lines.append(
+                    f"{item['label']}: RMS {shown('rms_pa')} Pa · peak excursion {shown('peak_abs_pa')} Pa\n"
+                    f"Dominant frequency {shown('dominant_frequency_hz')} Hz · spectral amplitude "
+                    f"{shown('dominant_amplitude_pa')} Pa RMS")
+            self.pressure_label.setText("\n".join(lines))
+        else:
+            self.pressure_label.setText(
+                "Pressure: RMS " + pressure_value("rms_pa") + " Pa · peak excursion "
+                + pressure_value("peak_abs_pa") + " Pa\nDominant frequency "
+                + pressure_value("dominant_frequency_hz") + " Hz · spectral amplitude "
+                + pressure_value("dominant_amplitude_pa") + " Pa RMS" if pressure else
+                ("Pressure summary required before saving this mapping result." if mapping else
+                 "No pressure summary attached."))
         if getattr(c, "pressure_worker", None) is not None:
             self.pressure_label.setText("Processing pressure data in the background…")
         source = getattr(c, "tdms_source", None)
-        self.tdms_source_label.setText(
-            f"TDMS folder: {source['folder']}\nWaveform: {source['group']} / {source['channel']}"
-            if source else "TDMS source not configured. Choose a folder and calibrated waveform channel.")
+        source_transducers = _dual_transducers(source)
+        if source_transducers:
+            waveforms = "\n".join(
+                f"{item['label']}: {item['group']} / {item['channel']}"
+                for item in source_transducers)
+            self.tdms_source_label.setText(f"TDMS folder: {source['folder']}\n{waveforms}")
+        else:
+            self.tdms_source_label.setText(
+                f"TDMS folder: {source['folder']}\nWaveform: {source['group']} / {source['channel']}"
+                if source else "TDMS source not configured. Choose a folder and calibrated waveform channel.")
         if tail:
             remaining = max(0, float(getattr(c, "labview_tail_remaining_s", 0)))
             self.labview_status.setText(
@@ -1174,7 +1324,10 @@ class OptimiserPane(Card):
                              f"{experiment.path.name}\n{experiment.config.dimensions} variables · "
                              f"{experiment.config.initial_points} initial points · "
                              f"NO @ {experiment.config.reference_o2:g}% O2"
-                             + (f" · map NO + {PRESSURE_LABELS[experiment.config.pressure_metric]}" if mapping else ""))
+                             + ((" · map NO + two pressure peak spectra"
+                                 if _dual_transducers(getattr(c, "tdms_source", None)) else
+                                 f" · map NO + {PRESSURE_LABELS[experiment.config.pressure_metric]}")
+                                if mapping else ""))
         if experiment:
             names = ", ".join(experiment.config.variable_names)
             self.summary.setToolTip(str(experiment.path) + f"\nVariables: {names}\nBounds: "
@@ -1224,7 +1377,13 @@ class OptimiserPane(Card):
         for t in experiment.trials if experiment else []:
             outcome = f"{t['result']['corrected_no']:.3f} ppm" if t["status"] == "completed" else t["status"]
             metric = experiment.config.pressure_metric
-            if metric in (t.get("pressure") or {}):
+            trial_transducers = _dual_transducers(t.get("pressure"))
+            if trial_transducers:
+                for transducer in trial_transducers:
+                    value = _transducer_metric(transducer, "dominant_amplitude_pa")
+                    if value is not None:
+                        outcome += f" · {transducer['label']} {value:.4g} Pa RMS"
+            elif metric in (t.get("pressure") or {}):
                 outcome += f" · {PRESSURE_LABELS[metric]} {t['pressure'][metric]:.4g} {PRESSURE_UNITS[metric]}"
             item = QListWidgetItem(f"#{t['number']}  {outcome}  ·  "
                                    + point_text(experiment.config, t["point"]))
@@ -1241,11 +1400,29 @@ class OptimiserPane(Card):
         self.outcome_plot.setVisible(bool(mapping or any(t.get("pressure") for t in completed)))
         if experiment:
             metric = experiment.config.pressure_metric
-            self.outcome_plot.setLabel("left", "Pressure " + PRESSURE_LABELS[metric], units=PRESSURE_UNITS[metric])
-            paired = [t for t in completed if metric in (t.get("pressure") or {})]
-            self.outcome_plot.plot([t["result"]["corrected_no"] for t in paired],
-                                   [t["pressure"][metric] for t in paired], pen=None,
-                                   symbol="o", symbolSize=8, symbolBrush=theme.TEXT_BRIGHT)
+            dual_trials = [t for t in completed if _dual_transducers(t.get("pressure"))]
+            if dual_trials:
+                self.outcome_plot.setLabel("left", "Dominant spectral amplitude", units="Pa RMS")
+                for index, sensor_id in enumerate(TdmsSourceDialog.TRANSDUCER_IDS):
+                    paired = []
+                    for trial in dual_trials:
+                        item = next((entry for entry in _dual_transducers(trial["pressure"])
+                                     if entry["id"] == sensor_id), None)
+                        value = _transducer_metric(item, "dominant_amplitude_pa")
+                        if value is not None:
+                            paired.append((trial, item, value))
+                    if paired:
+                        self.outcome_plot.plot(
+                            [trial["result"]["corrected_no"] for trial, _item, _value in paired],
+                            [value for _trial, _item, value in paired], pen=None,
+                            symbol="o" if index == 0 else "t", symbolSize=8,
+                            symbolBrush=theme.TEXT_BRIGHT, name=paired[0][1]["label"])
+            else:
+                self.outcome_plot.setLabel("left", "Pressure " + PRESSURE_LABELS[metric], units=PRESSURE_UNITS[metric])
+                paired = [t for t in completed if metric in (t.get("pressure") or {})]
+                self.outcome_plot.plot([t["result"]["corrected_no"] for t in paired],
+                                       [t["pressure"][metric] for t in paired], pen=None,
+                                       symbol="o", symbolSize=8, symbolBrush=theme.TEXT_BRIGHT)
         if completed:
             best = min(completed, key=lambda t: t["result"]["corrected_no"])
             self.best_label.setText(f"Lowest observed: {best['result']['corrected_no']:.3f} ppm "

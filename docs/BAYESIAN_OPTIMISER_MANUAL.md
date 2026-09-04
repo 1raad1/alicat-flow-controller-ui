@@ -26,15 +26,16 @@ rich-quench-lean experiment:
 | Mode | What the next proposal seeks |
 | --- | --- |
 | **Minimise NO** | Lower dry NO corrected to a fixed dry-O2 reference. |
-| **Map NO + pressure** | Reduce uncertainty in separate maps of corrected dry NO and one selected pressure response. |
+| **Map NO + pressure** | Reduce uncertainty in separate maps of corrected dry NO and the dominant spectral amplitude from each of two pressure transducers. |
 
 Both modes propose one operating point at a time. A proposal does **not** send a controller command. The operator
 must review the calculated flows, load them into the existing target fields,
 apply them through the normal controls, wait for the rig and analyser to settle,
 and start a measurement window or locally arm the LabVIEW recording trigger.
-The objective mode, pressure response and mapping weight are fixed when the
-campaign is created. Existing campaigns without these settings open in
-**Minimise NO** mode.
+The objective mode and mapping weight are fixed when the campaign is created.
+New mapping campaigns use two pressure transducers and dominant spectral
+amplitude. Existing one-transducer campaigns retain their saved pressure response;
+campaigns without objective settings open in **Minimise NO** mode.
 
 Parameter bounds and controller MAX FLOW values are feasibility constraints.
 They are not learned flame-stability limits and they do not establish that a
@@ -102,9 +103,9 @@ flag is true. `SearchConfig.values()` validates and names this array at
 
 In **New Bayesian experiment**:
 
-1. Choose **Minimise NO** or **Map NO + pressure**. For mapping, choose the
-   pressure response and **NO mapping weight (0–1)**. The default weight is 0.5;
-   it must be strictly between 0 and 1 so that both maps contribute. Enter the
+1. Choose **Minimise NO** or **Map NO + pressure**. For mapping, set the
+   **NO mapping weight (0–1)**. The default weight is 0.5; it must be strictly
+   between 0 and 1 so that the NO map and both pressure maps contribute. Enter the
    nominal/fixed power and stage-1 split.
 2. Enter bounds for H2 fraction, stage-1 phi and overall phi.
 3. Select **Optimise thermal input** and/or **Optimise stage-1 fuel split** only
@@ -469,18 +470,22 @@ exported request IDs or additional manifest files.
 
 2. Create a **Map NO + pressure** campaign. In **Current test**, open
    **TDMS source…**, choose the recording folder, inspect a representative
-   `.tdms` file, and select its time-domain pressure channel. The folder must
-   be readable by the flow PC; the search does not include subfolders.
-3. Declare the units and calibration of the values returned by npTDMS. Set
-   **Known pressure units** to Pa or kPa, or enter a custom scale, then check
-   the offset and enter the calibration identifier. Conversion is
+   `.tdms` file, and select two distinct time-domain pressure channels. Assign
+   clear labels for the two physical locations. The stable record IDs remain
+   `pressure_1` and `pressure_2`. The folder must be readable by the flow PC;
+   the search does not include subfolders.
+3. Declare the units and calibration of the values returned by npTDMS for each
+   transducer. Set **Known pressure units** to Pa or kPa, or enter a custom
+   scale, then check its offset, calibration identifier and optional clipping
+   bounds. Conversion is
    `pressure_pa = stored_value × scale_pa_per_unit + offset_pa`.
    npTDMS has already applied any NI scaling represented in the file. A group
-   named `converted` does not establish its physical units, and `FFT` channels
+   named `converted` does not establish physical units, and `FFT` channels
    are spectra rather than eligible time-domain waveforms.
 4. Set **Minimum pressure recording (s)**, independently of the NO averaging
    duration. Its default is 1 s. Review the spectral band, segment length,
-   overlap and any known clipping bounds. The default segment is 4096 samples
+   overlap. These settings are shared; calibration and clipping remain per
+   transducer. The default segment is 4096 samples
    with 2048-sample overlap; it must fit the pressure record. Use waveform
    timing where available. Enable the trigger-time fallback only if LabVIEW
    writes one new recording per trigger and the file lacks a start timestamp.
@@ -497,10 +502,10 @@ exported request IDs or additional manifest files.
    continues collecting until the response delay, minimum NO duration and
    fresh flow/MEXA coverage are satisfied. It then saves the measurement
    window and processes the matching TDMS file in a background worker.
-8. Review the pressure result and saved NO/O2 averages, confirm their
+8. Review both pressure results and the saved NO/O2 averages, confirm their
    uncorrected dry basis, and click **Save result**. Manual NO/O2 capture
    requires entering the averages for the recorded window. A mapping test
-   cannot be completed without valid pressure data. Attaching pressure does
+   cannot be completed without valid data from both transducers. Attaching pressure does
    not automatically save the NO result or change flows.
 
 Without local arming, `log` and `stop` retain their ordinary flow-CSV logging
@@ -543,7 +548,8 @@ reach that limit before completion.
 
 Automatic file discovery waits for a new or changed file to remain unchanged
 for 2 s, with a default 60 s search timeout after NO collection finishes.
-It validates channel, timing, calibration and file completeness. A single
+It validates both channels, their common timing, calibrations and file
+completeness. A single
 recording that matches the trigger interval can be used whole; a continuous
 waveform is cropped to the trigger interval. File modification time is never
 used as the waveform's start timestamp. Missing, ambiguous, incomplete or
@@ -551,16 +557,17 @@ changed recordings are reported rather than silently replaced by the newest
 file. After the worker finishes, **Choose TDMS file…** retries with the
 operator-selected recording and the same waveform checks.
 
-The saved pressure summary retains the source path and SHA-256, selected
-sample offset, original sample count, timing source and trigger association.
+The saved pressure summary retains both channel assignments and labels, the
+source path and SHA-256, selected sample offset, original sample count, timing
+source and trigger association.
 The source TDMS file is not modified. `find_tdms_capture()` and
 `process_tdms_capture()` implement these rules in
 [`tdms_capture.py`](../flow_controller/domain/tdms_capture.py).
 
 ### Pressure response definitions
 
-For calibrated samples $p_i$ in Pa, the processor removes the complete selected
-record's mean, giving $p'_i=p_i-\bar p$. The available responses are:
+For calibrated samples $p_i$ in Pa from either transducer, the processor removes
+the complete selected record's mean, giving $p'_i=p_i-\bar p$. It saves:
 
 | UI response | Saved field | Calculation |
 | --- | --- | --- |
@@ -578,8 +585,9 @@ than two segments and is not a standard error for the pressure mean.
 
 Nonfinite samples and samples touching declared clipping limits are rejected.
 Omitting clipping bounds leaves clipping unchecked. The first attached
-pressure result fixes a comparison signature containing sample rate, channel,
-calibration identifier, units and analysis settings. Record duration is
+pressure result fixes a comparison signature containing the shared sample rate
+and, for each stable transducer ID, its label, channel, calibration identifier,
+units and analysis settings. Record duration is
 excluded from that signature. These calculations and checks are implemented
 by `pressure_metrics()` and `pressure_signature()` in
 [`pressure.py`](../flow_controller/domain/pressure.py).
@@ -1406,9 +1414,10 @@ balance between possible lower NO and uncertainty.
 
 ### Mapping acquisition and operating-space maps
 
-After the completed initial design, **Map NO + pressure** fits two independent
-Matérn-5/2 Gaussian processes: one for corrected dry NO and one for the chosen
-pressure response. Both use measured flow-derived input coordinates. Each
+After the completed initial design, a new **Map NO + pressure** campaign fits
+three independent Matérn-5/2 Gaussian processes: one for corrected dry NO and
+one for each transducer's dominant in-band spectral amplitude. All three use
+measured flow-derived input coordinates. Each
 response is centred and scaled by its own sample-set standard deviation
 (`ddof=0`); a constant response uses `max(abs(mean), 1)` as its scale. This
 differs from the NO-only fit's minimum scale of 1 ppm. Optional corrected NO
@@ -1437,16 +1446,21 @@ independent of measured response values. Negative numerical scores are
 clamped to zero. The selected next test maximises
 
 $$
-S(x)=wR_{NO}(x)+(1-w)R_{pressure}(x),\qquad 0<w<1.
+S(x)=wR_{NO}(x)+\frac{1-w}{2}\left(R_{P1}(x)+R_{P2}(x)\right),
+\qquad 0<w<1.
 $$
 
-The default $w=0.5$ balances fractional uncertainty reduction in the two maps.
+The default $w=0.5$ assigns half the acquisition score to NO and divides the
+other half equally between the two pressure maps. Standardising each response
+before fitting prevents the channel with the larger numerical pressure scale
+from receiving more weight merely because of its units or calibration range.
 Changing the weight does not define a combined emissions/pressure performance
 objective. A mapping proposal may have higher NO or pressure than a previous
 test because it is selected for information. The calculations are implemented
 by `integrated_variance_reduction()` and the mapping branch of `suggest()` in
-[`bayesian.py`](../flow_controller/domain/bayesian.py). The stored algorithm ID
-is `fcbo-matern52-no-pressure-ivr-v1`.
+[`bayesian.py`](../flow_controller/domain/bayesian.py). New dual-transducer
+suggestions store algorithm ID `fcbo-matern52-no-dual-pressure-ivr-v1`;
+legacy one-transducer campaigns retain `fcbo-matern52-no-pressure-ivr-v1`.
 
 After the initial completed design, use **Operating-space maps**, select
 **Horizontal** and **Vertical** variables, then click **Refresh maps**. The
@@ -1454,8 +1468,9 @@ plots evaluate a 20 × 20 slice. Other variables remain at the selected
 completed test's measured condition, or at their bounds midpoint. **Show
 uncertainty (latent SD)** switches between predicted means and latent standard
 deviations. Infeasible cells are blank, and changing the campaign, slice or
-flow ceilings requires refreshing the predictions. Mean plots show ppm for
-corrected NO and Pa for pressure, with Pa RMS for spectral amplitude.
+flow ceilings requires refreshing the predictions. New campaigns show three
+plots: corrected NO in ppm and each labelled transducer's spectral amplitude in
+Pa RMS.
 
 `predict_mapping()` uses deterministic seed-0 fits for these displays; no
 candidate is selected and no flow command is sent. Rendering and worker
@@ -1465,10 +1480,12 @@ region, and the application does not automatically choose a stopping point.
 
 ## 9. Experiment records and export
 
-An experiment is stored as `.fcbo.json`. New campaigns use campaign schema 3;
-the loader also accepts schema-1 and schema-2 campaigns. Files without an
-objective mode retain NO minimisation. Keep a copy before modifying a campaign
-with this version: earlier applications cannot read schema 3. The campaign JSON is the
+An experiment is stored as `.fcbo.json`. New campaigns use campaign schema 4;
+the loader also accepts schema-1, schema-2 and schema-3 campaigns. Files without
+an objective mode retain NO minimisation, and old one-transducer mapping records
+keep their flat source, pressure and prediction fields. Keep a copy before
+modifying a campaign with this version: earlier applications cannot read schema
+4. The campaign JSON is the
 authoritative scientific record. A **condition log** is the self-contained audit
 record stored in a finalised trial under `condition_log`. Every newly completed
 or invalid condition receives condition-log schema 1 before the campaign is
@@ -1624,16 +1641,19 @@ MEXA capture, by contrast, requires its receiver audit log before a window can
 start.
 
 For mapping, each trial also stores a `capture_id` and a validated `pressure`
-summary. The campaign keeps its `tdms_source` profile and the comparison
+summary. New summaries contain two transducer entries under the stable IDs
+`pressure_1` and `pressure_2`; the TDMS file identity and selected interval are
+shared. The campaign keeps its `tdms_source` profile and the comparison
 `pressure_signature` fixed by the first attached pressure result. A saved NO
 window can wait for a pressure-file retry without losing its averages.
 `Experiment.attach_pressure()` accepts an identical retry but rejects an
 attempt to replace an existing result with different pressure data. Mapping
 completion and model fitting require valid pressure for every completed test.
 
-CSV export includes the objective mode, pressure metric and capture ID, all
-pressure amplitudes and dominant frequency, raw-file reference, full pressure
-summary JSON, mapping score, and suggested pressure mean and latent SD. Keep
+CSV export retains the legacy pressure columns and adds fixed pressure-1 and
+pressure-2 label, dominant-amplitude, dominant-frequency, suggested-mean and
+latent-SD columns. It also includes the objective mode, capture ID, shared
+raw-file reference, full pressure summary JSON and mapping score. Keep
 the raw TDMS files alongside the flow and MEXA audit logs to reconstruct the
 measurement from source samples.
 

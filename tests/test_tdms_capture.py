@@ -31,7 +31,7 @@ class TdmsCaptureTests(unittest.TestCase):
         self.source = {"folder": str(self.root), "group": "raw", "channel": "pressure",
                        "calibration_id": "cal-1", "segment_samples": 1000, "overlap_samples": 500}
 
-    def write(self, path=None, *, start=True, increment=.001, count=5000, values=None, offset=0):
+    def write(self, path=None, *, start=True, increment=.001, count=5000, values=None, offset=0, dual=False):
         path = path or self.path
         props = {"unit_string": "Volts", "wf_samples": 1017}
         if start is not False:
@@ -41,13 +41,47 @@ class TdmsCaptureTests(unittest.TestCase):
         if increment is not None:
             props["wf_increment"] = increment
         values = 3 + 2 * np.sin(2 * np.pi * 125 * np.arange(count) / 1000) if values is None else values
-        with TdmsWriter(path) as writer:
-            writer.write_segment([
+        channels = [
                 ChannelObject("raw", "pressure", values, properties=props),
                 ChannelObject("converted", "pressure", np.zeros(32), properties=props),
                 ChannelObject("FFT", "pressure (FFT - (Peak))", np.ones(32), properties=props),
-            ])
+            ]
+        if dual:
+            channels.append(ChannelObject("raw", "pressure2", values * 2, properties=props))
+        with TdmsWriter(path) as writer:
+            writer.write_segment(channels)
         return path
+
+    def dual_source(self):
+        shared = {key: value for key, value in self.source.items()
+                  if key not in ("group", "channel", "calibration_id")}
+        shared["transducers"] = [
+            {"id": "pressure_1", "label": "PT1", "group": "raw", "channel": "pressure",
+             "calibration_id": "cal-1", "scale_pa_per_unit": 1, "offset_pa": 0,
+             "clip_min": None, "clip_max": None},
+            {"id": "pressure_2", "label": "PT2", "group": "raw", "channel": "pressure2",
+             "calibration_id": "cal-2", "scale_pa_per_unit": 1, "offset_pa": 0,
+             "clip_min": None, "clip_max": None},
+        ]
+        return shared
+
+    def test_dual_source_and_capture_process_two_synchronised_channels(self):
+        self.write(dual=True)
+        source = self.dual_source()
+        self.assertEqual(td.validate_tdms_source(source)["transducers"][1]["id"], "pressure_2")
+        result = td.process_tdms_capture(self.path, source, self.capture)
+        self.assertEqual([item["id"] for item in result["transducers"]], ["pressure_1", "pressure_2"])
+        self.assertAlmostEqual(result["transducers"][1]["metrics"]["dominant_amplitude_pa"],
+                               2 * result["transducers"][0]["metrics"]["dominant_amplitude_pa"])
+        self.assertEqual(validate_pressure_summary(result), result)
+        duplicate = self.dual_source()
+        duplicate["transducers"][1]["channel"] = "pressure"
+        with self.assertRaisesRegex(ValueError, "distinct"):
+            td.validate_tdms_source(duplicate)
+        duplicate_label = self.dual_source()
+        duplicate_label["transducers"][1]["label"] = "pt1"
+        with self.assertRaisesRegex(ValueError, "unique"):
+            td.validate_tdms_source(duplicate_label)
 
     def test_inspection_uses_actual_count_metadata_and_flags_fft(self):
         self.write(offset=.25)

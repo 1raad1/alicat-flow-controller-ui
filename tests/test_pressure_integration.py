@@ -54,6 +54,29 @@ def pressure_for(experiment):
     }
 
 
+def dual_pressure_for(experiment):
+    base = pressure_for(experiment)
+    metrics = {key: base[key] for key in (
+        "rms_pa", "peak_abs_pa", "dominant_frequency_hz", "dominant_amplitude_pa")}
+    metrics["rms_window_sd_pa"] = 0
+    result = {key: base[key] for key in (
+        "protocol", "type", "experiment_id", "trial_id", "capture_id", "start", "end",
+        "sample_rate_hz", "sample_count", "units")}
+    result.update(raw_file=str(experiment.path.parent / "capture.tdms"), raw_sha256="a" * 64)
+    result["association"] = {
+        "mode": "tdms-retrospective", "trigger_start": base["start"], "trigger_end": base["end"],
+        "timing_source": "tdms_waveform", "sample_offset": 0,
+        "source_sample_count": base["sample_count"], "source_start": base["start"]}
+    result["transducers"] = [
+        {"id": f"pressure_{number}", "label": label, "channel": f"raw/p{number}",
+         "calibration_id": f"cal-{number}", "analysis": deepcopy(base["analysis"]),
+         "quality": deepcopy(base["quality"]),
+         "metrics": {key: value * number if key != "dominant_frequency_hz" else value
+                     for key, value in metrics.items()}}
+        for number, label in ((1, "Combustor"), (2, "Plenum"))]
+    return result
+
+
 def record_flow_window(experiment, offset=0):
     config = experiment.config
     targets = config.targets(POINT)
@@ -95,6 +118,23 @@ class PressureExperimentIntegrationTests(unittest.TestCase):
         self.assertEqual(row["capture_id"], trial["capture_id"])
         self.assertEqual(json.loads(row["pressure_summary_json"]), trial["pressure"])
         self.assertEqual(json.loads(row["condition_log_json"]), trial["condition_log"])
+
+    def test_dual_pressure_persists_and_exports_both_peak_spectral_amplitudes(self):
+        payload = dual_pressure_for(self.experiment)
+        self.assertTrue(self.experiment.attach_pressure(payload))
+        self.experiment.complete(100, 10)
+        reloaded = Experiment.load(self.experiment.path)
+        self.assertEqual([item["id"] for item in reloaded.trials[0]["pressure"]["transducers"]],
+                         ["pressure_1", "pressure_2"])
+        destination = self.root / "dual.csv"
+        reloaded.export_csv(destination)
+        with destination.open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        self.assertEqual(row["pressure_1_label"], "Combustor")
+        self.assertEqual(row["pressure_2_label"], "Plenum")
+        self.assertEqual(float(row["pressure_1_dominant_amplitude_pa"]), 2)
+        self.assertEqual(float(row["pressure_2_dominant_amplitude_pa"]), 4)
+        self.assertEqual(json.loads(row["pressure_summary_json"]), reloaded.trials[0]["pressure"])
 
     def test_wrong_identity_stale_nonoverlap_and_clipped_rejected(self):
         for key in ("experiment_id", "trial_id", "capture_id"):
