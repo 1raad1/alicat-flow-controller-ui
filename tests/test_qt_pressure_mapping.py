@@ -78,7 +78,7 @@ class ApplicationWorkerTests(unittest.TestCase):
             release.wait(5)
             return []
 
-        dialog = TdmsSourceDialog()
+        dialog = TdmsSourceDialog(dual=False)
         with patch("flow_controller.ui.qt_optimiser.inspect_tdms", side_effect=inspect):
             dialog.inspect_sample("sample.tdms")
             worker = dialog.worker
@@ -133,6 +133,17 @@ class QtPressureMappingTests(unittest.TestCase):
         self.assertEqual(legacy.objective_mode.currentData(), "minimise_no")
         self.assertFalse(legacy.pressure_metric.isEnabled())
         self.assertFalse(legacy.entries["mapping_weight"].isEnabled())
+        old_mapping = ExperimentDialog(replace(
+            self.settings, objective_mode="map_no_pressure", pressure_metric="peak_abs_pa"))
+        self.addCleanup(old_mapping.close)
+        self.assertTrue(old_mapping.pressure_metric.isEnabled())
+        self.assertEqual(old_mapping.pressure_metric.currentData(), "peak_abs_pa")
+        new_mapping = ExperimentDialog(replace(
+            self.settings, objective_mode="map_no_pressure", pressure_metric="peak_abs_pa"),
+            dual_pressure=True)
+        self.addCleanup(new_mapping.close)
+        self.assertFalse(new_mapping.pressure_metric.isEnabled())
+        self.assertEqual(new_mapping.pressure_metric.currentData(), "dominant_amplitude_pa")
 
     def test_mapping_weight_rejects_endpoints(self):
         for weight in ("0", "1"):
@@ -281,17 +292,17 @@ class QtPressureMappingTests(unittest.TestCase):
         timer.stop()
         self.assertIsNone(pane.map_worker, "Real mapping prediction exceeded 15 seconds")
         self.assertIsNotNone(pane._map_result, pane.map_status.text())
-        for image in pane.map_images:
+        for image in pane.map_images[:2]:
             self.assertEqual(image.image.shape, (20, 20))
             self.assertTrue(np.isfinite(image.image).all())
             self.assertGreater(float(np.ptp(image.image)), 0)
         pane.map_uncertainty.setChecked(True)
-        for image in pane.map_images:
+        for image in pane.map_images[:2]:
             self.assertTrue(np.isfinite(image.image).all())
             self.assertTrue((image.image >= 0).all())
 
     def test_tdms_source_inspection_excludes_spectra_and_requires_calibration(self):
-        dialog = TdmsSourceDialog()
+        dialog = TdmsSourceDialog(dual=False)
         self.addCleanup(dialog.close)
         self.assertEqual(dialog.entries["folder"].text(), "")
         self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), "")
@@ -359,7 +370,7 @@ class QtPressureMappingTests(unittest.TestCase):
         self.assertEqual(dialog.source, profile, dialog.error.text())
 
     def test_pressure_unit_shortcuts_are_explicit_and_keep_calibration_required(self):
-        dialog = TdmsSourceDialog()
+        dialog = TdmsSourceDialog(dual=False)
         self.addCleanup(dialog.close)
         self.assertEqual(dialog.pressure_units.currentData(), "custom")
         self.assertEqual(dialog.entries["scale_pa_per_unit"].text(), "")
@@ -378,6 +389,112 @@ class QtPressureMappingTests(unittest.TestCase):
         self.assertEqual(dialog.source["scale_pa_per_unit"], 1000)
         dialog.pressure_units.setCurrentIndex(dialog.pressure_units.findData("custom"))
         self.assertFalse(dialog.entries["scale_pa_per_unit"].isReadOnly())
+
+    def test_dual_tdms_source_accepts_independent_calibrations_and_shared_analysis(self):
+        dialog = TdmsSourceDialog()
+        self.addCleanup(dialog.close)
+        dialog.entries["folder"].setText(self.directory.name)
+        for key, value in {
+                "sample_rate_hz": "10000", "min_recording_s": "2",
+                "band_low_hz": "40", "band_high_hz": "2000",
+                "segment_samples": "1024", "overlap_samples": "512"}.items():
+            dialog.entries[key].setText(value)
+        configured = (
+            ("pressure_1", "Combustor", "raw", "PD_1", "250", "-2", "cal-a", "-10", "10"),
+            ("pressure_2", "Plenum", "converted", "PD_2", "1000", "3", "cal-b", "-5", "5"),
+        )
+        for sensor_id, label, group, channel, scale, offset, calibration, low, high in configured:
+            fields = dialog.sensor_entries[sensor_id]
+            for key, value in (("label", label), ("group", group), ("channel", channel),
+                               ("scale_pa_per_unit", scale), ("offset_pa", offset),
+                               ("calibration_id", calibration), ("clip_min", low),
+                               ("clip_max", high)):
+                fields[key].setText(value)
+        dialog.accept()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted, dialog.error.text())
+        self.assertEqual([item["id"] for item in dialog.source["transducers"]],
+                         ["pressure_1", "pressure_2"])
+        self.assertEqual([item["label"] for item in dialog.source["transducers"]],
+                         ["Combustor", "Plenum"])
+        self.assertEqual(dialog.source["transducers"][0]["scale_pa_per_unit"], 250)
+        self.assertEqual(dialog.source["transducers"][1]["offset_pa"], 3)
+        self.assertEqual(dialog.source["band_high_hz"], 2000)
+
+    def test_dual_tdms_source_rejects_ambiguous_labels_and_channels(self):
+        dialog = TdmsSourceDialog()
+        self.addCleanup(dialog.close)
+        dialog.entries["folder"].setText(self.directory.name)
+        for sensor_id in dialog.TRANSDUCER_IDS:
+            fields = dialog.sensor_entries[sensor_id]
+            fields["group"].setText("raw")
+            fields["channel"].setText("pressure")
+            fields["scale_pa_per_unit"].setText("1")
+            fields["calibration_id"].setText(sensor_id)
+        dialog.sensor_entries["pressure_1"]["label"].setText("Sensor")
+        dialog.sensor_entries["pressure_2"]["label"].setText("sensor")
+        dialog.accept()
+        self.assertIn("labels must be distinct", dialog.error.text())
+        dialog.sensor_entries["pressure_2"]["label"].setText("Other sensor")
+        dialog.accept()
+        self.assertIn("group/channel selections must be distinct", dialog.error.text())
+
+    def test_dual_source_and_pending_summary_render_both_labels(self):
+        self.mapping_campaign()
+        pane = self.pane()
+        source = {
+            "folder": self.directory.name,
+            "transducers": [
+                {"id": "pressure_1", "label": "Combustor", "group": "raw", "channel": "PD_1"},
+                {"id": "pressure_2", "label": "Plenum", "group": "converted", "channel": "PD_2"},
+            ],
+        }
+        pressure = {"transducers": [
+            {"id": "pressure_1", "label": "Combustor", "metrics": {
+                "rms_pa": 10, "peak_abs_pa": 20, "dominant_frequency_hz": 125,
+                "dominant_amplitude_pa": 8}},
+            {"id": "pressure_2", "label": "Plenum", "metrics": {
+                "rms_pa": 30, "peak_abs_pa": 50, "dominant_frequency_hz": 250,
+                "dominant_amplitude_pa": 24}},
+        ]}
+        self.controller.experiment.pending["pressure"] = pressure
+        with patch.object(type(self.controller), "tdms_source", new_callable=unittest.mock.PropertyMock,
+                          create=True, return_value=source):
+            pane.refresh()
+        self.assertIn("Combustor: raw / PD_1", pane.tdms_source_label.text())
+        self.assertIn("Plenum: converted / PD_2", pane.tdms_source_label.text())
+        self.assertIn("Combustor: RMS 10 Pa", pane.pressure_label.text())
+        self.assertIn("Plenum: RMS 30 Pa", pane.pressure_label.text())
+        self.assertIn("250 Hz", pane.pressure_label.text())
+        trial = self.controller.experiment.pending
+        trial.update(status="completed", result={"corrected_no": 42}, pressure=pressure)
+        pane.refresh()
+        self.assertIn("Combustor 8 Pa RMS", pane.history.item(0).text())
+        self.assertIn("Plenum 24 Pa RMS", pane.history.item(0).text())
+        self.assertEqual(len(pane.outcome_plot.listDataItems()), 2)
+
+    def test_dual_map_render_uses_three_stable_response_keys(self):
+        self.mapping_campaign()
+        pane = self.pane()
+        context = {
+            "x": np.linspace(.1, .2, 20), "y": np.linspace(1, 1.2, 20),
+            "x_name": "h2_fraction", "y_name": "phi_stage1",
+            "metric": "dominant_amplitude_pa",
+            "transducers": [
+                {"id": "pressure_1", "label": "Combustor"},
+                {"id": "pressure_2", "label": "Plenum"},
+            ],
+        }
+        result = {}
+        for key, value in (("no", 1), ("pressure_1", 2), ("pressure_2", 3)):
+            result[f"{key}_mean"] = np.full(400, value)
+            result[f"{key}_sd"] = np.full(400, value + 10)
+        pane._map_result = (result, context)
+        pane._draw_maps()
+        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images], [1, 2, 3])
+        self.assertIn("Combustor", pane.map_plots[1].getPlotItem().titleLabel.text)
+        self.assertIn("Plenum", pane.map_plots[2].getPlotItem().titleLabel.text)
+        pane.map_uncertainty.setChecked(True)
+        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images], [11, 12, 13])
 
     def test_source_settings_and_legacy_tail_controls(self):
         pane = self.pane()

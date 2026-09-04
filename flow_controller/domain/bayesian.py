@@ -231,8 +231,30 @@ def noisy_expected_improvement(gp, baseline, candidates, rng, draws=128):
 
 def _pressure_values(config, completed):
     values = []
+    dual = None
     for trial in completed:
         pressure = trial.get("pressure")
+        current_dual = isinstance(pressure, dict) and "transducers" in pressure
+        if dual is None:
+            dual = current_dual
+        elif dual != current_dual:
+            raise ValueError("Completed mapping trials cannot mix single and dual pressure summaries.")
+        if current_dual:
+            entries = pressure.get("transducers")
+            if (not isinstance(entries, list) or len(entries) != 2
+                    or [item.get("id") for item in entries if isinstance(item, dict)] != ["pressure_1", "pressure_2"]):
+                raise ValueError("Completed mapping trials require pressure_1 and pressure_2 summaries.")
+            row = []
+            for item in entries:
+                metrics = item.get("metrics")
+                if not isinstance(metrics, dict) or "dominant_amplitude_pa" not in metrics:
+                    raise ValueError("Dual pressure mapping requires dominant_amplitude_pa for each transducer.")
+                value = finite(metrics["dominant_amplitude_pa"], "Pressure dominant_amplitude_pa")
+                if value < 0:
+                    raise ValueError("Pressure amplitude must be nonnegative.")
+                row.append(value)
+            values.append(row)
+            continue
         if not isinstance(pressure, dict) or config.pressure_metric not in pressure:
             raise ValueError(f"Completed mapping trials require pressure {config.pressure_metric}.")
         value = finite(pressure[config.pressure_metric], f"Pressure {config.pressure_metric}")
@@ -264,7 +286,12 @@ def _fit_mapping_models(config, completed, seed):
     if np.any(errors < 0):
         raise ValueError("Corrected NO SEM must be nonnegative.")
     models = []
-    for response, sem in ((no, errors), (pressure, np.zeros(len(completed)))):
+    responses = [(no, errors)]
+    if pressure.ndim == 2:
+        responses.extend((pressure[:, index], np.zeros(len(completed))) for index in range(2))
+    else:
+        responses.append((pressure, np.zeros(len(completed))))
+    for response, sem in responses:
         centre, scale = float(response.mean()), float(response.std())
         # Use actual response units even below 1 Pa; a unit-size floor would
         # change the acquisition when the same pressure data are rescaled.
@@ -321,15 +348,19 @@ def predict_mapping(config, trials, points):
     points = list(points)
     for point in points:
         config.targets(point)
-    result = {"no_mean": [], "no_sd": [], "pressure_mean": [], "pressure_sd": []}
-    _pressure_values(config, completed)
+    pressure_values = _pressure_values(config, completed)
+    dual = pressure_values.ndim == 2
+    result = ({"no_mean": [], "no_sd": [], "pressure_1_mean": [], "pressure_1_sd": [],
+               "pressure_2_mean": [], "pressure_2_sd": []} if dual else
+              {"no_mean": [], "no_sd": [], "pressure_mean": [], "pressure_sd": []})
     if not points:
         return result
     bounds = np.asarray(config.bounds)
     x = (np.asarray(points, dtype=float) - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
     with threadpool_limits(limits=1):
         models = _fit_mapping_models(config, completed, seed=0)
-        for name, (gp, centre, scale) in zip(("no", "pressure"), models):
+        names = ("no", "pressure_1", "pressure_2") if dual else ("no", "pressure")
+        for name, (gp, centre, scale) in zip(names, models):
             _, mean, _, _, variance = _latent_posterior(gp, np.empty((0, config.dimensions)), x)
             result[name + "_mean"] = (mean * scale + centre).tolist()
             result[name + "_sd"] = (np.sqrt(variance) * scale).tolist()
@@ -361,8 +392,10 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     sobol_count = len(pool)
     mapping = config.objective_mode == "map_no_pressure"
     completed = [t for t in trials if t["status"] == "completed"]
+    dual_mapping = False
     if mapping:
-        _pressure_values(config, completed)
+        pressure_values = _pressure_values(config, completed)
+        dual_mapping = pressure_values.ndim == 2
         # Keep quadrature locations independent of response values and of the
         # exclusion of previous trial locations from the suggestion pool.
         reference = np.asarray([candidate for candidate in pool
@@ -394,9 +427,10 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         "corrected_sem": trial["result"].get("corrected_sem"),
     } for trial in completed]
     if mapping:
+        effective_pressure_metric = "dominant_amplitude_pa" if dual_mapping else config.pressure_metric
         for payload, trial in zip(training_payload, completed):
-            payload.update(pressure=trial["pressure"], pressure_metric=config.pressure_metric)
-    hash_payload = ({"pressure_metric": config.pressure_metric, "trials": training_payload}
+            payload.update(pressure=trial["pressure"], pressure_metric=effective_pressure_metric)
+    hash_payload = ({"pressure_metric": effective_pressure_metric, "trials": training_payload}
                     if mapping else training_payload)
     provenance = {
         "algorithm_version": "fcbo-sobol-maximin-v1",
@@ -414,7 +448,7 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     }
     if mapping:
         provenance.update(objective_mode=config.objective_mode,
-                          pressure_metric=config.pressure_metric,
+                          pressure_metric=effective_pressure_metric,
                           mapping_no_weight=config.mapping_no_weight)
     if len(completed) < config.initial_points:
         if len(tried):
@@ -429,29 +463,52 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         with threadpool_limits(limits=1):
             models = _fit_mapping_models(config, completed, seed)
             no_score, no_mean, no_sd = integrated_variance_reduction(models[0][0], reference, pool)
-            pressure_score, pressure_mean, pressure_sd = integrated_variance_reduction(
-                models[1][0], reference, pool)
+            pressure_results = [integrated_variance_reduction(model[0], reference, pool)
+                                for model in models[1:]]
         weight = config.mapping_no_weight
+        pressure_score = sum(item[0] for item in pressure_results) / len(pressure_results)
         score = weight * no_score + (1 - weight) * pressure_score
         index = int(np.argmax(score))
         _, no_centre, no_scale = models[0]
-        _, pressure_centre, pressure_scale = models[1]
-        return {
+        response = {
             **provenance,
             "point": (lower + pool[index] * span).tolist(),
             "method": "Bayesian NO/pressure integrated variance reduction",
             "algorithm_version": "fcbo-matern52-no-pressure-ivr-v1",
             "predicted_no": float(no_mean[index] * no_scale + no_centre),
             "latent_sd": float(no_sd[index] * no_scale),
-            "predicted_pressure_pa": float(pressure_mean[index] * pressure_scale + pressure_centre),
-            "pressure_latent_sd_pa": float(pressure_sd[index] * pressure_scale),
             "mapping_score": float(score[index]),
             "mapping_no_score": float(no_score[index]),
             "mapping_pressure_score": float(pressure_score[index]),
             "mapping_reference_count": len(reference),
             "no_model": _mapping_model_metadata(models[0], "ppm"),
-            "pressure_model": _mapping_model_metadata(models[1], "Pa"),
         }
+        if len(models) == 2:
+            pressure_mean, pressure_sd = pressure_results[0][1:]
+            _, pressure_centre, pressure_scale = models[1]
+            response.update(
+                predicted_pressure_pa=float(pressure_mean[index] * pressure_scale + pressure_centre),
+                pressure_latent_sd_pa=float(pressure_sd[index] * pressure_scale),
+                pressure_model=_mapping_model_metadata(models[1], "Pa"))
+        else:
+            response["method"] = "Bayesian NO/two-pressure integrated variance reduction"
+            predictions = []
+            for number, (model, values) in enumerate(zip(models[1:], pressure_results), 1):
+                mean, sd = values[1], values[2]
+                _, centre, scale = model
+                predicted = float(mean[index] * scale + centre)
+                uncertainty = float(sd[index] * scale)
+                predictions.append((predicted, uncertainty))
+                response[f"predicted_pressure_{number}_pa"] = predicted
+                response[f"pressure_{number}_latent_sd_pa"] = uncertainty
+                response[f"pressure_{number}_model"] = _mapping_model_metadata(model, "Pa")
+                response[f"mapping_pressure_{number}_score"] = float(values[0][index])
+            worst = max(range(2), key=lambda item: predictions[item][0])
+            response["predicted_pressure_pa"] = predictions[worst][0]
+            response["pressure_latent_sd_pa"] = predictions[worst][1]
+            response["pressure_model"] = response[f"pressure_{worst + 1}_model"]
+            response["algorithm_version"] = "fcbo-matern52-no-dual-pressure-ivr-v1"
+        return response
 
     x = np.array([config.observed_vector(t["window"]) for t in completed])
     x = (x - lower) / span

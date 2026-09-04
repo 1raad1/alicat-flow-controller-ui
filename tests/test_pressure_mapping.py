@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -10,6 +12,7 @@ from flow_controller.domain.bayesian import (
     SearchConfig, _fit_mapping_models, integrated_variance_reduction,
     predict_mapping, suggest,
 )
+from flow_controller.core.optimisation import Experiment
 
 
 def config(**changes):
@@ -36,7 +39,47 @@ def response_data():
             for point, x in zip(points, unit)]
 
 
+def dual_response_data():
+    data = response_data()
+    for index, item in enumerate(data):
+        amplitude = item["pressure"]["dominant_amplitude_pa"]
+        item["pressure"] = {"transducers": [
+            {"id": "pressure_1", "metrics": {"dominant_amplitude_pa": amplitude}},
+            {"id": "pressure_2", "metrics": {"dominant_amplitude_pa": amplitude * (1.2 + .02 * index)}},
+        ]}
+    return data
+
+
 class PressureMappingTests(unittest.TestCase):
+    def test_schema_three_flat_campaign_still_loads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "campaign.json"
+            Experiment.create(path, config())
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["schema"] = 3
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = Experiment.load(path)
+            self.assertEqual(loaded.data["schema"], 3)
+    def test_dual_mapping_fits_each_peak_amplitude_independently(self):
+        settings = config(pressure_metric="rms_pa")
+        data = dual_response_data()
+        result = predict_mapping(settings, data, [item["point"] for item in data])
+        self.assertEqual(set(result), {"no_mean", "no_sd", "pressure_1_mean", "pressure_1_sd",
+                                      "pressure_2_mean", "pressure_2_sd"})
+        answer = suggest(settings, data, seed=7)
+        self.assertEqual(answer["pressure_metric"], "dominant_amplitude_pa")
+        self.assertAlmostEqual(answer["mapping_score"], .5 * answer["mapping_no_score"]
+                               + .25 * answer["mapping_pressure_1_score"]
+                               + .25 * answer["mapping_pressure_2_score"])
+        for key in ("predicted_pressure_1_pa", "pressure_1_latent_sd_pa",
+                    "predicted_pressure_2_pa", "pressure_2_latent_sd_pa",
+                    "pressure_1_model", "pressure_2_model"):
+            self.assertIn(key, answer)
+        changed = deepcopy(data)
+        changed[0]["pressure"]["transducers"][0]["metrics"]["dominant_amplitude_pa"] += 3
+        updated = predict_mapping(settings, changed, [item["point"] for item in data])
+        np.testing.assert_allclose(updated["pressure_2_mean"], result["pressure_2_mean"])
+        self.assertFalse(np.allclose(updated["pressure_1_mean"], result["pressure_1_mean"]))
     def test_legacy_config_and_new_config_roundtrip(self):
         values = config().to_dict()
         for key in ("objective_mode", "pressure_metric", "mapping_no_weight"):

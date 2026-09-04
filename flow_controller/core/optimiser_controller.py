@@ -380,7 +380,8 @@ class OptimiserController(QObject):
         normalized = validate_tdms_source(source)
         self.disarm_labview()
         experiment.set_tdms_source(normalized)
-        self._say("TDMS source saved. Existing LabVIEW log/stop triggers can be used unchanged.")
+        channel_text = "two pressure channels" if "transducers" in normalized else "pressure channel"
+        self._say(f"TDMS source saved with {channel_text}. Existing LabVIEW log/stop triggers can be used unchanged.")
         self.changed.emit()
 
     def _legacy_labview_command(self, command):
@@ -589,7 +590,7 @@ class OptimiserController(QObject):
             raise ValueError("Pressure is already saved for this trial.")
         source = acquisition.get("tdms_source")
         if not source:
-            raise ValueError("Choose the TDMS source folder, channel and calibration first.")
+            raise ValueError("Choose the TDMS source folder, pressure channels and calibrations first.")
         capture = {key: value for key, value in self.labview_request().items()
                    if key in ("experiment_id", "trial_id", "capture_id")}
         capture.update(start=acquisition["start"], end=acquisition["stop"])
@@ -631,9 +632,16 @@ class OptimiserController(QObject):
                 raise ValueError("Imported pressure belongs to another acquisition.")
             self.experiment.attach_pressure(summary)
             self._pressure_error = None
-            self._say(f"Pressure saved: RMS {summary['rms_pa']:.4g} Pa, "
-                      f"dominant frequency {summary['dominant_frequency_hz']:.4g} Hz.")
-        except (ValueError, OSError, KeyError) as exc:
+            if "transducers" in summary:
+                readings = ", ".join(
+                    f"{item['label']} peak spectrum {item['metrics']['dominant_amplitude_pa']:.4g} Pa RMS "
+                    f"at {item['metrics']['dominant_frequency_hz']:.4g} Hz"
+                    for item in summary["transducers"])
+                self._say(f"Pressure saved: {readings}.")
+            else:
+                self._say(f"Pressure saved: RMS {summary['rms_pa']:.4g} Pa, "
+                          f"dominant frequency {summary['dominant_frequency_hz']:.4g} Hz.")
+        except (ValueError, OSError, KeyError, TypeError) as exc:
             self._pressure_failed(str(exc))
         self.changed.emit()
 

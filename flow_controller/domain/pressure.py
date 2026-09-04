@@ -156,6 +156,8 @@ def validate_pressure_summary(payload):
     rejected so unvalidated analysis settings cannot silently affect comparisons.
     """
     _json_object(payload)
+    if "transducers" in payload:
+        return _validate_dual_pressure_summary(payload)
     required = {"protocol", "type", "experiment_id", "trial_id", "capture_id", "start", "end",
                 "sample_rate_hz", "sample_count", "units", "channel", "calibration_id", "rms_pa",
                 "peak_abs_pa", "dominant_frequency_hz", "dominant_amplitude_pa", "quality", "analysis"}
@@ -232,9 +234,92 @@ def validate_pressure_summary(payload):
     return result
 
 
+def _validate_metric_fields(payload, analysis):
+    required = {"rms_pa", "peak_abs_pa", "dominant_frequency_hz",
+                "dominant_amplitude_pa", "rms_window_sd_pa"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("Pressure metrics have missing or unrecognized fields.")
+    result = {key: _number(payload[key], key, 0) for key in required}
+    if result["peak_abs_pa"] < result["rms_pa"]:
+        raise ValueError("peak_abs_pa must be at least rms_pa.")
+    low, high = analysis["band_hz"]
+    if not low <= result["dominant_frequency_hz"] <= high:
+        raise ValueError("dominant_frequency_hz is outside analysis.band_hz.")
+    return result
+
+
+def _validate_dual_pressure_summary(payload):
+    """Validate the shared-file, two-transducer pressure summary shape."""
+    required = {"protocol", "type", "experiment_id", "trial_id", "capture_id", "start", "end",
+                "sample_rate_hz", "sample_count", "units", "raw_file", "raw_sha256",
+                "association", "transducers"}
+    if set(payload) != required:
+        raise ValueError("Dual pressure summary has missing or unrecognized fields.")
+    if payload["protocol"] != PROTOCOL or payload["type"] != "pressure_summary" or payload["units"] != "Pa":
+        raise ValueError("Expected a Pa flow-pressure-v1 pressure_summary.")
+    result = {"protocol": PROTOCOL, "type": "pressure_summary", "units": "Pa"}
+    for key in ("experiment_id", "trial_id", "capture_id"):
+        result[key] = _string(payload[key], key)
+    rate = _number(payload["sample_rate_hz"], "sample_rate_hz", positive=True)
+    count = _integer(payload["sample_count"], "sample_count", 16)
+    start, end = _timestamp(payload["start"], "start"), _timestamp(payload["end"], "end")
+    expected = (count - 1) / rate
+    if (end < start or not math.isfinite(expected)
+            or abs((end - start).total_seconds() - expected) > max(.1, 2 / rate)):
+        raise ValueError("Capture timestamps do not match sample_count and sample_rate_hz.")
+    result.update(start=start.isoformat(), end=end.isoformat(), sample_rate_hz=rate, sample_count=count)
+    result["raw_file"] = _string(payload["raw_file"], "raw_file", 4096)
+    digest = payload["raw_sha256"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+        raise ValueError("raw_sha256 must contain 64 hexadecimal characters.")
+    result["raw_sha256"] = digest.lower()
+    # Reuse the established association validation, including its timing checks.
+    shell = {"protocol": PROTOCOL, "type": "pressure_summary", "units": "Pa",
+             **{key: result[key] for key in ("experiment_id", "trial_id", "capture_id", "start", "end",
+                                              "sample_rate_hz", "sample_count")},
+             "channel": "dual/validation", "calibration_id": "dual-validation",
+             "rms_pa": 0, "peak_abs_pa": 0, "dominant_frequency_hz": 0,
+             "dominant_amplitude_pa": 0, "quality": {"clipped": False, "nonfinite": False},
+             "analysis": {"id": PROCESSOR_ID, "band_hz": [0, rate / 2], "window": "flattop",
+                          "segment_samples": min(count, 16), "overlap_samples": 0,
+                          "detrend": "constant", "amplitude_convention": "rms_spectrum"},
+             "association": payload["association"]}
+    result["association"] = validate_pressure_summary(shell)["association"]
+    items = payload["transducers"]
+    if not isinstance(items, list) or len(items) != 2:
+        raise ValueError("Dual pressure summary must contain exactly two transducers.")
+    fields = {"id", "label", "channel", "calibration_id", "analysis", "quality", "metrics"}
+    if (any(not isinstance(item, dict) for item in items)
+            or {item.get("id") for item in items} != {"pressure_1", "pressure_2"}):
+        raise ValueError("Pressure transducers must have stable pressure_1/pressure_2 IDs.")
+    transducers = []
+    for item in sorted(items, key=lambda entry: entry["id"]):
+        expected_id = item["id"]
+        if set(item) != fields:
+            raise ValueError("Pressure transducers must have exact fields and stable pressure_1/pressure_2 IDs.")
+        analysis = _analysis(item["analysis"], rate, count)
+        transducers.append({"id": expected_id, "label": _string(item["label"], "label", 64),
+                            "channel": _string(item["channel"], "channel"),
+                            "calibration_id": _string(item["calibration_id"], "calibration_id"),
+                            "analysis": analysis, "quality": _quality(item["quality"]),
+                            "metrics": _validate_metric_fields(item["metrics"], analysis)})
+    if len({item["label"].casefold() for item in transducers}) != 2:
+        raise ValueError("Pressure transducer labels must be unique.")
+    if len({item["channel"] for item in transducers}) != 2:
+        raise ValueError("Pressure transducer channels must be distinct.")
+    result["transducers"] = transducers
+    _json_object(result)
+    return result
+
+
 def pressure_signature(summary):
     """Comparable acquisition/analysis settings; record duration is excluded."""
     valid = validate_pressure_summary(summary)
+    if "transducers" in valid:
+        return {"sample_rate_hz": valid["sample_rate_hz"], "units": valid["units"],
+                "transducers": [{key: item[key] for key in
+                                 ("id", "label", "channel", "calibration_id", "analysis")}
+                                for item in valid["transducers"]]}
     return {key: valid[key] for key in ("sample_rate_hz", "channel", "calibration_id", "analysis", "units")}
 
 

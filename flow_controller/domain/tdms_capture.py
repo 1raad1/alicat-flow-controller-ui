@@ -38,6 +38,8 @@ def _tdms_class():
 def validate_tdms_source(source, *, require_folder=True):
     """Validate a local folder/channel/calibration profile and fill defaults."""
     _json_object(source)
+    if "transducers" in source:
+        return _validate_dual_tdms_source(source, require_folder=require_folder)
     required = {"folder", "group", "channel", "calibration_id"}
     optional = {"sample_rate_hz", "scale_pa_per_unit", "offset_pa", "band_low_hz", "band_high_hz",
                 "segment_samples", "overlap_samples", "use_trigger_time", "clip_min", "clip_max", "min_recording_s"}
@@ -77,6 +79,54 @@ def validate_tdms_source(source, *, require_folder=True):
     if result["clip_min"] is not None and result["clip_min"] >= result["clip_max"]:
         raise ValueError("clip_min must be smaller than clip_max.")
     return result
+
+
+def _validate_dual_tdms_source(source, *, require_folder):
+    shared_required = {"folder", "transducers"}
+    shared_optional = {"sample_rate_hz", "band_low_hz", "band_high_hz", "segment_samples",
+                       "overlap_samples", "use_trigger_time", "min_recording_s"}
+    if not shared_required <= source.keys() or source.keys() - shared_required - shared_optional:
+        raise ValueError("Dual TDMS source has missing or unrecognized settings.")
+    # Validate shared defaults through the established flat validator.
+    common = validate_tdms_source({key: value for key, value in source.items() if key != "transducers"} | {
+        "group": "validation", "channel": "validation", "calibration_id": "validation"},
+        require_folder=require_folder)
+    for key in ("group", "channel", "calibration_id", "scale_pa_per_unit", "offset_pa",
+                "clip_min", "clip_max"):
+        common.pop(key)
+    entries = source["transducers"]
+    fields = {"id", "label", "group", "channel", "calibration_id", "scale_pa_per_unit",
+              "offset_pa", "clip_min", "clip_max"}
+    if not isinstance(entries, list) or len(entries) != 2:
+        raise ValueError("Dual TDMS source must contain exactly two transducers.")
+    if (any(not isinstance(item, dict) for item in entries)
+            or {item.get("id") for item in entries} != {"pressure_1", "pressure_2"}):
+        raise ValueError("TDMS transducers must have stable pressure_1/pressure_2 IDs.")
+    result_entries = []
+    for item in sorted(entries, key=lambda entry: entry["id"]):
+        expected_id = item["id"]
+        if set(item) != fields:
+            raise ValueError("TDMS transducers require exact fields and stable pressure_1/pressure_2 IDs.")
+        entry = {"id": expected_id, "label": _string(item["label"], "label", 64),
+                 "group": _string(item["group"], "group"),
+                 "channel": _string(item["channel"], "channel"),
+                 "calibration_id": _string(item["calibration_id"], "calibration_id"),
+                 "scale_pa_per_unit": _number(item["scale_pa_per_unit"], "scale_pa_per_unit", positive=True),
+                 "offset_pa": _number(item["offset_pa"], "offset_pa")}
+        if (item["clip_min"] is None) != (item["clip_max"] is None):
+            raise ValueError("Set both clip_min and clip_max for a transducer, or neither.")
+        entry["clip_min"] = None if item["clip_min"] is None else _number(item["clip_min"], "clip_min")
+        entry["clip_max"] = None if item["clip_max"] is None else _number(item["clip_max"], "clip_max")
+        if entry["clip_min"] is not None and entry["clip_min"] >= entry["clip_max"]:
+            raise ValueError("clip_min must be smaller than clip_max.")
+        _string(entry["group"] + "/" + entry["channel"], "group/channel")
+        result_entries.append(entry)
+    if len({item["label"].casefold() for item in result_entries}) != 2:
+        raise ValueError("Pressure transducer labels must be unique.")
+    if len({(item["group"], item["channel"]) for item in result_entries}) != 2:
+        raise ValueError("Pressure transducers must select distinct TDMS group/channel pairs.")
+    common["transducers"] = result_entries
+    return common
 
 
 def _metadata_number(value, name, positive=False):
@@ -229,6 +279,8 @@ def process_tdms_capture(path, source, capture):
     trigger timing is enabled; an mtime is never treated as an acquisition time.
     """
     source, capture = validate_tdms_source(source), _capture(capture)
+    if "transducers" in source:
+        return _process_dual_tdms_capture(path, source, capture)
     path = Path(path).expanduser().resolve()
     initial = _stat_token(path)
     with _tdms_class().open(path) as tdms:
@@ -279,6 +331,74 @@ def process_tdms_capture(path, source, capture):
                         "trigger_end": capture["end"].isoformat(), "timing_source": timing_source,
                         "sample_offset": offset, "source_sample_count": len(channel),
                         "source_start": source_start.isoformat()},
+    })
+
+
+def _process_dual_tdms_capture(path, source, capture):
+    path = Path(path).expanduser().resolve()
+    initial = _stat_token(path)
+    selected = []
+    with _tdms_class().open(path) as tdms:
+        _complete_file(tdms)
+        for item in source["transducers"]:
+            try:
+                channel = tdms[item["group"]][item["channel"]]
+            except KeyError as exc:
+                raise ValueError(f"Selected TDMS group/channel for {item['label']} does not exist.") from exc
+            channel_source = dict(source, **item)
+            channel_source.pop("transducers", None)
+            rate, source_start, offset, stop, timing_source = _selection(channel, channel_source, capture)
+            samples = np.asarray(channel[offset:stop])
+            if samples.dtype.kind not in "fiu" or samples.ndim != 1:
+                raise ValueError("Selected TDMS channels must contain real numeric scalar samples.")
+            samples = samples.astype(np.float64, copy=False)
+            selected.append((item, channel, rate, source_start, offset, stop, timing_source, samples))
+        identity = [(rate, source_start, offset, stop, timing, len(channel))
+                    for _item, channel, rate, source_start, offset, stop, timing, _samples in selected]
+        if identity[0] != identity[1]:
+            raise ValueError("Selected TDMS pressure slices must have identical timing, rate and sample count.")
+    rate, source_start, offset, stop, timing_source, source_count = identity[0]
+    transducers = []
+    for item, _channel, _rate, _start, _offset, _stop, _timing, samples in selected:
+        if not np.all(np.isfinite(samples)):
+            raise ValueError(f"TDMS pressure for {item['label']} contains nonfinite samples.")
+        clipping_checked = item["clip_min"] is not None
+        if clipping_checked and np.any((samples <= item["clip_min"]) | (samples >= item["clip_max"])):
+            raise ValueError(f"TDMS pressure for {item['label']} touches or exceeds configured clipping limits.")
+        analysis = {"id": PROCESSOR_ID,
+                    "band_hz": [source["band_low_hz"], rate / 2 if source["band_high_hz"] is None else source["band_high_hz"]],
+                    "window": "flattop", "segment_samples": source["segment_samples"],
+                    "overlap_samples": source["overlap_samples"], "detrend": "constant",
+                    "amplitude_convention": "rms_spectrum",
+                    "scale_pa_per_unit": item["scale_pa_per_unit"], "offset_pa": item["offset_pa"]}
+        metrics = pressure_metrics(samples, rate, analysis, item["scale_pa_per_unit"], item["offset_pa"])
+        transducers.append({"id": item["id"], "label": item["label"],
+                            "channel": item["group"] + "/" + item["channel"],
+                            "calibration_id": item["calibration_id"], "analysis": analysis,
+                            "quality": {"clipped": False, "nonfinite": False,
+                                        "clipping_checked": clipping_checked}, "metrics": metrics})
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as raw:
+        for block in iter(lambda: raw.read(1024 * 1024), b""):
+            size += len(block)
+            if size > initial[0]:
+                raise ValueError("TDMS file changed during processing.")
+            digest.update(block)
+    if _stat_token(path) != initial:
+        raise ValueError("TDMS file changed during processing.")
+    start = source_start + timedelta(seconds=offset / rate)
+    end = source_start + timedelta(seconds=(stop - 1) / rate)
+    return validate_pressure_summary({
+        "protocol": PROTOCOL, "type": "pressure_summary", "units": "Pa",
+        **{key: capture[key] for key in ("experiment_id", "trial_id", "capture_id")},
+        "start": start.isoformat(), "end": end.isoformat(), "sample_rate_hz": rate,
+        "sample_count": stop - offset, "raw_file": str(path), "raw_sha256": digest.hexdigest(),
+        "association": {"mode": "tdms-retrospective", "trigger_start": capture["start"].isoformat(),
+                        "trigger_end": capture["end"].isoformat(), "timing_source": timing_source,
+                        "sample_offset": offset, "source_sample_count": source_count,
+                        "source_start": source_start.isoformat()},
+        "transducers": transducers,
     })
 
 
