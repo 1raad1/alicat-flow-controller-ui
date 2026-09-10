@@ -105,6 +105,16 @@ Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
 rising trace does not continually rescale beneath the operator. The default
 history limit is 3,600 samples.
 
+Use **Controls** and **Sequence** above the Operation workspace to fold or
+reopen those panels. **Plot controls** on Logging & Graphs makes more room for
+the plots. Reopening a panel restores its width or height and keeps its inputs.
+Folding a panel does not stop acquisition or a running sequence.
+
+Drag a divider to resize the panels, or double-click it to reset the split.
+With a divider focused, arrow keys resize by 10 pixels (50 with Shift), and
+Enter folds or reopens its panel. **Reset layout** restores the default columns;
+on Operation it also folds the sequence panel.
+
 ## Controls and safety behavior
 
 ### Batch controls

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QInputDialog, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-                               QSplitter, QVBoxLayout, QWidget, QWidgetAction)
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from ..core.combustion_prefs import (
     GEOMETRY_AREA, GEOMETRY_DIAMETER, MAX_INLET_COUNT, SCOPE_ALL,
@@ -42,6 +42,7 @@ from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
 from ..core.optimiser_controller import OptimiserController
 from .qt_optimiser import OptimiserPane
+from .qt_motion_panels import MotionSplitter
 from .qt_sequence_panel import SequencePanel
 from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
@@ -316,15 +317,20 @@ class OperationTab(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self._split = QSplitter(Qt.Orientation.Vertical)
-        self._split.setHandleWidth(4)
+        self._split = MotionSplitter(Qt.Orientation.Vertical)
         self._split.addWidget(self._build_columns())
         self.sequence_panel = SequencePanel(session)
-        self.sequence_panel.setVisible(False)
         self._split.addWidget(self.sequence_panel)
+        self._split.configure_panel(1, 'Sequence')
         self._split.setStretchFactor(0, 1)
         self._split.setStretchFactor(1, 0)
+        self._split.set_default_sizes([520, 480])
+        self._split.set_panel_collapsed(1, True, animate=False)
+        outer.addWidget(self._build_panel_bar())
         outer.addWidget(self._split, 1)
+        self._split.panelCollapsedChanged.connect(self._panel_collapsed)
+        self._columns_splitter.panelCollapsedChanged.connect(
+            self._controls_collapsed)
 
         session.mode_changed.connect(self._on_mode)
         session.connection_changed.connect(self._on_connection)
@@ -415,31 +421,72 @@ class OperationTab(QWidget):
         self.saved_list.setEnabled(state == SEQ_IDLE)
 
     def _toggle_sequence(self, shown):
+        self._split.set_panel_collapsed(1, not shown)
+
+    def _build_panel_bar(self):
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(theme.PAD_LG, theme.PAD_XS,
+                                  theme.PAD_LG, theme.PAD_XS)
+        layout.setSpacing(theme.PAD_SM)
+        self.controls_panel_btn = QPushButton('Controls')
+        self.controls_panel_btn.setCheckable(True)
+        self.controls_panel_btn.setChecked(True)
+        self.controls_panel_btn.setToolTip('Show or fold the setup controls')
+        self.controls_panel_btn.toggled.connect(
+            lambda shown: self._columns_splitter.set_panel_collapsed(0, not shown))
+        self.sequence_panel_btn = QPushButton('Sequence')
+        self.sequence_panel_btn.setCheckable(True)
+        self.sequence_panel_btn.setToolTip('Show or fold the record / replay panel')
+        self.sequence_panel_btn.toggled.connect(self._toggle_sequence)
+        for button in (self.controls_panel_btn, self.sequence_panel_btn):
+            button.setObjectName('PanelToggle')
+            button.setProperty('density', 'compact')
+            layout.addWidget(button)
+        layout.addStretch(1)
+        reset = QPushButton('Reset layout')
+        reset.setProperty('density', 'compact')
+        reset.setToolTip('Restore the default columns and fold the sequence panel')
+        reset.clicked.connect(self._reset_panel_layout)
+        layout.addWidget(reset)
+        return bar
+
+    def _controls_collapsed(self, index, collapsed):
+        if index == 0:
+            self.controls_panel_btn.blockSignals(True)
+            self.controls_panel_btn.setChecked(not collapsed)
+            self.controls_panel_btn.blockSignals(False)
+
+    def _panel_collapsed(self, index, collapsed):
+        if index != 1:
+            return
+        for button in (self.sequence_btn, self.sequence_panel_btn):
+            button.blockSignals(True)
+            button.setChecked(not collapsed)
+            button.blockSignals(False)
         self.sequence_btn.setText((
-            '▾  Record / Replay Flow Sequence' if shown
-            else '▸  Record / Replay Flow Sequence'))
-        self.sequence_panel.setVisible(shown)
-        if shown:
-            # Opening the panel is the other moment the folder is worth
-            # re-reading: a sequence saved from the panel's own Save button in a
-            # previous session landed there without this tab hearing about it.
+            '▸  Record / Replay Flow Sequence' if collapsed
+            else '▾  Record / Replay Flow Sequence'))
+        if not collapsed:
+            # Refresh whichever way the panel opens: button, keyboard or drag.
             self._refresh_saved()
-        if shown and self._split.sizes()[1] < 80:
-            total = sum(self._split.sizes()) or self.height()
-            self._split.setSizes([int(total * 0.52), int(total * 0.48)])
+
+    def _reset_panel_layout(self):
+        self._columns_splitter.reset_layout()
+        self._toggle_sequence(False)
 
     # ------------------------------------------------------------------ #
     #  Columns                                                            #
     # ------------------------------------------------------------------ #
     def _build_columns(self):
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = MotionSplitter(Qt.Orientation.Horizontal)
         self._columns_splitter = splitter
-        splitter.setHandleWidth(4)
         splitter.addWidget(self._build_left_column())
         splitter.addWidget(self._build_right_column())
+        splitter.configure_panel(0, 'Controls')
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([
+        splitter.set_default_sizes([
             theme.scale(OPERATION_LEFT_START_WIDTH),
             theme.scale(OPERATION_RIGHT_START_WIDTH),
         ])
