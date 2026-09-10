@@ -1,16 +1,19 @@
-# Agent Terminal & Autonomous Test-Condition Plan
+# Retired agent terminal plan
 
-Status: Steps 1–7 implemented and covered by automated tests. Live agent
-authority is a visible, explicitly armed, default-off toggle.
-Scope: launch AI coding agents (Claude Code / Codex) that can author sequences
-and condition-based test sequences and, under explicit toggle authority,
-control the rig automatically. Codex retains shell access, so its arming
-dialog warns that its sandbox is not a hard COM-port boundary. All exposed MCP
-hardware authority stays inside the application and its validated interfaces.
+> [!NOTE]
+> This document records an earlier design and implementation. The current
+> desktop interface mounts the Bayesian optimiser instead of the agent launcher
+> and does not start the agent IPC gateway. Do not use this plan as operating
+> guidance. See the project [README](../README.md#bayesian-optimiser) for current
+> behaviour.
+
+The sections below are retained as design history. References to the "current
+code," implemented steps, branches, UI controls and live agent authority describe
+the retired version as it stood on 26 August 2026.
 
 ---
 
-## 1. Motivation
+## 1. Original motivation
 
 Two capabilities are wanted:
 
@@ -27,7 +30,8 @@ so it is built for human-authored plans first.
 
 ## 2. Verified architectural facts this plan relies on
 
-All checked against the current code (branch `codex/live-combustion-ui`):
+These statements were checked against the retired `codex/live-combustion-ui`
+branch:
 
 - `FlowSession` centralises controller state and operations
   (`flow_controller/core/session.py`).
@@ -245,7 +249,7 @@ Requirements:
   ramp behavior as manual entry, until the toggle is switched off or authority
   is revoked.
 
-## 7. Implemented milestone (2026-08-26)
+## 7. Retired implementation snapshot (2026-08-26)
 
 - Read-only snapshots/history/derived state and a deterministic first-order-lag
   simulated rig.

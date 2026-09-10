@@ -206,7 +206,7 @@ QWidget {{
 QMainWindow, QDialog {{ background-color: {BG}; }}
 
 /* ---- Title bar ---------------------------------------------------- */
-#TitleName {{ color: {TEXT_BRIGHT}; font-size: {pt(13)}pt; }}
+#TitleName {{ color: {TEXT_BRIGHT}; font-size: {pt(10)}pt; }}
 #TitleSub  {{ color: {TEXT_DIM};    font-size: {pt(9)}pt; }}
 
 /* The run states that outlive a single screen -- poll rate, log file, LabVIEW

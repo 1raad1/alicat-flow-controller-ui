@@ -73,6 +73,65 @@ class ExperimentPlanControllerTests(unittest.TestCase):
         plan = self.plan(PlanStage("too high", {"nh3_rich": 2.0}))
         self.assertFalse(self.controller.set_plan(plan))
 
+    def test_set_plan_rejects_unreadable_sequences_without_replacing_plan(self):
+        original = self.plan(PlanStage("original", {"nh3_rich": 0.0}))
+        self.assertTrue(self.controller.set_plan(original))
+        failures = []
+        self.session.failed.connect(lambda title, detail: failures.append((title, detail)))
+
+        with tempfile.TemporaryDirectory() as directory:
+            malformed = Path(directory) / "malformed.fcseq.json"
+            malformed.write_text("not json", encoding="utf-8")
+            for reference in (Path(directory) / "missing.fcseq.json", malformed):
+                with self.subTest(reference=reference.name):
+                    candidate = self.plan(PlanStage("sequence", sequence=str(reference)))
+                    self.assertFalse(self.controller.set_plan(candidate))
+                    self.assertIs(self.controller.plan, original)
+
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(all(title == "Experiment Plan" for title, _detail in failures))
+
+    def test_pathless_plan_does_not_inherit_previous_plan_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner = Path(directory)
+            self.session.sequence_dir = owner / "new-sequences"
+            sequence_path = owner / "relative.fcseq.json"
+            Sequence(name="old", tracks=[Track(
+                "nh3_rich", "NH3", keyframes=[Keyframe(0, 0, HOLD)])]).save(
+                    sequence_path)
+            old_plan = self.plan(PlanStage(
+                "old sequence", sequence=sequence_path.name))
+            old_plan_path = owner / "old.fcplan.json"
+            old_plan.save(old_plan_path)
+            self.assertIsNotNone(self.controller.load(old_plan_path))
+
+            pathless = self.plan(PlanStage(
+                "new sequence", sequence=sequence_path.name))
+            self.assertFalse(self.controller.set_plan(pathless))
+            self.assertEqual(self.controller.plan.name, old_plan.name)
+            self.assertEqual(self.controller.plan_path, old_plan_path)
+
+            self.session.sequence_dir.mkdir()
+            Sequence(name="new", tracks=[Track(
+                "nh3_rich", "NH3", keyframes=[Keyframe(0, 0, HOLD)])]).save(
+                    self.session.sequence_dir / sequence_path.name)
+            self.assertTrue(self.controller.set_plan(pathless))
+            self.assertIsNone(self.controller.plan_path)
+
+    def test_set_plan_resolves_relative_sequence_against_explicit_plan_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner = Path(directory)
+            Sequence(name="relative", tracks=[Track(
+                "nh3_rich", "NH3", keyframes=[Keyframe(0, 0, HOLD)])]).save(
+                    owner / "relative.fcseq.json")
+            plan = self.plan(PlanStage(
+                "relative sequence", sequence="relative.fcseq.json"))
+
+            self.assertTrue(self.controller.set_plan(
+                plan, path=owner / "experiment.fcplan.json"))
+            self.assertEqual(
+                self.controller.plan_path, owner / "experiment.fcplan.json")
+
     def test_timeout_invokes_the_declared_verified_zero(self):
         plan = self.plan(PlanStage(
             "never", {"nh3_rich": 1.0}, timeout_s=1.0,

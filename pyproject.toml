@@ -16,6 +16,7 @@ dependencies = [
     "scikit-learn>=1.6,<2",
     "threadpoolctl>=3.5,<4",
     "PySide6>=6.7,<7",
+    "pythonnet>=3.1,<4; platform_system == 'Windows'",
     "pyqtgraph>=0.13,<1",
     "mcp>=2,<3",
     "pyte>=0.8,<1",
@@ -36,3 +37,4 @@ include = ["flow_controller*", "mexa_bridge*"]
 
 [tool.setuptools.package-data]
 "flow_controller.ui" = ["assets/*.svg"]
+"flow_controller" = ["camera_runtime/**/*", "camera_runtime/*"]

@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Accord.Video.DirectShow</id>
+    <version>3.8.2-alpha</version>
+    <title>Accord.Video.DirectShow</title>
+    <authors>Accord.NET</authors>
+    <owners>Accord.NET</owners>
+    <requireLicenseAcceptance>true</requireLicenseAcceptance>
+    <licenseUrl>http://accord-framework.net/license.txt</licenseUrl>
+    <projectUrl>http://accord-framework.net/</projectUrl>
+    <iconUrl>http://accord-framework.net/logo.png</iconUrl>
+    <description>Contains classes and methods to handle video sources using DirectShow interface (USB web cameras, capture devices, video files). This package originated from the AForge.NET Framework and is part of the Accord.NET Framework.</description>
+    <summary>Capture, read and write videos using DirectShow, supporting USB web cameras, capture devices, video files and others.</summary>
+    <tags>accord.net aforge.net framework video capture cameras</tags>
+    <dependencies>
+      <dependency id="Accord" version="3.8.2-alpha" />
+      <dependency id="Accord.Video" version="3.8.2-alpha" />
+    </dependencies>
+  </metadata>
+</package>

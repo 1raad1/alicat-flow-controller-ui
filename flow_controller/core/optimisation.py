@@ -870,11 +870,16 @@ def _validate_role_statistics(statistics, means, targets, samples, kind):
         sd = _stored_number(item["sd_slpm"], f"{label} standard deviation")
         minimum = _stored_number(item["min_slpm"], f"Minimum {kind}")
         maximum = _stored_number(item["max_slpm"], f"Maximum {kind}")
+        tracking_tolerance = max(FLOW_ABS_TOL, FLOW_REL_TOL * target)
+        serialization_epsilon = 8 * np.spacing(
+            max(1.0, abs(target), tracking_tolerance))
         if (not np.isclose(target, targets[role], atol=1e-12, rtol=1e-12)
                 or not np.isclose(mean, means[role], atol=1e-12, rtol=1e-12)
                 or not 0 <= minimum <= MAX_STORED_FLOW
                 or not minimum - 1e-12 <= mean <= maximum + 1e-12
-                or maximum > MAX_STORED_FLOW or sd < 0):
+                or maximum > MAX_STORED_FLOW or sd < 0
+                or abs(minimum - target) > tracking_tolerance + serialization_epsilon
+                or abs(maximum - target) > tracking_tolerance + serialization_epsilon):
             raise ValueError(f"Per-role {kind} statistics are inconsistent.")
 
 

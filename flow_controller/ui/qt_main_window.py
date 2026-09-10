@@ -1,24 +1,7 @@
-"""The window the three tabs live in, and the Qt entry point.
+"""Main window and Qt entry point.
 
-The window owns almost no behaviour of its own.  It holds the session, mounts
-the three tabs on it, and keeps the three pieces of chrome that must not belong
-to any one tab:
-
-* the **control bar**, in the tab strip's corner.  ``SET ALL FLOWS``,
-  ``ZERO FUEL`` and ``ZERO ALL`` are reachable from every tab; the zero actions
-  must never depend on which tab happens to be open.
-* the **status fields**, which are where the run states that outlive a single
-  screen — poll rate, log file, LabVIEW listener, sequence, graphs — are
-  readable without leaving the tab you are working in.  They sit beside the
-  app's name in the title bar: the top of the window is where the eye already
-  is for the tab strip and the connection state, and a second strip along the
-  bottom edge meant looking away from the run to read about it.
-* the **message line** along the bottom, for one-off replies to something the
-  operator just did.  It hides itself when there is nothing to say, so an
-  empty strip never costs the run a line of screen.
-
-Everything else is the tabs' business, and every state the chrome shows is read
-from a session signal rather than passed between tabs.
+The window mounts the application tabs and owns controls and status indicators
+that must remain available across tabs. Session signals supply their state.
 """
 
 from __future__ import annotations
@@ -41,19 +24,16 @@ from .qt_connection_tab import ConnectionTab
 from .qt_logging_tab import LoggingTab
 from .qt_mexa import MexaTab
 from .qt_operation_tab import OperationTab, SafetyBar
+from ..core.camera import DirectCamera
+from .qt_camera import CameraTab
 from .qt_settings import SettingsDialog
 from .qt_widgets import GlassBackdrop, GlassBar, StatusDot, label
 from . import qt_win_frame
 
-#: How long a one-off message sits in the status line before it clears.  Long
-#: enough to be read after looking away, short enough that what is on screen
-#: still describes now.
+#: Time before a one-off status message clears.
 MESSAGE_MS = 12000
 
-#: Status line fields, in reading order, with what they say before anything
-#: has happened.  The window keeps these strings itself: a re-theme replaces
-#: every label in the window, and the replacements have to open saying what
-#: the old ones said.
+#: Status fields and their initial text, in display order.
 STATUS_FIELDS = (
     ('poll', 'poll  —'),
     ('log', 'log  OFF'),
@@ -65,14 +45,10 @@ STATUS_FIELDS = (
 SEQ_WORDS = {SEQ_IDLE: 'idle', SEQ_RECORDING: 'RECORDING',
              SEQ_REPLAYING: 'REPLAYING'}
 
-#: How wide the window's own resize border is.  The native frame is gone, so
-#: this strip is the only thing left to drag an edge by; it is the frame's own
-#: margin rather than an overlay, which is what keeps the tabs and the bars
-#: from taking the mouse before it gets here.
+#: Width of the resize border that replaces the native frame.
 RESIZE_MARGIN = 5
 
-#: Which cursor says which edge.  Built once: it is looked up on every mouse
-#: move across the strip.
+#: Resize cursor for each edge and corner.
 _EDGE_CURSORS = {
     Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor,
     Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
@@ -85,12 +61,7 @@ _EDGE_CURSORS = {
 }
 
 
-#: The chrome glyphs, as the icon font draws them and as ordinary text has to
-#: stand in for them.  Windows draws its own caption controls from an icon
-#: font whose glyphs share one box and one weight; the punctuation reached for
-#: instead -- an en dash, a geometric square, two dingbats -- comes from three
-#: different faces at three different sizes, which is why the three controls
-#: never sat on the same line as each other.
+#: Preferred Windows chrome fonts and plain-text fallback glyphs.
 _ICON_FONTS = ('Segoe Fluent Icons', 'Segoe MDL2 Assets')
 GLYPHS = {
     'settings': ('', '⚙'),
@@ -100,22 +71,14 @@ GLYPHS = {
     'close': ('', '✕'),
 }
 
-#: Design-time size of one control in the title bar's right-hand cluster.
-#: Fixed, and the same for all four: the glyphs are still four different
-#: shapes, and controls that change size with the shape in them are controls
-#: nobody can aim at.
+#: Fixed size of each title-bar control.
 CHROME_BUTTON = (34, 26)
 
 _icon_family = None
 
 
 def icon_family():
-    """The installed icon font, or ``''`` where there is none.
-
-    Asked once and remembered.  It cannot be answered at import: the font
-    database needs a live ``QApplication``, and this module is imported to
-    build one.
-    """
+    """Return the installed icon font, cached after QApplication starts."""
     global _icon_family
     if _icon_family is None:
         installed = set(QFontDatabase.families())
@@ -130,18 +93,10 @@ def glyph(name):
 
 
 def chrome_style():
-    """The stylesheet rule that draws the chrome glyphs.
+    """Return chrome rules after selecting an icon font at runtime.
 
-    Appended to the theme's sheet instead of being written into it, for two
-    reasons.  Which font this is cannot be known until there is a
-    ``QApplication`` to ask, and the sheet is built at import.  And it has to
-    be a *sheet* rule: the sheet already sets ``font-family`` on every widget,
-    and in Qt the sheet beats a font set on the widget, so a face applied with
-    ``setFont`` here would silently lose and the glyphs would come out blank.
-
-    The size is in the icon font's own terms -- its glyphs fill the em box, so
-    it is asked for at about the size the finished mark should be, well under
-    what the same number would mean as text.
+    The theme stylesheet sets widget fonts, so the chrome font must also be
+    applied through a stylesheet rule.
     """
     family = icon_family()
     face = f"font-family: '{family}'; " if family else ''
@@ -152,24 +107,15 @@ def chrome_style():
 
 
 class WindowFrame(QWidget):
-    """The border the operating system used to draw.
+    """Resize border for the frameless window.
 
-    With the native frame dropped there is nothing around the window to take
-    hold of, and a control screen that cannot be resized is a control screen
-    that cannot be put beside the rig software it is being run against.  So
-    the content is inset by :data:`RESIZE_MARGIN` and the strip that leaves is
-    handled here, handing the drag straight back to the window manager --
-    ``startSystemResize`` is a real system resize, so snapping, live outlines
-    and a move between monitors all behave as they always did.
-
-    The inset is dropped while maximised: there is no edge to pull on then,
-    and a gutter against the screen edge would only look like a mistake.
+    Edge drags are passed to the window manager. The border is hidden while
+    the window is maximised.
     """
 
     def __init__(self, content, parent=None):
         super().__init__(parent)
-        # Without tracking, moves arrive only while a button is held, and the
-        # cursor would not change until it was too late to be a hint.
+        # Mouse tracking updates the resize cursor before a drag begins.
         self.setMouseTracking(True)
         box = QVBoxLayout(self)
         box.setContentsMargins(*(RESIZE_MARGIN,) * 4)
@@ -217,28 +163,14 @@ class WindowFrame(QWidget):
 
 
 class TitleBar(GlassBar):
-    """The app's own title bar, standing in for the one Windows drew.
+    """Title bar for moving, maximising and restoring the frameless window.
 
-    Dragging it moves the window and double-clicking it maximises, because
-    that is what every title bar does and an operator should not have to be
-    told that this one is ours.  The move is handed to the window manager
-    rather than rebuilt out of cursor arithmetic, so a drag to the top of the
-    screen snaps and a drag onto a second monitor rescales -- both of which
-    need the window to keep its native styles, which is ``qt_win_frame``'s
-    job.
-
-    The one gesture the window manager will not start for us is the drag off a
-    maximised window, because a maximised window has nowhere to move to until
-    it has been restored.  So that one is caught here: a press is only
-    remembered, and it is the first real *movement* that brings the window
-    back down -- under the cursor, at the point along the bar it was taken
-    hold of -- and hands the rest of the drag over.
+    The window manager handles normal moves. Dragging a maximised window first
+    restores it beneath the pointer, then starts a system move.
     """
 
     def __init__(self, window, parent=None):
-        # A separate full-width divider sits below this widget.  A hairline
-        # painted inside the bar can be overdrawn by translucent child
-        # controls, which caused the break near the link and settings cluster.
+        # A separate divider avoids gaps under translucent child controls.
         super().__init__(None, parent)
         self._window = window
         self._pressed_at = None
@@ -259,9 +191,7 @@ class TitleBar(GlassBar):
             super().mouseMoveEvent(event)
             return
         cursor = event.globalPosition().toPoint()
-        # A press on a maximised title bar is far more often the start of a
-        # click than the start of a drag; Qt's own threshold is what tells
-        # the two apart everywhere else, so it tells them apart here.
+        # Use Qt's drag threshold to distinguish a click from a restore drag.
         if (cursor - start).manhattanLength() < QApplication.startDragDistance():
             return
         self._pressed_at = None
@@ -272,15 +202,7 @@ class TitleBar(GlassBar):
         super().mouseReleaseEvent(event)
 
     def _restore_under(self, cursor):
-        """Come down from maximised without the window jumping off the cursor.
-
-        Keeping the grab where it was on the bar is the whole point: a window
-        that restores with its top-left corner under the pointer has moved
-        itself, and the operator is then dragging a window they did not aim
-        at.  The horizontal hold is kept as a fraction of the width, which is
-        what Windows does and what makes the gesture survive the width
-        changing on the way down.
-        """
+        """Restore while preserving the pointer's relative title-bar position."""
         window = self._window
         held = window.frameGeometry()
         across = ((cursor.x() - held.x()) / held.width()) if held.width() else 0.5
@@ -303,23 +225,17 @@ class TitleBar(GlassBar):
 
 
 class MainWindow(QMainWindow):
-    """Chrome, three tabs, and an orderly way out."""
+    """Application shell, tabs and shutdown handling."""
 
     def __init__(self, session=None, parent=None):
         super().__init__(parent)
         self.session = session if session is not None else FlowSession(self)
         self.setWindowTitle(f'Alicat Flow Controller v{APP_VERSION}')
         self.resize(theme.scale(1560), theme.scale(940))
-        # The window draws its own chrome.  The native bar is a light strip
-        # that no theme reaches, sitting above a dark instrument panel and
-        # repeating a title the app already shows; dropping it puts the
-        # minimise, maximise and close controls on the same line as the name.
-        # What the frame was also doing -- moving and resizing the window --
-        # is picked up by TitleBar and WindowFrame.
+        # TitleBar and WindowFrame replace the native frame and follow the theme.
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
 
-        # -- chrome state.  Not held in the widgets, because the widgets do
-        #    not survive a re-theme.
+        # Keep chrome state outside widgets because re-theming replaces them.
         self._status_text = dict(STATUS_FIELDS)
         self._link_kind = 'idle'
         self._link_text = 'not connected'
@@ -327,10 +243,13 @@ class MainWindow(QMainWindow):
         self._settings = None
         self._theme_pending = False
         self._native_frame = False
+        self._camera_close_pending = False
         # The campaign and fitting worker outlive widgets replaced by a theme
         # rebuild. No embedded agent, live-control authority or IPC server is
         # started by the desktop application.
         self.optimiser = OptimiserController(self.session, self)
+        self.camera = DirectCamera(self)
+        self.camera_tab = CameraTab(self.camera)
 
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
@@ -338,9 +257,7 @@ class MainWindow(QMainWindow):
         self._message_timer.timeout.connect(lambda: self.show_message(''))
 
         self._build_ui()
-        # Connected once, to the window rather than to any of its widgets, so
-        # that rebuilding the view does not leave a second copy of every
-        # connection behind it.
+        # Window-level connections survive UI rebuilds without duplication.
         self._connect_session()
         self._sync_from_session()
 
@@ -352,21 +269,13 @@ class MainWindow(QMainWindow):
     #  Construction                                                      #
     # ================================================================== #
     def _build_ui(self):
-        """Build the whole view from the theme as it currently stands.
-
-        Re-callable, because that is how a re-theme is applied.  Patching the
-        live widgets cannot work: layout margins and spacing are read once at
-        construction with no way to write them back, and a colour already baked
-        into a widget cannot be traced back to the token it came from.
-        """
+        """Rebuild the view from the current theme."""
         self.setStyleSheet(theme.STYLESHEET + chrome_style())
-        # Dropped before anything is built, so a state that arrives mid-build
-        # cannot be painted onto the widgets this pass is about to replace.
+        # Prevent session updates from painting widgets being replaced.
         self._status_labels = None
         self._status_bar = None
 
-        # Everything above this is translucent; the backdrop is the only thing
-        # in the window that actually paints a colour.
+        # Translucent children rely on this backdrop for the window colour.
         root = GlassBackdrop()
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -378,7 +287,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(title_divider)
         layout.addWidget(self._build_tabs(), 1)
         layout.addWidget(self._build_status_bar())
-        # Replaces and destroys whatever was there before.
+        # setCentralWidget destroys the previous frame.
         self._frame = WindowFrame(root)
         self._frame.set_inset(not self.isMaximized())
         self.setCentralWidget(self._frame)
@@ -390,9 +299,9 @@ class MainWindow(QMainWindow):
         bar = TitleBar(self)
         bar.setObjectName('TitleBar')
         row = QHBoxLayout(bar)
-        row.setContentsMargins(theme.PAD_XL, theme.PAD_MD + 2,
-                               theme.PAD_XL, theme.PAD_MD + 2)
-        row.setSpacing(theme.PAD_MD)
+        row.setContentsMargins(theme.PAD_MD, theme.scale(3),
+                               theme.PAD_MD, theme.scale(3))
+        row.setSpacing(theme.PAD_SM)
 
         name = QLabel('Alicat Flow Controller')
         name.setObjectName('TitleName')
@@ -400,10 +309,8 @@ class MainWindow(QMainWindow):
         version = QLabel(f'v{APP_VERSION}')
         version.setObjectName('TitleSub')
         row.addWidget(version)
-        row.addSpacing(theme.PAD_LG)
-        # The standing run states, in place of the strapline that used to sit
-        # here.  A description of what the app is is read once, on the first
-        # day; what the run is doing is read all day.
+        row.addSpacing(theme.PAD_SM)
+        # Persistent run state remains visible across tabs.
         self._status_labels = {}
         for index, (key, _default) in enumerate(STATUS_FIELDS):
             if index:
@@ -431,16 +338,14 @@ class MainWindow(QMainWindow):
         settings.clicked.connect(self._open_settings)
         row.addWidget(settings)
 
-        # The controls the native bar used to carry, in the order Windows
-        # puts them so that muscle memory still lands on the right one.
+        # Match the standard Windows caption-button order.
         row.addSpacing(theme.PAD_SM)
         row.addWidget(self._window_button('minimise', 'Minimise',
                                           self.showMinimized))
         self._max_btn = self._window_button('maximise', 'Maximise',
                                             self.toggle_maximised)
         row.addWidget(self._max_btn)
-        # Read from the window rather than remembered: _build_ui runs again on
-        # every re-theme, and it can run while the window is maximised.
+        # Read current state because re-theming can occur while maximised.
         self._paint_max_button()
         close = self._window_button('close', 'Close', self.close)
         close.setObjectName('WinClose')
@@ -459,7 +364,7 @@ class MainWindow(QMainWindow):
         return button
 
     def _paint_max_button(self):
-        """Say maximise or restore, whichever the window is not already."""
+        """Show the action available for the current window state."""
         button = getattr(self, '_max_btn', None)
         if button is None:
             return
@@ -468,21 +373,14 @@ class MainWindow(QMainWindow):
         button.setToolTip('Restore' if maximised else 'Maximise')
 
     def toggle_maximised(self):
-        """Fill the screen, or come back down to the size before that."""
+        """Toggle maximised state."""
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
 
     def changeEvent(self, event):
-        """Follow the window state, however it was changed.
-
-        The button is not the only way in: Win+Up, a drag to the top of the
-        screen and the task bar all maximise too, and a glyph that still says
-        'maximise' on a maximised window is worse than no glyph at all.  The
-        resize strip goes with it, since a maximised window has no edge to
-        pull on.
-        """
+        """Update custom chrome after any system window-state change."""
         super().changeEvent(event)
         if event.type() != QEvent.Type.WindowStateChange:
             return
@@ -493,11 +391,7 @@ class MainWindow(QMainWindow):
         self._paint_max_button()
 
     def showEvent(self, event):
-        """Claim the native window behaviours, once there is a window to claim.
-
-        Not in ``__init__``: the styles are set on the real window handle, and
-        a widget that has never been shown does not have one yet.
-        """
+        """Enable native behaviour after Qt creates the window handle."""
         super().showEvent(event)
         if not self._native_frame:
             self._native_frame = qt_win_frame.enable(self)
@@ -514,7 +408,8 @@ class MainWindow(QMainWindow):
         tabs.setDocumentMode(True)
 
         self.connection_tab = ConnectionTab(self.session)
-        self.operation_tab = OperationTab(self.session, optimiser=self.optimiser)
+        self.operation_tab = OperationTab(self.session, optimiser=self.optimiser,
+                                          camera=self.camera)
         self.optimiser_pane = self.operation_tab.optimiser_pane
         self.logging_tab = LoggingTab(self.session)
         self.mexa_tab = MexaTab(self.session.mexa)
@@ -524,13 +419,13 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.operation_tab, 'Operation && Monitoring')
         tabs.addTab(self.logging_tab, 'Logging && Graphs')
         tabs.addTab(self.mexa_tab, 'MEXA analyser')
+        tabs.addTab(self.camera_tab, 'Camera')
+        self.operation_tab.camera_card.settings_requested.connect(
+            lambda: tabs.setCurrentWidget(self.camera_tab))
 
         self.operation_tab.status.connect(self.show_message)
         self.logging_tab.status.connect(self.show_message)
-        # What the plots are doing is a standing description rather than an
-        # event, so it gets a field of its own instead of the message area --
-        # and a field has to be seeded, because the tab reached its opening
-        # state before there was anything connected to hear about it.
+        # Seed graph state because its initial signal predates this connection.
         self.logging_tab.graphs_status.connect(
             lambda text: self._set_field('graphs', f'graphs  {text}'))
         self._set_field('graphs', f'graphs  {self.logging_tab.graphs_text()}')
@@ -541,12 +436,7 @@ class MainWindow(QMainWindow):
         return tabs
 
     def _build_status_bar(self):
-        """The bottom strip: one-off messages, and nothing else.
-
-        Hidden while it is empty.  The standing fields it used to carry are up
-        in the title bar now, and a permanently blank bar across the foot of
-        the window would be a line of screen spent saying nothing.
-        """
+        """Build the one-off message strip, hidden while empty."""
         bar = GlassBar('top')
         bar.setObjectName('StatusBar')
         row = QHBoxLayout(bar)
@@ -569,10 +459,7 @@ class MainWindow(QMainWindow):
         self._paint_status()
 
     def _paint_status(self):
-        # A tab can report state while it is still being constructed, and the
-        # message line is built after the tabs, so a state change is allowed to
-        # arrive before there is anywhere to show it.  The text is kept either
-        # way, and the chrome is seeded from it once it exists.
+        # Tabs may report state before the message line has been built.
         labels = getattr(self, '_status_labels', None)
         if labels is None:
             return
@@ -672,8 +559,7 @@ class MainWindow(QMainWindow):
     #  Re-theming                                                        #
     # ================================================================== #
     def _open_settings(self):
-        # Modeless on purpose: picking a colour means watching it land on the
-        # real screen, against real readings, not on a preview swatch.
+        # Keep this modeless so theme changes remain visible behind it.
         if self._settings is None:
             self._settings = SettingsDialog(theme.CONFIG, self)
             self._settings.applied.connect(self._retheme)
@@ -687,10 +573,7 @@ class MainWindow(QMainWindow):
     def _retheme(self, config):
         theme.apply(config)
         if self._run_is_live():
-            # Mid-run is exactly when the operator must not lose what only the
-            # widgets hold — typed setpoints, the sequence panel, the chosen
-            # graph series.  The stylesheet is free, so it goes on now; the
-            # rebuild waits for the run to stop.
+            # Defer widget replacement during a run to preserve unsaved UI state.
             self.setStyleSheet(theme.STYLESHEET + chrome_style())
             self._theme_pending = True
             self.show_message('Appearance saved — the rest of it applies '
@@ -702,6 +585,9 @@ class MainWindow(QMainWindow):
     def _rebuild(self):
         self._theme_pending = False
         index = self._tabs.currentIndex()
+        self.operation_tab.camera_card.shutdown()
+        # Keep camera controls and their unsaved settings while replacing tabs.
+        self.camera_tab.setParent(self)
         self._build_ui()
         self._tabs.setCurrentIndex(index)
 
@@ -709,8 +595,7 @@ class MainWindow(QMainWindow):
         """Take a deferred re-theme once the run that blocked it has stopped."""
         if not self._theme_pending or self._run_is_live():
             return
-        # Deferred: this runs inside a session signal, and the tabs about to be
-        # destroyed are further down that signal's own list of receivers.
+        # Wait until the current session signal finishes dispatching.
         QTimer.singleShot(0, self._rebuild_if_still_idle)
 
     def _rebuild_if_still_idle(self):
@@ -728,7 +613,8 @@ class MainWindow(QMainWindow):
                     or session.sequence_state != SEQ_IDLE)
 
     def closeEvent(self, event):
-        if self._run_is_live() and not self._confirm_close():
+        if (not self._camera_close_pending
+                and self._run_is_live() and not self._confirm_close()):
             event.ignore()
             return
         if not self.optimiser.shutdown():
@@ -738,8 +624,28 @@ class MainWindow(QMainWindow):
                 'to finish, then close again. Flow control is unchanged.')
             event.ignore()
             return
-        self.session.shutdown()
+        if self.camera.shutdown() is False:
+            self.show_message('Camera is releasing the USB connection…')
+            if not self._camera_close_pending:
+                self._camera_close_pending = True
+                self._camera_close_timer = QTimer(self)
+                self._camera_close_timer.setInterval(100)
+                self._camera_close_timer.timeout.connect(self._finish_camera_close)
+                self._camera_close_timer.start()
+            event.ignore()
+            return
+        if self.session.shutdown() is False:
+            self.show_message('Cancelling history export. Close again when it finishes.')
+            event.ignore()
+            return
+        self.operation_tab.camera_card.shutdown()
+        self.camera_tab.shutdown()
         super().closeEvent(event)
+
+    def _finish_camera_close(self):
+        if self.camera.shutdown():
+            self._camera_close_timer.stop()
+            self.close()
 
     def _confirm_close(self):
         """Ask before closing on a live run, and say what closing does not do."""

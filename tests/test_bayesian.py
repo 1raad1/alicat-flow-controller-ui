@@ -593,6 +593,60 @@ class ExperimentTests(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             validate_window(window, self.config, self.point)
 
+    def test_flow_and_setpoint_statistics_enforce_tracking_extrema(self):
+        original = window_for(self.config, self.point)
+        relative_role = next(
+            role for role, target in original["target_flows"].items()
+            if target * .03 > .05)
+        zero_role = next(
+            role for role, target in original["target_flows"].items()
+            if target == 0)
+
+        for kind in ("flow", "setpoint"):
+            statistics_key = f"{kind}_statistics"
+            target = original["target_flows"][relative_role]
+            tolerance = target * .03
+            for field, value in (
+                    ("min_slpm", target - tolerance - 1e-6),
+                    ("max_slpm", target + tolerance + 1e-6)):
+                with self.subTest(kind=kind, role=relative_role, field=field):
+                    window = deepcopy(original)
+                    window[statistics_key][relative_role][field] = value
+                    with self.assertRaisesRegex(ValueError, "statistics are inconsistent"):
+                        validate_window(window, self.config, self.point)
+
+            with self.subTest(kind=kind, role=zero_role, field="max_slpm"):
+                window = deepcopy(original)
+                window[statistics_key][zero_role]["max_slpm"] = .050001
+                with self.assertRaisesRegex(ValueError, "statistics are inconsistent"):
+                    validate_window(window, self.config, self.point)
+
+            with self.subTest(kind=kind, case="exact tolerance"):
+                window = deepcopy(original)
+                window[statistics_key][relative_role]["min_slpm"] = target - tolerance
+                window[statistics_key][relative_role]["max_slpm"] = target + tolerance
+                window[statistics_key][zero_role]["max_slpm"] = .05
+                validate_window(window, self.config, self.point)
+
+    def test_load_rejects_saved_statistics_outside_tracking_envelope(self):
+        self.experiment.add_trial({"point": self.point, "method": "test"})
+        self.experiment.record_window(window_for(self.config, self.point))
+        saved = deepcopy(self.experiment.data)
+        window = saved["trials"][0]["window"]
+        role = next(
+            role for role, target in window["target_flows"].items()
+            if target * .03 > .05)
+        target = window["target_flows"][role]
+
+        for kind in ("flow", "setpoint"):
+            with self.subTest(kind=kind):
+                corrupt = deepcopy(saved)
+                corrupt["trials"][0]["window"][f"{kind}_statistics"][role][
+                    "max_slpm"] = target * 1.03 + 1e-6
+                self.path.write_text(json.dumps(corrupt), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "statistics are inconsistent"):
+                    Experiment.load(self.path)
+
     def test_legacy_window_can_omit_statistics(self):
         window = window_for(self.config, self.point)
         for key in ("target_flows", "flow_statistics", "mean_setpoints", "setpoint_statistics"):

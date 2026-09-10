@@ -723,6 +723,7 @@ class SequencePlayer:
         self._last_sent = {}
         self._current = {}
         self._position = 0.0
+        self._returning = False
         self._warned = set()
         # Only an explicit 0 means endless.  An unspecified repeat count has to
         # fall to a single pass: the conservative reading of "unspecified" on a
@@ -733,6 +734,11 @@ class SequencePlayer:
     @property
     def position(self):
         return self._position
+
+    @property
+    def returning(self):
+        """Whether a repeat is still returning to its opening setpoints."""
+        return self._returning
 
     @property
     def duration(self):
@@ -810,6 +816,7 @@ class SequencePlayer:
     def prime(self):
         """Send the t=0 values, so the run starts from a defined state."""
         self._position = 0.0
+        self._returning = False
         for track in self._sequence.tracks:
             if track.key not in self._bound:
                 continue
@@ -818,38 +825,36 @@ class SequencePlayer:
             self._send(track, value, force=True)
 
     def next_cycle(self):
-        """Start another pass, or report that there are none left.
+        """Return to the opening values before starting another pass.
 
-        Deliberately *not* a second :meth:`prime`.  Priming forces the opening
-        values out regardless of the rate limiter, which is right at the start
-        of a run -- the rig is wherever it was and the operator has asked to go
-        to the beginning -- but wrong at a wrap, where the previous pass has
-        just left every line at its closing value.  Forcing there would write
-        the end-to-start jump directly to the pilot and the air lines.  Keeping
-        ``_current`` instead makes the wrap an edge like any other, so
-        :meth:`_limited` spreads it over ``min_ramp_s``.
-
-        ``_warned`` and ``_last_sent`` are kept for the same reason they exist:
-        one warning per line per replay, not one per line per pass, and a
-        deadband measured against what was actually last sent.
+        Keep current commands so the return obeys each line's rate limit.
+        The session holds the timeline until every line completes the return.
         """
         if not self.endless and self._cycle >= self._repeats:
             return False
         self._cycle += 1
         self._position = 0.0
+        self._returning = True
         return True
 
     def tick(self, position, elapsed):
         """Advance to ``position``; ``elapsed`` is the wall time since the last tick."""
-        self._position = max(0.0, float(position))
+        returning = self._returning
+        self._position = 0.0 if returning else max(0.0, float(position))
         elapsed = max(1e-3, float(elapsed))
+        reached_opening = True
         for track in self._sequence.tracks:
             if track.key not in self._bound:
                 continue
             wanted = track.value_at(self._position)
             value = self._limited(track, wanted, elapsed)
             self._current[track.key] = value
-            self._send(track, value)
+            at_opening = value == wanted
+            reached_opening = reached_opening and at_opening
+            self._send(track, value, force=(returning and at_opening
+                       and self._last_sent.get(track.key) != value))
+        if returning and reached_opening:
+            self._returning = False
         return self.finished
 
     def declared_rate(self, track):

@@ -270,9 +270,10 @@ class OperationTab(QWidget):
     #: so the window can put it in the status bar rather than a dialog.
     status = Signal(str)
 
-    def __init__(self, session, parent=None, *, optimiser=None):
+    def __init__(self, session, parent=None, *, optimiser=None, camera=None):
         super().__init__(parent)
         self.session = session
+        self.camera = camera
         if optimiser is None:
             optimiser = getattr(session, '_optimiser_controller', None)
             if optimiser is None:
@@ -464,9 +465,8 @@ class OperationTab(QWidget):
             button.blockSignals(True)
             button.setChecked(not collapsed)
             button.blockSignals(False)
-        self.sequence_btn.setText((
-            '▸  Record / Replay Flow Sequence' if collapsed
-            else '▾  Record / Replay Flow Sequence'))
+        self.sequence_btn.setText('▸  Record / replay' if collapsed
+                                  else '▾  Record / replay')
         if not collapsed:
             # Refresh whichever way the panel opens: button, keyboard or drag.
             self._refresh_saved()
@@ -520,6 +520,10 @@ class OperationTab(QWidget):
                                   theme.PAD_SM + 2, theme.PAD_LG)
         column.setSpacing(theme.CARD_GAP)
         column.addWidget(self._card_logging())
+        if self.camera is not None:
+            from .qt_camera import BurnerCameraCard
+            self.camera_card = BurnerCameraCard(self.camera)
+            column.addWidget(self.camera_card)
         self._autocalc_card = self._card_autocalc()
         column.addWidget(self._autocalc_card)
         self._sequence_card = self._card_sequence()
@@ -546,6 +550,10 @@ class OperationTab(QWidget):
                        'written only while monitoring is running.'))
 
         self.log_path = QLineEdit(str(DEFAULT_LOG_DIR / 'run.csv'))
+        self.log_path.setMaximumWidth(theme.scale(280))
+        self.log_path.setMinimumWidth(theme.scale(100))
+        self.log_path.setToolTip(self.log_path.text())
+        self.log_path.textChanged.connect(self.log_path.setToolTip)
         # textEdited, not textChanged: the field is also written to from
         # ``_on_logging`` to show the file actually opened, and a LabVIEW run
         # opens a timestamped sibling.  Feeding that back would stamp the
@@ -557,7 +565,7 @@ class OperationTab(QWidget):
         browse.clicked.connect(self._browse_log)
         caption = QLabel('Log file')
         caption.setObjectName('FieldLabel')
-        card.add(row(caption, self.log_path, browse, stretch_at=1))
+        card.add(row(caption, self.log_path, browse, None))
 
         self.start_log_btn = QPushButton('Start Logging')
         self.start_log_btn.setProperty('variant', 'accent')
@@ -739,22 +747,20 @@ class OperationTab(QWidget):
     def _card_sequence(self):
         card = Card(
             'Sequences', index=None,
-            help_text=('Record every commanded setpoint while monitoring, '
-                       'edit the resulting curve, then replay or repeat it. '
-                       'Clicking a saved name loads it into the panel and '
-                       'nothing moves. ▶ loads and runs it once, with no '
-                       'repeats, and only if the rig is already standing at '
-                       'the flows it opens with; otherwise the lines that '
-                       'disagree are shown. ✎ renames the saved file. '
+            help_text=('Record commanded setpoints while monitoring, edit '
+                       'them, then replay or repeat the sequence. Click a '
+                       'saved name to load it without changing flows. '
+                       '▶ loads and runs it once after checking the opening '
+                       'flows. A mismatch requires review. ✎ renames the file. '
                        '✕ deletes it after confirmation.'))
-        self.sequence_btn = QPushButton('▸  Record / Replay Flow Sequence')
+        self.sequence_btn = QPushButton('▸  Record / replay')
         self.sequence_btn.setCheckable(True)
         self.sequence_btn.setProperty('variant', 'quiet')
         self.sequence_btn.toggled.connect(self._toggle_sequence)
         card.add(self.sequence_btn)
 
         card.add(divider())
-        card.add(label('SAVED FLOW SEQUENCES  —  CLICK LOAD,  ▶ RUN,  ✎ RENAME,  ✕ DELETE',
+        card.add(label('Saved sequences · Click a name to load',
                        color=theme.TEXT_DIM, size=7, bold=True))
         self.saved_list = QListWidget()
         self.saved_list.setFixedHeight(theme.scale(104))
@@ -1035,10 +1041,9 @@ class OperationTab(QWidget):
         column.setSpacing(theme.CARD_GAP)
 
         self._cards_card = Card(
-            'Live Controller Readings & Manual Control', collapsible=False,
-            help_text=('Review each assigned controller, enter individual '
-                       'setpoints, and configure its remembered full scale and '
-                       'ramp behavior.'))
+            'Controllers', collapsible=False,
+            help_text=('View readings and enter setpoints. Use each controller\'s '
+                       'menu to set its display scale, command limit and ramp rate.'))
         self._cards_view_buttons = {}
         for view, text in (('list', 'List'), ('grid', 'Grid')):
             button = QPushButton(text)
@@ -1055,8 +1060,8 @@ class OperationTab(QWidget):
             self._cards_view_buttons[view] = button
         self._sync_cards_view_buttons()
         self._empty_note = label(
-            'No controllers assigned yet — connect and assign them on the '
-            'Connection tab.', color=theme.TEXT_DIM, size=9)
+            'Connect and assign controllers in Connection & Assignment.',
+            color=theme.TEXT_DIM, size=9)
         self._empty_note.setWordWrap(True)
         self._cards_card.add(self._empty_note)
 
