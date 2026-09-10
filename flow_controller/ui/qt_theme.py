@@ -593,6 +593,14 @@ QPushButton[density="compact"] {{ padding: 7px 8px; }}
                           color: {TEXT_DIM}; }}
 
 /* ---- Splitter, scroll --------------------------------------------- */
+#PanelToggle {{ color: {TEXT_MUTED}; }}
+#PanelToggle:checked {{
+    color: {TEXT_BRIGHT};
+    background-color: {rgba(tint(ACCENT, 28))};
+    border-color: {rgba(tint(ACCENT, 120))};
+}}
+#PanelToggle:focus {{ border-color: {ACCENT}; }}
+
 QSplitter::handle {{ background-color: rgba(255, 255, 255, 14);
                      margin: 12px 0; border-radius: 2px; }}
 QSplitter::handle:horizontal {{ width: 4px; }}

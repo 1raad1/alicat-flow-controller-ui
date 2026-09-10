@@ -26,14 +26,15 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QLineEdit,
-                               QPushButton, QScrollArea, QSplitter,
+from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QHBoxLayout,
+                               QLineEdit, QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from ..domain.graphing import parse_axis_limits
 from ..core.session import DEFAULT_LOG_DIR
 from . import qt_theme as theme
 from .qt_graph_panel import GRAPH_METRICS, QtGraphPanel
+from .qt_motion_panels import MotionSplitter
 from .qt_widgets import Card, divider, label, row
 
 #: ``(key, caption, default minimum, default maximum)`` for every axis the
@@ -156,18 +157,44 @@ class LoggingTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self._split = QSplitter(Qt.Orientation.Horizontal)
-        self._split.setHandleWidth(4)
+        self._split = MotionSplitter(Qt.Orientation.Horizontal)
         self._split.addWidget(self._build_controls())
         self._split.addWidget(self._build_plots())
+        self._split.configure_panel(0, 'Plot controls')
         self._split.setStretchFactor(0, 0)
         self._split.setStretchFactor(1, 1)
-        self._split.setSizes([430, 1130])
+        self._split.set_default_sizes([430, 1130])
+        panel_bar = QWidget()
+        panel_layout = QHBoxLayout(panel_bar)
+        panel_layout.setContentsMargins(theme.PAD_LG, theme.PAD_XS,
+                                        theme.PAD_LG, theme.PAD_XS)
+        self.controls_panel_btn = QPushButton('Plot controls')
+        self.controls_panel_btn.setObjectName('PanelToggle')
+        self.controls_panel_btn.setCheckable(True)
+        self.controls_panel_btn.setChecked(True)
+        self.controls_panel_btn.setProperty('density', 'compact')
+        self.controls_panel_btn.setToolTip('Fold the controls to give the plots more space')
+        self.controls_panel_btn.toggled.connect(
+            lambda shown: self._split.set_panel_collapsed(0, not shown))
+        self._split.panelCollapsedChanged.connect(self._controls_collapsed)
+        panel_layout.addWidget(self.controls_panel_btn)
+        panel_layout.addStretch(1)
+        reset = QPushButton('Reset layout')
+        reset.setProperty('density', 'compact')
+        reset.clicked.connect(lambda: self._split.reset_layout())
+        panel_layout.addWidget(reset)
+        outer.addWidget(panel_bar)
         outer.addWidget(self._split, 1)
 
         session.assignments_changed.connect(lambda _map: self._refresh_units())
         session.monitoring_changed.connect(lambda _on: self._update_status())
         self._refresh_units()
+
+    def _controls_collapsed(self, index, collapsed):
+        if index == 0:
+            self.controls_panel_btn.blockSignals(True)
+            self.controls_panel_btn.setChecked(not collapsed)
+            self.controls_panel_btn.blockSignals(False)
 
     # ------------------------------------------------------------------ #
     #  Left column                                                        #
