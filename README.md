@@ -455,12 +455,19 @@ https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
 
 ### Install and run on Windows
 
-1. Double-click `install.bat`. You only need to do this once.
+1. Extract the complete application ZIP, then double-click `install.bat`. Run it again after an upgrade to install new dependencies.
 2. Double-click `run.bat` to start the application.
 
 The installer puts the virtual environment in
 `%USERPROFILE%\.flow-controller-v3\venv`. This keeps PySide6's deeply nested
 files out of OneDrive and avoids common Windows path-length failures.
+
+Setup installs Python.NET in that environment, verifies the bundled camera
+DLLs, removes their Windows downloaded-file blocks, and checks that the camera
+library loads. No edits to `run.bat` are needed. Camera setup requires .NET
+Framework 4.8 or newer; setup reports a missing framework or failed library
+check before declaring installation complete. Canon EOS still requires its
+matching additional SDK, as described in [Camera setup](docs/CAMERA.md).
 
 To run from PowerShell instead:
 
