@@ -71,6 +71,12 @@ need internet access.
 
 ## Set up a Canon camera
 
+For a Canon-enabled application ZIP, run `install.bat` normally. It verifies
+and tests the included SDK and skips the separate Canon download/import prompt.
+The camera engine loads the SDK directly from the application's bundle.
+
+For a source ZIP without the Canon runtime, follow the setup below.
+
 Canon EOS requires Canon's Windows EDSDK. Obtain the SDK under your own Canon
 developer agreement from the [Canon Developer Portal](https://developers.canon-europe.com/developers/s/article/Latest-EOS-SDK-Version-13-x).
 The SDK is not included in this application's public download.
@@ -95,6 +101,22 @@ For command-line setup, run `setup_canon.bat "C:\Downloads\CanonSDK.zip"`.
 No digiCamControl desktop app or camera web server is required. Camera-specific
 capture and live-view capabilities still need verification on the connected
 camera.
+
+## Build a Canon-enabled Windows download
+
+From a checkout with the application changes tracked by Git, run:
+
+```powershell
+python scripts/package_windows.py --canon-sdk "C:\Downloads\CanonSDK.zip" --canon-notice "C:\Downloads\Canon-runtime-notice.txt" --output "C:\Releases\flow-controller-canon.zip"
+```
+
+Use the official Windows SDK and its runtime redistribution notice under the
+app developer's Canon agreement. The packager selects the supported x64 DLLs,
+tests native initialization, and puts the runtime in `camera_runtime/canon`.
+It updates the bundle's hash manifest and includes the supplied notice. It does
+not change the source checkout or the SDK configured in the user's profile.
+The resulting ZIP is the download to give to other PCs; GitHub's automatic
+source ZIP does not include files added only during packaging.
 
 This integrates the device engine and native flow-app capture controls. It does
 not load digiCamControl's desktop, window-command system, photo-editing plugins,

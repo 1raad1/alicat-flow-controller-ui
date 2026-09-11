@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+
+def runtime_directory() -> Path:
+    return Path(__file__).resolve().parents[1] / 'flow_controller/camera_runtime'
+
+
+def bundled_canon_sdk_directory(runtime: Path) -> Path | None:
+    """Return a validated nested Canon SDK bundle, if one is present."""
+    directory = runtime / 'canon'
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    from flow_controller.infrastructure.canon_sdk import validate_sdk
+    validate_sdk(directory, verify_manifest=True)
+    return directory.resolve()
+
+
+def configured_canon_sdk_directory() -> Path | None:
+    from flow_controller.infrastructure.canon_sdk import installed_sdk_directory
+    return installed_sdk_directory()
+
+
+def probe_bundled_canon_sdk(directory: Path) -> None:
+    from flow_controller.infrastructure.canon_sdk import _run_probe
+    _run_probe(directory)
 
 
 def verified_dlls(runtime: Path) -> list[Path]:
@@ -76,28 +101,52 @@ def check_library_load(runtime: Path) -> None:
     from System.Windows.Threading import Dispatcher
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Prepare the bundled camera runtime')
+    parser.add_argument('--canon-ready', action='store_true',
+                        help='report whether valid Canon support is already available')
+    args = parser.parse_args([] if argv is None else argv)
+    runtime = runtime_directory()
+    root = runtime.parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    if args.canon_ready:
+        try:
+            canon = bundled_canon_sdk_directory(runtime)
+            if canon is None:
+                canon = configured_canon_sdk_directory()
+            if canon is None:
+                print('Canon SDK is not configured.')
+                return 2
+            print(f'Canon SDK ready: {canon}')
+            return 0
+        except Exception as exc:
+            print(f'Canon SDK validation failed: {exc}', file=sys.stderr)
+            return 1
+
     try:
         if sys.platform != 'win32' or sys.maxsize <= 2**32:
             raise RuntimeError('Camera setup requires 64-bit Windows and 64-bit Python.')
         check_framework()
-        runtime = Path(__file__).resolve().parents[1] / 'flow_controller/camera_runtime'
         libraries = verified_dlls(runtime)
         unblock_dlls(libraries)
         check_library_load(runtime)
         print(f'Camera setup passed: verified, unblocked and loaded {len(libraries)} bundled DLLs.')
-        root = runtime.parents[1]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from flow_controller.infrastructure.canon_sdk import installed_sdk_directory
-        try:
-            canon = installed_sdk_directory()
-            if canon:
-                print(f'Canon SDK configured: {canon}')
+        canon = bundled_canon_sdk_directory(runtime)
+        if canon is not None:
+            probe_bundled_canon_sdk(canon)
+            print(f'Bundled Canon SDK ready: {canon}')
+        else:
+            try:
+                canon = configured_canon_sdk_directory()
+            except Exception as exc:
+                print(f'Existing Canon SDK needs repair: {exc}. Run setup_canon.bat.')
             else:
-                print('For Canon, choose Canon setup next or run setup_canon.bat with your official SDK ZIP.')
-        except Exception as exc:
-            print(f'Existing Canon SDK needs repair: {exc}. Run setup_canon.bat.')
+                if canon:
+                    print(f'Canon SDK configured: {canon}')
+                else:
+                    print('For Canon, choose Canon setup next or run setup_canon.bat with your official SDK ZIP.')
         return 0
     except Exception as exc:
         print(f'Camera setup failed: {exc}', file=sys.stderr)
@@ -105,4 +154,4 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

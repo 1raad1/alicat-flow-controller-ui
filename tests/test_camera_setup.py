@@ -81,6 +81,91 @@ class CameraRuntimeSetupTests(unittest.TestCase):
         unblock.assert_not_called()
         load.assert_not_called()
 
+    def test_main_validates_and_probes_bundled_canon_sdk(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name)
+        canon = runtime / "canon"
+        canon.mkdir()
+
+        with patch.object(setup_camera_runtime.sys, "platform", "win32"), \
+                patch.object(setup_camera_runtime.sys, "maxsize", 2**63 - 1), \
+                patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "check_framework"), \
+                patch.object(setup_camera_runtime, "verified_dlls", return_value=[]), \
+                patch.object(setup_camera_runtime, "unblock_dlls"), \
+                patch.object(setup_camera_runtime, "check_library_load"), \
+                patch("flow_controller.infrastructure.canon_sdk.validate_sdk") as validate, \
+                patch.object(setup_camera_runtime, "probe_bundled_canon_sdk") as probe, \
+                patch.object(setup_camera_runtime, "configured_canon_sdk_directory") as configured:
+            self.assertEqual(setup_camera_runtime.main(), 0)
+
+        validate.assert_called_once_with(canon, verify_manifest=True)
+        probe.assert_called_once_with(canon.resolve())
+        configured.assert_not_called()
+
+    def test_main_fails_when_bundled_canon_sdk_is_corrupt(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name)
+        (runtime / "canon").mkdir()
+
+        with patch.object(setup_camera_runtime.sys, "platform", "win32"), \
+                patch.object(setup_camera_runtime.sys, "maxsize", 2**63 - 1), \
+                patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "check_framework"), \
+                patch.object(setup_camera_runtime, "verified_dlls", return_value=[]), \
+                patch.object(setup_camera_runtime, "unblock_dlls"), \
+                patch.object(setup_camera_runtime, "check_library_load"), \
+                patch("flow_controller.infrastructure.canon_sdk.validate_sdk",
+                      side_effect=RuntimeError("bad Canon manifest")), \
+                patch.object(setup_camera_runtime, "probe_bundled_canon_sdk") as probe, \
+                patch.object(setup_camera_runtime, "configured_canon_sdk_directory") as configured:
+            self.assertEqual(setup_camera_runtime.main(), 1)
+
+        probe.assert_not_called()
+        configured.assert_not_called()
+
+    def test_canon_ready_exit_states_without_loading_libraries(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        runtime = Path(temporary.name)
+        bundled = runtime / "canon"
+
+        with patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "check_framework") as framework, \
+                patch.object(setup_camera_runtime, "check_library_load") as load, \
+                patch.object(setup_camera_runtime, "probe_bundled_canon_sdk") as probe, \
+                patch.object(setup_camera_runtime, "bundled_canon_sdk_directory",
+                             return_value=bundled), \
+                patch.object(setup_camera_runtime, "configured_canon_sdk_directory") as configured:
+            self.assertEqual(setup_camera_runtime.main(["--canon-ready"]), 0)
+            configured.assert_not_called()
+
+        configured_sdk = runtime / "configured"
+        with patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "bundled_canon_sdk_directory",
+                             return_value=None), \
+                patch.object(setup_camera_runtime, "configured_canon_sdk_directory",
+                             return_value=configured_sdk):
+            self.assertEqual(setup_camera_runtime.main(["--canon-ready"]), 0)
+
+        with patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "bundled_canon_sdk_directory",
+                             return_value=None), \
+                patch.object(setup_camera_runtime, "configured_canon_sdk_directory",
+                             return_value=None):
+            self.assertEqual(setup_camera_runtime.main(["--canon-ready"]), 2)
+
+        with patch.object(setup_camera_runtime, "runtime_directory", return_value=runtime), \
+                patch.object(setup_camera_runtime, "bundled_canon_sdk_directory",
+                             side_effect=RuntimeError("invalid bundle")):
+            self.assertEqual(setup_camera_runtime.main(["--canon-ready"]), 1)
+
+        framework.assert_not_called()
+        load.assert_not_called()
+        probe.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
