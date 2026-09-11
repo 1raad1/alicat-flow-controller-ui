@@ -83,6 +83,40 @@ class WindowsPackageTests(unittest.TestCase):
     def _git_output(self) -> str:
         return "\0".join(self.tracked) + "\0"
 
+    def _add_bundled_canon_sdk(self) -> bytes:
+        runtime = self.root / "flow_controller" / "camera_runtime"
+        destination = runtime / "canon"
+        destination.mkdir()
+        for name, contents in self.canon_files.items():
+            (destination / name).write_bytes(contents)
+        bundled_notice = b"tracked Canon redistribution notice\n"
+        (destination / "NOTICE.txt").write_bytes(bundled_notice)
+        provenance = b"Existing runtime provenance\n"
+        (runtime / "PROVENANCE.md").write_bytes(provenance)
+
+        bundled_paths = [
+            path for path in sorted(destination.iterdir()) if path.is_file()
+        ] + [runtime / "PROVENANCE.md"]
+        self.tracked.extend(
+            path.relative_to(self.root).as_posix() for path in bundled_paths
+        )
+        for manifest_path in (
+            runtime / "runtime-lock.json",
+            self.root / "third_party" / "digicamcontrol" / "runtime-lock.json",
+        ):
+            lock = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for path in bundled_paths:
+                relative = path.relative_to(runtime).as_posix()
+                contents = path.read_bytes()
+                lock["runtime"][relative] = {
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "bytes": len(contents),
+                }
+            manifest_path.write_text(
+                json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        return provenance
+
     def test_package_contains_only_tracked_app_and_verified_canon_runtime(self) -> None:
         output = self.temporary_root / "release" / "flow-controller.zip"
         profile = self.temporary_root / "user-profile"
@@ -163,6 +197,68 @@ class WindowsPackageTests(unittest.TestCase):
 
         self.assertFalse(output.exists())
         self.assertEqual(self._snapshot(self.root), source_before)
+
+    def test_package_uses_tracked_canon_bundle_without_importing_it(self) -> None:
+        provenance = self._add_bundled_canon_sdk()
+        output = self.temporary_root / "bundled.zip"
+
+        with (
+            patch.object(package_windows.subprocess, "check_output", return_value=self._git_output()),
+            patch.object(package_windows, "install_sdk") as install,
+            patch.object(package_windows, "validate_sdk", return_value=self.metadata) as validate,
+            patch.object(package_windows, "_run_probe") as probe,
+        ):
+            package_windows.package(self.root, None, None, output)
+
+        install.assert_not_called()
+        self.assertEqual(validate.call_count, 2)
+        for call in validate.call_args_list:
+            self.assertTrue(call.kwargs["verify_manifest"])
+            self.assertEqual(call.args[0].name, "canon")
+        probe.assert_called_once_with(validate.call_args_list[0].args[0])
+
+        with zipfile.ZipFile(output) as archive:
+            prefix = "flow-controller/flow_controller/camera_runtime/"
+            for name, contents in self.canon_files.items():
+                self.assertEqual(archive.read(prefix + "canon/" + name), contents)
+            self.assertEqual(
+                archive.read(prefix + "canon/NOTICE.txt"),
+                b"tracked Canon redistribution notice\n",
+            )
+            self.assertEqual(archive.read(prefix + "PROVENANCE.md"), provenance)
+            manifest = json.loads(archive.read(prefix + "runtime-lock.json"))
+            self.assertEqual(manifest["build"]["canon_versions"], self.metadata["versions"])
+
+    def test_missing_bundled_sdk_requires_explicit_sdk_and_notice(self) -> None:
+        output = self.temporary_root / "missing-canon.zip"
+        with patch.object(
+            package_windows.subprocess, "check_output", return_value=self._git_output()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "does not contain a bundled Canon SDK"):
+                package_windows.package(self.root, None, None, output)
+
+        self.assertFalse(output.exists())
+
+    def test_notice_without_sdk_is_rejected_before_packaging(self) -> None:
+        output = self.temporary_root / "notice-only.zip"
+        with patch.object(package_windows.subprocess, "check_output") as git:
+            with self.assertRaisesRegex(RuntimeError, "--canon-notice requires --canon-sdk"):
+                package_windows.package(self.root, None, self.notice, output)
+
+        git.assert_not_called()
+
+    def test_explicit_sdk_refuses_to_replace_tracked_bundle(self) -> None:
+        self._add_bundled_canon_sdk()
+        output = self.temporary_root / "replacement.zip"
+        with (
+            patch.object(package_windows.subprocess, "check_output", return_value=self._git_output()),
+            patch.object(package_windows, "install_sdk") as install,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "already contains a Canon bundle"):
+                package_windows.package(self.root, self.sdk_input, self.notice, output)
+
+        install.assert_not_called()
+        self.assertFalse(output.exists())
 
     def test_existing_output_is_refused_without_touching_it(self) -> None:
         output = self.temporary_root / "existing.zip"

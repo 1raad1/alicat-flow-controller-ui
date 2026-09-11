@@ -14,16 +14,18 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from flow_controller.infrastructure.canon_sdk import install_sdk, validate_sdk
+from flow_controller.infrastructure.canon_sdk import _run_probe, install_sdk, validate_sdk
 from scripts.setup_camera_runtime import verified_dlls
 
 
-def package(root: Path, sdk: Path, notice: Path, output: Path) -> Path:
+def package(root: Path, sdk: Path | None, notice: Path | None, output: Path) -> Path:
     """Package tracked application files; never modify the checkout or user SDK."""
     root, output = root.resolve(), output.resolve()
     if output.exists():
         raise RuntimeError(f"Output already exists: {output}")
-    if not notice.is_file():
+    if sdk is None and notice is not None:
+        raise RuntimeError("--canon-notice requires --canon-sdk")
+    if sdk is not None and (notice is None or not notice.is_file()):
         raise RuntimeError("Supply the Canon runtime redistribution notice from your SDK package")
     tracked = subprocess.check_output(
         ["git", "-C", str(root), "ls-files", "-z"], text=True
@@ -44,22 +46,32 @@ def package(root: Path, sdk: Path, notice: Path, output: Path) -> Path:
         runtime = app / "flow_controller" / "camera_runtime"
         verified_dlls(runtime)
         destination = runtime / "canon"
-        if destination.exists():
-            raise RuntimeError("Source already contains a Canon bundle; use a clean source checkout")
-        imported = install_sdk(sdk, home=staging / "sdk-validation")
-        metadata = validate_sdk(imported, verify_manifest=True)
-        shutil.copytree(imported, destination)
-        shutil.copyfile(notice, destination / ("NOTICE" + notice.suffix))
-        provenance_path = runtime / "PROVENANCE.md"
-        with provenance_path.open("a", encoding="utf-8") as provenance:
-            provenance.write(
-                "\n## Canon-enabled release packaging\n\n"
-                "The sections above describe the base device-engine build. This release "
-                "also includes the developer-supplied Canon runtime in `canon/`, with "
-                "its redistribution notice and verified file manifest.\n\n"
-                f"EDSDK: {metadata['versions']['EDSDK.dll']}; "
-                f"EdsImage: {metadata['versions']['EdsImage.dll']}.\n"
-            )
+        if sdk is None:
+            if not destination.is_dir():
+                raise RuntimeError(
+                    "Source does not contain a bundled Canon SDK; supply --canon-sdk and "
+                    "--canon-notice"
+                )
+            metadata = validate_sdk(destination, verify_manifest=True)
+            _run_probe(destination)
+        else:
+            if destination.exists():
+                raise RuntimeError("Source already contains a Canon bundle; use a clean source checkout")
+            imported = install_sdk(sdk, home=staging / "sdk-validation")
+            metadata = validate_sdk(imported, verify_manifest=True)
+            shutil.copytree(imported, destination)
+            assert notice is not None
+            shutil.copyfile(notice, destination / ("NOTICE" + notice.suffix))
+            provenance_path = runtime / "PROVENANCE.md"
+            with provenance_path.open("a", encoding="utf-8") as provenance:
+                provenance.write(
+                    "\n## Canon-enabled release packaging\n\n"
+                    "The sections above describe the base device-engine build. This release "
+                    "also includes the developer-supplied Canon runtime in `canon/`, with "
+                    "its redistribution notice and verified file manifest.\n\n"
+                    f"EDSDK: {metadata['versions']['EDSDK.dll']}; "
+                    f"EdsImage: {metadata['versions']['EdsImage.dll']}.\n"
+                )
         manifest_path = runtime / "runtime-lock.json"
         lock = json.loads(manifest_path.read_text(encoding="utf-8"))
         lock.setdefault("build", {})["canon_native"] = [
@@ -92,8 +104,8 @@ def package(root: Path, sdk: Path, notice: Path, output: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--canon-sdk", type=Path, required=True, help="Official Windows SDK ZIP or folder")
-    parser.add_argument("--canon-notice", type=Path, required=True, help="Runtime notice supplied with the SDK")
+    parser.add_argument("--canon-sdk", type=Path, help="Official Windows SDK ZIP or folder")
+    parser.add_argument("--canon-notice", type=Path, help="Runtime notice supplied with the SDK")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:

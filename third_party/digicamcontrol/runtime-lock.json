@@ -1,6 +1,18 @@
 {
   "build": {
-    "canon_native": [],
+    "canon_native": [
+      "canon/EDSDK.dll",
+      "canon/EdsImage.dll"
+    ],
+    "canon_source": {
+      "commit": "ef05251e6292dea66f6a113bf6adcd3826348aaa",
+      "directory": "Windows/EDSDK_64/Dll",
+      "repository": "https://github.com/lsy9344/Cannon_EDSDK",
+      "versions": {
+        "EDSDK.dll": "13.19.0.6400",
+        "EdsImage.dll": "13.19.0.6400"
+      }
+    },
     "deterministic": true,
     "patches": [
       "CameraDeviceManager implements IDisposable and releases WMI/WIA/Canon resources"
@@ -135,8 +147,8 @@
       "sha256": "e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d"
     },
     "PROVENANCE.md": {
-      "bytes": 2185,
-      "sha256": "6c994858a6c96c6741ff0b1f965ec4cdb64238295940dfa833a0155a3f99d2a0"
+      "bytes": 2710,
+      "sha256": "3ea3e7a768959356e492f040b09577599752ed3e4bce60b7077ee384235d5423"
     },
     "PortableDeviceLib.dll": {
       "bytes": 97792,
@@ -145,6 +157,22 @@
     "Rssdp.Native.dll": {
       "bytes": 96768,
       "sha256": "a6ba33ca67b8ce6a65f2fec6098078bcb725fb8e248f055e1ca7c330af43ed3a"
+    },
+    "canon/EDSDK.dll": {
+      "bytes": 1608192,
+      "sha256": "26c1d11c26bcf8d1eb6d828ef5aa87a95738d18364405a14b772636cd1c5b738"
+    },
+    "canon/EdsImage.dll": {
+      "bytes": 1165824,
+      "sha256": "01fb7d6ccf8660d4ceba8733ed805896042e0049dcd7c8b8d2bd2b4bf3e2b39d"
+    },
+    "canon/NOTICE.txt": {
+      "bytes": 7158,
+      "sha256": "6ee6f0d4f67b332d274acd58b7bc3b3e117ed1e755efb707a37972dedc3bf6b4"
+    },
+    "canon/canon-sdk-manifest.json": {
+      "bytes": 394,
+      "sha256": "8a27c28d13ef6c4b98ee9a78705165287a03430124945ee1c2b1d6c7079fa4a6"
     },
     "licenses/Accord-LGPL-2.1.txt": {
       "bytes": 26419,

@@ -19,17 +19,27 @@ original GoPro Bluetooth sources. Runtime managed dependencies are Accord
 websocket-sharp 1.0.3-rc11 (MIT). Exact package and output hashes are recorded
 in `runtime-lock.json`.
 
-Canon's EDSDK and EdsImage native libraries are proprietary and are not
-redistributed here. The upstream repository's copies and the public
-Canon.EDSDK 3.6.1 NuGet package are 32 bit and cannot load in the application's
-64-bit Python process. An authorised matching Canon EDSDK_64 distribution can
-be added at build time through `CANON_EDSDK_X64_DIR`; the builder requires and
-loads x64 EDSDK 13.18.40.0 and EdsImage 3.18.10.2 before copying them. These are
-the versions shipped at the pinned upstream commit, whose managed ABI uses a
-64-bit directory item size and a 288-byte `EdsDirectoryItemInfo`. Arbitrary SDK
-versions are rejected. Canon support therefore requires those two
-vendor files, while Nikon/PTP, WIA, webcam, Sony, GoPro, and other managed device
-paths remain present.
+The Windows x64 Canon camera runtime is bundled in `camera_runtime/canon`:
+`EDSDK.dll` and `EdsImage.dll`, both version `13.19.0.6400`. The files were copied
+unchanged from `Windows/EDSDK_64/Dll` in
+https://github.com/lsy9344/Cannon_EDSDK at commit
+`ef05251e6292dea66f6a113bf6adcd3826348aaa`.
+Canon retains copyright in these proprietary binaries; they are not covered by
+digiCamControl's open-source license. The SDK's original
+`Document/readme.txt` is preserved as `canon/NOTICE.txt`. This software is based
+in part on the work of the Independent JPEG Group.
+
+The Canon file manifest records versions, sizes, and SHA-256 hashes. Setup
+verifies the files, removes Windows download blocks, and probes native SDK
+initialization before reporting success. The managed Canon framework also
+passed initialization and discovery with this pair. Capture and live view still
+require physical-camera validation. The bundled runtime covers camera control
+and file transfer; Canon's separate DPP RAW-development plugins are not used by
+the flow app.
+
+Rebuilding the managed device engine preserves this verified Canon bundle.
+`CANON_EDSDK_X64_DIR` can select another supported x64 DLL directory containing
+its `NOTICE.txt`; the builder validates and probes it before copying.
 
 The digiCamControl license is in `LICENSE`. The runtime `licenses` directory
 contains the complete Accord LGPL-2.1, Newtonsoft.Json MIT, RSSDP MIT, and

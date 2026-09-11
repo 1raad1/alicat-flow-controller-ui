@@ -1,0 +1,16 @@
+{
+  "files": {
+    "EDSDK.dll": {
+      "bytes": 1608192,
+      "sha256": "26c1d11c26bcf8d1eb6d828ef5aa87a95738d18364405a14b772636cd1c5b738"
+    },
+    "EdsImage.dll": {
+      "bytes": 1165824,
+      "sha256": "01fb7d6ccf8660d4ceba8733ed805896042e0049dcd7c8b8d2bd2b4bf3e2b39d"
+    }
+  },
+  "versions": {
+    "EDSDK.dll": "13.19.0.6400",
+    "EdsImage.dll": "13.19.0.6400"
+  }
+}

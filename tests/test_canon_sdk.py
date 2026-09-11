@@ -26,7 +26,9 @@ def _pe(machine: int, marker: str = "") -> bytes:
 def _fake_file_version(path: str | Path) -> str:
     path = Path(path)
     content = path.read_bytes()
-    family = "20" if b"v20" in content else "18"
+    family = next((family for family in ("18", "19", "20") if f"v{family}".encode() in content), "18")
+    if family == "19":
+        return "13.19.0.6400"
     if path.name.casefold() == "edsdk.dll":
         return f"13.{family}.40.0"
     return f"3.{family}.10.2"
@@ -56,12 +58,15 @@ class CanonSdkTests(unittest.TestCase):
     def test_validate_accepts_supported_families_and_rejects_wrong_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for family in ("18", "20"):
+            for family in ("18", "19", "20"):
                 sdk = root / family
                 _write_pair(sdk, family=family)
                 with patch.object(canon_sdk, "file_version", side_effect=_fake_file_version):
                     metadata = canon_sdk.validate_sdk(sdk)
-                self.assertEqual(metadata["versions"]["EDSDK.dll"], f"13.{family}.40.0")
+                expected = "13.19.0.6400" if family == "19" else f"13.{family}.40.0"
+                self.assertEqual(metadata["versions"]["EDSDK.dll"], expected)
+                if family == "19":
+                    self.assertEqual(metadata["versions"]["EdsImage.dll"], expected)
 
             wrong = root / "x86"
             _write_pair(wrong, machine=0x14C)
@@ -71,12 +76,15 @@ class CanonSdkTests(unittest.TestCase):
 
     def test_validate_rejects_mismatched_supported_families(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            sdk = Path(temporary)
-            _write_pair(sdk, family="18")
-            (sdk / "EdsImage.dll").write_bytes(_pe(0x8664, "v20"))
-            with patch.object(canon_sdk, "file_version", side_effect=_fake_file_version):
-                with self.assertRaisesRegex(RuntimeError, "Unsupported or mismatched"):
-                    canon_sdk.validate_sdk(sdk)
+            root = Path(temporary)
+            for image_family in ("18", "20"):
+                with self.subTest(image_family=image_family):
+                    sdk = root / image_family
+                    _write_pair(sdk, family="19")
+                    (sdk / "EdsImage.dll").write_bytes(_pe(0x8664, f"v{image_family}"))
+                    with patch.object(canon_sdk, "file_version", side_effect=_fake_file_version):
+                        with self.assertRaisesRegex(RuntimeError, "Unsupported or mismatched"):
+                            canon_sdk.validate_sdk(sdk)
 
     def test_install_zip_selects_newest_x64_pair_and_direct_companions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
