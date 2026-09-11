@@ -77,6 +77,17 @@ def test_camera_control_patch_applies_to_pinned_source(tmp_path: Path) -> None:
     assert "File.Delete(filename);\n                        throw;" in pointer_transfer
     assert "finally\n                    {\n                        Camera.ResumeLiveview();" in pointer_transfer
 
+    assert "private volatile bool _keepAliveRequested;" in sdk
+    keep_alive = _extract_csharp_method(sdk, "        public void KeepAlive()")
+    assert "!PreventShutDown || !IsConnected || Camera == null || IsBusy" in keep_alive
+    assert "ErrorCodes.GetCanonException(Camera.SendCommand(" in keep_alive
+    assert "_keepAliveRequested = false;" in keep_alive
+    will_shutdown = _extract_csharp_method(
+        sdk, "        private void Camera_WillShutdown(object sender, EventArgs e)"
+    )
+    assert will_shutdown.count("_keepAliveRequested = true;") == 1
+    assert "SendCommand" not in will_shutdown
+
 
 def test_camera_control_patch_rejects_already_patched_source(tmp_path: Path) -> None:
     _copy_camera_patch_inputs(tmp_path)
@@ -106,6 +117,7 @@ def test_runtime_builder_applies_and_records_camera_patches() -> None:
         "PropertyValue supports verified synchronous value changes",
         "Canon ISO writes use readback verification and restore live view",
         "Canon pointer transfers restore live view and propagate failure",
+        "Canon shutdown events request owner-thread keep-alive with checked native errors",
     ):
         assert f'"{name}"' in builder
 
@@ -248,6 +260,173 @@ def test_patched_set_property_executable_behavior(
 ) -> None:
     result = subprocess.run(
         [str(set_property_harness), scenario],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == expected
+
+
+@pytest.fixture(scope="module")
+def canon_keep_alive_harness(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    compiler = windows / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+    if not PINNED_SOURCE.is_dir() or not compiler.is_file():
+        pytest.skip("pinned source cache or Windows .NET Framework compiler unavailable")
+
+    workspace = tmp_path_factory.mktemp("canon-keep-alive-harness")
+    _copy_camera_patch_inputs(workspace)
+    patch_camera_controls(workspace)
+    sdk_source = (
+        workspace / "CameraControl.Devices/Canon/CanonSDKBase.cs"
+    ).read_text()
+    keep_alive = _extract_csharp_method(sdk_source, "        public void KeepAlive()")
+    will_shutdown = _extract_csharp_method(
+        sdk_source, "        private void Camera_WillShutdown(object sender, EventArgs e)"
+    )
+    harness_source = """using System;
+
+public static class Edsdk
+{
+    public const uint CameraCommand_ExtendShutDownTimer = 99;
+}
+
+public static class ErrorCodes
+{
+    public static void GetCanonException(uint code)
+    {
+        if (code != 0)
+            throw new InvalidOperationException("Canon error " + code);
+    }
+}
+
+public sealed class FakeCamera
+{
+    public uint Result;
+    public int Calls;
+    public uint LastCommand;
+
+    public uint SendCommand(uint command)
+    {
+        Calls++;
+        LastCommand = command;
+        return Result;
+    }
+}
+
+public sealed class CanonSDKBase
+{
+    private volatile bool _keepAliveRequested;
+    public bool PreventShutDown = true;
+    public bool IsConnected = true;
+    public bool IsBusy;
+    public FakeCamera Camera = new FakeCamera();
+    public bool Requested { get { return _keepAliveRequested; } }
+
+KEEP_ALIVE
+
+WILL_SHUTDOWN
+
+    public void TriggerWarning()
+    {
+        Camera_WillShutdown(null, EventArgs.Empty);
+    }
+}
+
+public static class Program
+{
+    private static int Fail(string message)
+    {
+        Console.Error.WriteLine(message);
+        return 2;
+    }
+
+    public static int Main(string[] args)
+    {
+        string scenario = args[0];
+        var sdk = new CanonSDKBase();
+        sdk.TriggerWarning();
+        if (!sdk.Requested || sdk.Camera.Calls != 0)
+            return Fail("warning callback performed I/O or did not set the flag");
+
+        if (scenario == "disabled")
+            sdk.PreventShutDown = false;
+        else if (scenario == "disconnected")
+            sdk.IsConnected = false;
+        else if (scenario == "busy")
+            sdk.IsBusy = true;
+        else if (scenario == "null-camera")
+            sdk.Camera = null;
+        else if (scenario == "error")
+            sdk.Camera.Result = 5;
+
+        try
+        {
+            sdk.KeepAlive();
+            if (scenario == "error")
+                return Fail("nonzero Canon result did not throw");
+        }
+        catch (InvalidOperationException)
+        {
+            if (scenario != "error")
+                return Fail("unexpected Canon exception");
+            if (!sdk.Requested || sdk.Camera.Calls != 1)
+                return Fail("error cleared flag or used wrong call count");
+            Console.WriteLine("error-retained");
+            return 0;
+        }
+
+        if (scenario == "accepted")
+        {
+            if (sdk.Requested || sdk.Camera.Calls != 1 ||
+                sdk.Camera.LastCommand != Edsdk.CameraCommand_ExtendShutDownTimer)
+                return Fail("accepted keep-alive state mismatch");
+            Console.WriteLine("accepted");
+            return 0;
+        }
+
+        if (!sdk.Requested)
+            return Fail("skipped keep-alive cleared request flag");
+        int calls = sdk.Camera == null ? 0 : sdk.Camera.Calls;
+        if (calls != 0)
+            return Fail("skipped keep-alive performed I/O");
+        Console.WriteLine("skipped");
+        return 0;
+    }
+}
+""".replace("KEEP_ALIVE", keep_alive).replace("WILL_SHUTDOWN", will_shutdown)
+    source_path = workspace / "CanonKeepAliveHarness.cs"
+    executable = workspace / "CanonKeepAliveHarness.exe"
+    source_path.write_text(harness_source, encoding="utf-8")
+    compile_result = subprocess.run(
+        [str(compiler), "/nologo", f"/out:{executable}", str(source_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
+    return executable
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    (
+        ("accepted", "accepted"),
+        ("error", "error-retained"),
+        ("disabled", "skipped"),
+        ("disconnected", "skipped"),
+        ("busy", "skipped"),
+        ("null-camera", "skipped"),
+    ),
+)
+def test_patched_canon_keep_alive_executable_behavior(
+    canon_keep_alive_harness: Path, scenario: str, expected: str
+) -> None:
+    result = subprocess.run(
+        [str(canon_keep_alive_harness), scenario],
         capture_output=True,
         text=True,
         timeout=5,

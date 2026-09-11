@@ -488,6 +488,7 @@ def main() -> int:
                 "PropertyValue supports verified synchronous value changes",
                 "Canon ISO writes use readback verification and restore live view",
                 "Canon pointer transfers restore live view and propagate failure",
+                "Canon shutdown events request owner-thread keep-alive with checked native errors",
             ],
             "canon_native": canon_native,
         },

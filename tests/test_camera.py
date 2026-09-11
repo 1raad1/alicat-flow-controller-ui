@@ -25,6 +25,7 @@ class FakeEngine:
         self.fail_action = ''
         self.defer_capture = False
         self.frames = 0
+        self.pumps = 0
         self.frame_gate = None
         self.timeline = []
         self.state = dict(cameras=[{'id': '123', 'name': 'USB test'}], selected='123',
@@ -57,7 +58,8 @@ class FakeEngine:
         return copy.deepcopy(self.state)
 
     def pump(self):
-        pass
+        self.threads.add(threading.get_ident())
+        self.pumps += 1
 
     def execute(self, name, params):
         self.threads.add(threading.get_ident())
@@ -152,6 +154,13 @@ class CameraTests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: not self.camera.busy))
         self.assertEqual(len(self.engine.threads), 1)
         self.assertNotIn(threading.get_ident(), self.engine.threads)
+
+    def test_connected_idle_camera_is_pumped_without_starting_preview(self):
+        self.connect()
+
+        self.assertGreaterEqual(self.engine.pumps, 1)
+        self.assertFalse(self.camera.previewing)
+        self.assertEqual(self.engine.frames, 0)
 
     def test_slow_capture_does_not_block_ui_or_accept_duplicate(self):
         self.connect()

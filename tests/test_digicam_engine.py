@@ -128,6 +128,23 @@ class FakeCamera:
         self.released.append(handle)
 
 
+class FakeKeepAliveCamera(FakeCamera):
+    def __init__(self, serial="SERIAL-1", port="USB-1") -> None:
+        super().__init__(serial, port)
+        self.PreventShutDown = True
+        self.KeepAliveRequested = False
+        self.keep_alive_calls = 0
+        self.keep_alive_error = None
+        self.keep_alive_thread_ids = []
+
+    def KeepAlive(self):
+        self.keep_alive_calls += 1
+        self.keep_alive_thread_ids.append(threading.get_ident())
+        if self.keep_alive_error is not None:
+            raise RuntimeError(self.keep_alive_error)
+        self.KeepAliveRequested = False
+
+
 class FakeCanonSdkCamera:
     def __init__(self, destination_events, *, secondary="Unknown", save_to=1) -> None:
         self.ImageQuality = SimpleNamespace(SecondaryImageFormat=secondary)
@@ -703,6 +720,128 @@ class DccEngineTests(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIn("owning STA thread", str(errors[0]))
+
+    def test_idle_pump_keeps_every_supported_camera_awake_on_owner_thread(self) -> None:
+        first = FakeKeepAliveCamera()
+        second = FakeKeepAliveCamera(serial="SERIAL-2", port="USB-2")
+        unsupported = FakeCamera(serial="SERIAL-3", port="USB-3")
+        self.manager.camera = first
+        self.manager.SelectedCameraDevice = first
+        self.manager.ConnectedDevices = [first, second, unsupported]
+        self.engine.open()
+        owner = threading.get_ident()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 100.0
+            self.engine.pump()
+            clock.return_value = 114.999
+            self.engine.pump()
+            clock.return_value = 115.0
+            self.engine.pump()
+
+        self.assertEqual(first.keep_alive_calls, 2)
+        self.assertEqual(second.keep_alive_calls, 2)
+        self.assertEqual(first.keep_alive_thread_ids, [owner, owner])
+        self.assertEqual(second.keep_alive_thread_ids, [owner, owner])
+        self.assertEqual(unsupported.calls, [])
+        self.assertFalse(any(name.startswith("capture") or name == "frame"
+                             for name, _args in first.calls + second.calls))
+
+    def test_keep_alive_request_wakes_early_but_attempts_at_most_once_per_second(self) -> None:
+        camera = FakeKeepAliveCamera()
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 20.0
+            self.engine.pump()
+            camera.KeepAliveRequested = True
+            clock.return_value = 20.999
+            self.engine.pump()
+            self.assertEqual(camera.keep_alive_calls, 1)
+            clock.return_value = 21.0
+            self.engine.pump()
+
+        self.assertEqual(camera.keep_alive_calls, 2)
+        self.assertFalse(camera.KeepAliveRequested)
+
+    def test_busy_and_disabled_cameras_wait_until_keep_alive_is_allowed(self) -> None:
+        busy = FakeKeepAliveCamera()
+        busy.IsBusy = True
+        disabled = FakeKeepAliveCamera(serial="SERIAL-2", port="USB-2")
+        disabled.PreventShutDown = False
+        self.manager.camera = busy
+        self.manager.SelectedCameraDevice = busy
+        self.manager.ConnectedDevices = [busy, disabled]
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            clock.return_value = 30.0
+            self.engine.pump()
+            busy.IsBusy = False
+            self.engine.pump()
+            clock.return_value = 60.0
+            self.engine.pump()
+
+        self.assertEqual(busy.keep_alive_calls, 2)
+        self.assertEqual(disabled.keep_alive_calls, 0)
+
+    def test_keep_alive_failures_are_deduplicated_and_clear_after_success(self) -> None:
+        camera = FakeKeepAliveCamera()
+        camera.keep_alive_error = "USB warning failed"
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            first = self.engine.poll_events()
+            clock.return_value = 4.999
+            self.engine.pump()
+            clock.return_value = 5.0
+            self.engine.pump()
+            repeated = self.engine.poll_events()
+            camera.KeepAliveRequested = True
+            clock.return_value = 5.999
+            self.engine.pump()
+            clock.return_value = 6.0
+            self.engine.pump()
+            camera.keep_alive_error = None
+            clock.return_value = 7.0
+            self.engine.pump()
+            camera.keep_alive_error = "USB warning failed"
+            camera.KeepAliveRequested = True
+            clock.return_value = 8.0
+            self.engine.pump()
+            after_success = self.engine.poll_events()
+
+        self.assertEqual(camera.keep_alive_calls, 5)
+        self.assertEqual(len(first), 1)
+        self.assertIn("USB warning failed", first[0]["message"])
+        self.assertEqual(repeated, [])
+        self.assertEqual(len(after_success), 1)
+        self.assertIn("USB warning failed", after_success[0]["message"])
+
+    def test_disconnected_camera_is_removed_from_keep_alive_schedule(self) -> None:
+        camera = FakeKeepAliveCamera()
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            camera.IsConnected = False
+            self.manager.ConnectedDevices = []
+            self.manager.SelectedCameraDevice = None
+            self.manager.CameraDisconnected.fire()
+            self.engine.poll_events()
+            clock.return_value = 60.0
+            self.engine.pump()
+
+        self.assertEqual(camera.keep_alive_calls, 1)
+        self.assertEqual(self.engine._keep_alive_state, {})
 
     def test_missing_canon_native_sdk_is_a_nonfatal_actionable_event(self) -> None:
         runtime = Path(self.temp_dir.name) / "runtime"

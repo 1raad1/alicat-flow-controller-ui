@@ -159,3 +159,17 @@ addressed before restarting it.
 ISO changes wait for the camera write and verify its reported value. A rejected
 setting is shown as an error. The embedded preview adjusts to the available
 width; both embedded and popped-out images preserve the camera aspect ratio.
+
+## Idle keep-awake
+
+While connected, the camera worker sends Canon's ExtendShutDownTimer command
+at 15-second intervals, including when live view is off. A shutdown warning
+requests an earlier command. The callback only sets a flag; USB commands run
+on the same worker as capture and preview. Busy cameras are deferred until
+idle, and the driver's PreventShutDown setting remains respected.
+
+The native result is checked. Rejected commands produce an app error and are
+retried with a bounded frequency; identical consecutive errors are reported
+once. Disconnecting clears the schedule. This replaces reliance on the
+upstream warning handler, which ran on a background thread, ignored native
+return codes, and had no running fallback timer.

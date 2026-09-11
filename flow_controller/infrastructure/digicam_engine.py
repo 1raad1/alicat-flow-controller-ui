@@ -103,6 +103,7 @@ class DccEngine:
         self._bulb_device: object | None = None
         self._capture_started: float | None = None
         self._capture_device: object | None = None
+        self._keep_alive_state: dict[str, tuple[float, float, str]] = {}
 
     def _call(self, function: Callable[[], Any], *, bind: bool = False) -> Any:
         current = threading.get_ident()
@@ -854,6 +855,7 @@ class DccEngine:
         return errors
 
     def _refresh_device_subscriptions(self) -> None:
+        self._keep_alive_state.clear()
         errors = self._unsubscribe_device_events()
         if errors:
             raise RuntimeError("; ".join(errors))
@@ -977,7 +979,44 @@ class DccEngine:
                 "camera messages; reconnect the camera if it remains unresponsive."})
         return events
 
+    def _keep_cameras_awake(self) -> None:
+        # Runs on the same STA owner as capture and frame reads, even with
+        # preview off. Native event callbacks only set KeepAliveRequested.
+        if self._manager is None:
+            return
+        now = time.monotonic()
+        active = set()
+        for device in self._devices():
+            keep_alive = _value(device, "KeepAlive")
+            if not callable(keep_alive) or not bool(_value(device, "IsConnected", default=False)):
+                continue
+            key = self._camera_id(device) or str(id(device))
+            active.add(key)
+            if not bool(_value(device, "PreventShutDown", default=True)):
+                self._keep_alive_state.pop(key, None)
+                continue
+            if bool(_value(device, "IsBusy", default=False)):
+                continue
+            due, last_attempt, last_error = self._keep_alive_state.get(
+                key, (0.0, float("-inf"), ""))
+            requested = bool(_value(device, "KeepAliveRequested", default=False))
+            if now - last_attempt < 1.0 or (now < due and not requested):
+                continue
+            try:
+                keep_alive()
+            except Exception as exc:
+                message = f"Could not keep {self._camera_name(device, key)} awake: {exc}"
+                if message != last_error:
+                    self._pending_events.put(("error", message))
+                self._keep_alive_state[key] = (now + 5.0, now, message)
+            else:
+                self._keep_alive_state[key] = (now + 15.0, now, "")
+        self._keep_alive_state = {
+            key: value for key, value in self._keep_alive_state.items() if key in active
+        }
+
     def _pump(self) -> None:
+        self._keep_cameras_awake()
         if self._dispatcher is None:
             return
         frame = self._dispatcher_frame_type()
@@ -1056,6 +1095,7 @@ class DccEngine:
             raise RuntimeError("Camera cleanup failed: " + "; ".join(cleanup_errors))
 
     def _cleanup_runtime(self) -> None:
+        self._keep_alive_state.clear()
         self._capture_started = None
         self._capture_device = None
         self._native_libraries.clear()
