@@ -296,22 +296,32 @@ class DccEngine:
 
         self._canon_sdk_ready = False
         self._dll_directory_handle = os.add_dll_directory(str(runtime))
+        bundled_canon = runtime / "canon"
+        has_bundle = bundled_canon.exists() or bundled_canon.is_symlink()
         try:
             # A per-user installation survives application ZIP upgrades and
             # keeps licensed vendor files outside the published app package.
-            sdk_directory = installed_sdk_directory() or runtime
-            validate_sdk(sdk_directory)
+            if has_bundle:
+                sdk_directory = bundled_canon
+                validate_sdk(sdk_directory, verify_manifest=True)
+            else:
+                sdk_directory = installed_sdk_directory() or runtime
+                validate_sdk(sdk_directory)
             if sdk_directory.resolve() != runtime.resolve():
                 self._canon_directory_handle = os.add_dll_directory(str(sdk_directory))
             for name in ("EdsImage.dll", "EDSDK.dll"):
                 self._native_libraries.append(ctypes.WinDLL(str(sdk_directory / name)))
             self._canon_sdk_ready = True
         except Exception as exc:
+            repair = (
+                "Extract a fresh Canon-enabled application ZIP to repair the bundled SDK. "
+                if has_bundle else
+                "Run setup_canon.bat to import your official Windows Canon SDK. "
+            )
             self._pending_events.put((
                 "error",
                 f"Canon camera support is unavailable: {exc}. "
-                "Run setup_canon.bat to import your official Windows Canon SDK. "
-                "Nikon, WIA, and other digiCamControl drivers remain available.",
+                + repair + "Nikon, WIA, and other digiCamControl drivers remain available.",
             ))
 
     def _require_manager(self) -> object:

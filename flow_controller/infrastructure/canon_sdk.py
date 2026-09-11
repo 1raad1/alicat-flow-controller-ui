@@ -1,8 +1,7 @@
 """Install and validate a user-supplied Canon EDSDK runtime.
 
-Canon's native SDK is proprietary and is deliberately kept outside the
-application's bundled runtime.  This module only imports files selected by the
-user from an official SDK archive or extracted SDK directory.
+Canon's native SDK is proprietary. This module validates the bundled runtime
+and can import a user-supplied SDK archive or extracted SDK directory.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ import zipfile
 
 
 _REQUIRED = ("EDSDK.dll", "EdsImage.dll")
-_SUPPORTED = {(13, 18): (3, 18), (13, 20): (3, 20)}
+_SUPPORTED = {(13, 18): (3, 18), (13, 19): (13, 19), (13, 20): (3, 20)}
 _MANIFEST = "canon-sdk-manifest.json"
 _CONFIG = "canon-sdk.json"
 _MAX_DLL_BYTES = 128 * 1024 * 1024
@@ -172,7 +171,8 @@ def validate_sdk(
     edsdk_family = _version_tuple(versions["EDSDK.dll"])[:2]
     image_family = _version_tuple(versions["EdsImage.dll"])[:2]
     if _SUPPORTED.get(edsdk_family) != image_family:
-        supported = "EDSDK 13.18 with EdsImage 3.18, or EDSDK 13.20 with EdsImage 3.20"
+        supported = ("EDSDK 13.18 with EdsImage 3.18, EDSDK 13.19 with EdsImage 13.19, "
+                     "or EDSDK 13.20 with EdsImage 3.20")
         raise RuntimeError(
             "Unsupported or mismatched Canon SDK versions: "
             f"EDSDK {versions['EDSDK.dll']}, EdsImage {versions['EdsImage.dll']}; "

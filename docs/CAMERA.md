@@ -71,9 +71,16 @@ need internet access.
 
 ## Set up a Canon camera
 
+The GitHub application ZIP includes the 64-bit Canon 13.19 runtime. Run
+`install.bat` normally. It verifies
+and tests the included SDK and skips the separate Canon download/import prompt.
+The camera engine loads the SDK directly from the application's bundle.
+
+For a source ZIP without the Canon runtime, follow the setup below.
+
 Canon EOS requires Canon's Windows EDSDK. Obtain the SDK under your own Canon
 developer agreement from the [Canon Developer Portal](https://developers.canon-europe.com/developers/s/article/Latest-EOS-SDK-Version-13-x).
-The SDK is not included in this application's public download.
+These steps apply only to a source distribution that omits the bundled SDK.
 
 1. Download the Windows EDSDK 13.20 package from Canon.
 2. Choose Canon setup during `install.bat`, or run `setup_canon.bat` later.
@@ -88,13 +95,35 @@ Imported SDKs are stored under `%USERPROFILE%\.flow-controller-v3\canon-sdk`,
 outside the application directory, so extracting an application upgrade does
 not remove them. A failed SDK import preserves the previous configuration.
 The loader verifies the imported file hashes before enabling Canon support.
-The supported version families are EDSDK 13.18 with EdsImage 3.18 and EDSDK 13.20
-with EdsImage 3.20. It no longer requires one exact historical DLL build.
+The supported version families are EDSDK 13.18 with EdsImage 3.18, EDSDK 13.19
+with EdsImage 13.19, and EDSDK 13.20 with EdsImage 3.20.
 
 For command-line setup, run `setup_canon.bat "C:\Downloads\CanonSDK.zip"`.
 No digiCamControl desktop app or camera web server is required. Camera-specific
 capture and live-view capabilities still need verification on the connected
 camera.
+
+## Build a Canon-enabled Windows download
+
+The normal GitHub ZIP already includes the Canon runtime. To package that
+same checkout locally, run:
+
+```powershell
+python scripts/package_windows.py --output "C:\Releases\flow-controller-canon.zip"
+```
+
+For a source checkout without a bundled SDK, supply the SDK and notice:
+
+```powershell
+python scripts/package_windows.py --canon-sdk "C:\Downloads\CanonSDK.zip" --canon-notice "C:\Downloads\Canon-runtime-notice.txt" --output "C:\Releases\flow-controller-canon.zip"
+```
+
+Use the official Windows SDK and its runtime redistribution notice under the
+app developer's Canon agreement. The packager selects the supported x64 DLLs,
+tests native initialization, and puts the runtime in `camera_runtime/canon`.
+It updates the bundle's hash manifest and includes the supplied notice. It does
+not change the source checkout or the SDK configured in the user's profile.
+The resulting ZIP is ready to give to other PCs.
 
 This integrates the device engine and native flow-app capture controls. It does
 not load digiCamControl's desktop, window-command system, photo-editing plugins,

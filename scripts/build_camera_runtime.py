@@ -333,38 +333,30 @@ def file_version(path: Path) -> str:
 
 
 def add_canon_native(destination: Path, existing_runtime: Path) -> list[str]:
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from flow_controller.infrastructure.canon_sdk import validate_sdk, _run_probe
+
     supplied = os.environ.get("CANON_EDSDK_X64_DIR")
-    if not supplied:
-        existing_pair = all((existing_runtime / name).is_file() for name in ("EDSDK.dll", "EdsImage.dll"))
-        if not existing_pair:
-            print("Canon native SDK omitted: set CANON_EDSDK_X64_DIR to Canon EDSDK_64/Dll")
-            return []
-        source = existing_runtime
-        print("Preserving the validated Canon native SDK from the existing runtime")
-    else:
-        source = Path(supplied).expanduser().resolve()
-    copied = []
-    validated = []
-    expected_versions = {"EDSDK.dll": "13.18.40.0", "EdsImage.dll": "3.18.10.2"}
-    for name, expected_version in expected_versions.items():
-        item = source / name
-        if (not item.is_file() or pe_machine(item) != 0x8664 or
-                file_version(item) != expected_version):
-            raise RuntimeError(
-                f"CANON_EDSDK_X64_DIR must contain x64 {name} version {expected_version}"
-            )
-        validated.append(item)
-    import ctypes
-    for item in reversed(validated):  # EdsImage is an EDSDK dependency.
-        try:
-            ctypes.WinDLL(str(item))
-        except OSError as exc:
-            raise RuntimeError(f"Windows could not load x64 {item.name}: {exc}") from exc
-    for item in validated:
-        name = item.name
-        shutil.copy2(item, destination / name)
-        copied.append(name)
-    return copied
+    source = Path(supplied).expanduser().resolve() if supplied else existing_runtime / "canon"
+    if not source.exists() and not supplied:
+        print("Canon native SDK omitted: no existing bundle or CANON_EDSDK_X64_DIR")
+        return []
+    metadata = validate_sdk(source, verify_manifest=(source / "canon-sdk-manifest.json").exists())
+    notice = source / "NOTICE.txt"
+    if not notice.is_file():
+        raise RuntimeError("Canon runtime source must include its redistribution NOTICE.txt")
+    _run_probe(source)
+    target = destination / "canon"
+    target.mkdir()
+    for name in metadata["files"]:
+        shutil.copy2(source / name, target / name)
+    shutil.copy2(notice, target / "NOTICE.txt")
+    (target / "canon-sdk-manifest.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return ["canon/" + name for name in metadata["files"]]
 
 
 def main() -> int:

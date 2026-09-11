@@ -466,9 +466,9 @@ Setup installs Python.NET in that environment, verifies the bundled camera
 DLLs, removes their Windows downloaded-file blocks, and checks that the camera
 library loads. No edits to `run.bat` are needed. Camera setup requires .NET
 Framework 4.8 or newer; setup reports a missing framework or failed library
-check before declaring installation complete. For Canon EOS, choose the Canon
-setup option and select your official Windows SDK ZIP; `setup_canon.bat` also
-provides this step after installation. See [Camera setup](docs/CAMERA.md).
+check before declaring installation complete. The GitHub download includes the
+64-bit Canon SDK, so Canon support needs no separate SDK download or import.
+See [Camera setup](docs/CAMERA.md).
 
 To run from PowerShell instead:
 
