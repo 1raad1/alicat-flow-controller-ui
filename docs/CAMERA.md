@@ -6,6 +6,11 @@ a camera helper process.
 
 ## Use the camera
 
+On a fresh PC, extract the complete application ZIP and run `install.bat`.
+It installs Python.NET, verifies and unblocks the bundled DLLs, and tests their
+loading without opening a camera. Run it again when upgrading an existing
+installation. You do not need to add installation commands to `run.bat`.
+
 1. Connect the camera by USB, switch it on, and close other tethering software
    that might already own the USB connection.
 2. Open **Camera** and choose **Discover USB cameras**. The engine uses
