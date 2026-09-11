@@ -1,25 +1,10 @@
-"""The rig session: everything the operator's actions actually do.
+"""Coordinate controller connections, commands, acquisition and run state.
 
-This is the whole control layer of the application with no widgets in it.
-Scanning, connecting, the polling loop, setpoints, the verified zero, ramps,
-the ignition sequence, CSV logging and the LabVIEW listener all live here;
-a view's job is to render the signals below and call the methods below.
-
-It is the one deliberate Qt dependency outside ``ui``.  Serial work happens
-on :class:`SerialIOWorker`'s loop and on ramp threads, and every result has
-to reach the GUI thread.  Qt already delivers a signal emitted off-thread by
-queueing it onto the receiver's thread, which is exactly the hand-rolled
-callback queue this replaces -- so the session is a ``QObject`` and results
-travel as signals.
-
-Two rules hold throughout, because they are what makes the rig safe:
-
-* A zero command outranks everything.  It purges pending setpoints for the
-  units it targets (and only those), and while it is outstanding no nonzero
-  setpoint for a locked unit is written, whoever asks.
-* Nothing writes to hardware except the monitor loop.  Ramps and the ignition
-  sequence enqueue setpoints like anything else, so they cannot slip past the
-  zero lock.
+SerialIOWorker owns hardware I/O; Qt signals deliver results to the UI.
+Ramps, replay and manual controls queue setpoints for the monitor loop.
+Priority zero requests discard pending commands for their targets and block
+new nonzero commands until verification finishes. When monitoring is stopped,
+verified zero uses transient connections on the same serial worker.
 """
 
 from __future__ import annotations
@@ -48,6 +33,7 @@ from .combustion_prefs import SCOPE_ALL, SCOPE_STAGE1, SCOPE_STAGE2
 from .csv_logger import CsvLogger, resolve_path
 from .mexa_controller import MexaController
 from .graph_history import GraphHistory
+from .history_export import HistoryExporter
 from .agent_read_model import build_snapshot, derive_state, windowed_history
 from .experiment_plan_controller import ExperimentPlanController
 from .ramps import RampLeg, RampRunner
@@ -215,6 +201,7 @@ class FlowSession(QObject):
         self._telemetry = TelemetryReader(log=self._log)
         self.calc = CombustionCalculator()
         self.history = GraphHistory()
+        self.history_export = HistoryExporter(self)
         self._csv = CsvLogger()
         self.labview_stop_deferred = False
         self.mexa = MexaController(self)
@@ -1326,7 +1313,11 @@ class FlowSession(QObject):
         restored = False
         failures = []
         for unit, controller in controllers.items():
+            await self._service_zero_requests(controllers)
             wanted = self._last_sp.get(unit, 0.0)
+            if unit in self._zero_locked_units or unit in self._watchdog_locked_units:
+                wanted = 0.0
+                self._last_sp[unit] = 0.0
             limit_error = self._setpoint_limit_error(unit, wanted)
             if limit_error:
                 self._log(
@@ -1350,6 +1341,7 @@ class FlowSession(QObject):
                 failures.append(unit)
                 self._log(f"WARNING: Unit {unit} initial setpoint was not confirmed: "
                           f"{type(exc).__name__}: {exc}")
+        await self._service_zero_requests(controllers)
         if failures:
             self._log("WARNING: Initial setpoints were not confirmed for Unit(s) "
                       + ", ".join(failures))
@@ -1370,7 +1362,14 @@ class FlowSession(QObject):
                 pending[unit] = setpoint
             except Exception:
                 break
-        for unit, setpoint in pending.items():
+        while pending:
+            # Zero may arrive while a previous write is awaiting readback.
+            # Remove its targets from this local batch as well as the queue.
+            await self._service_zero_requests(controllers, pending=pending)
+            if not pending:
+                break
+            unit = next(iter(pending))
+            setpoint = pending.pop(unit)
             limit_error = self._setpoint_limit_error(unit, setpoint)
             if limit_error:
                 self._log(
@@ -1378,7 +1377,7 @@ class FlowSession(QObject):
                     f"{limit_error}.")
                 continue
             if (unit in self._zero_locked_units
-                    or unit in self._watchdog_locked_units) and abs(setpoint) > 0.001:
+                    or unit in self._watchdog_locked_units) and setpoint > 0.0:
                 self._log(
                     f"Unit {unit}: nonzero setpoint blocked by active zero command.")
                 continue
@@ -1394,7 +1393,11 @@ class FlowSession(QObject):
                 await asyncio.wait_for(
                     controllers[unit].set_flow_rate(setpoint), timeout=2.0)
                 timeout_counts[unit] = 0
-                self._last_sp[unit] = setpoint
+                # A zero requested during this write already cleared the
+                # reconnect target. Do not put the pre-zero value back.
+                if (unit not in self._zero_locked_units
+                        and unit not in self._watchdog_locked_units):
+                    self._last_sp[unit] = setpoint
                 self._log(f"Unit {unit}: SP → {setpoint:.3f} SLPM")
             except asyncio.TimeoutError:
                 self._log(f"WARNING: Unit {unit} SP={setpoint:.3f} — write sent "
@@ -1407,11 +1410,13 @@ class FlowSession(QObject):
                     f"setpoint write error on Unit {unit}: {type(exc).__name__}")
             finally:
                 await asyncio.sleep(0.05)
+        await self._service_zero_requests(controllers)
 
     async def _wait_for_next_poll(self):
-        """Sleep the configured delay in slices, so a stop is noticed promptly."""
+        """Wait between polls, yielding promptly to stop and priority zero."""
         remaining = self.poll_interval_s
-        while self.is_monitoring and remaining > 0:
+        while (self.is_monitoring and remaining > 0
+               and self._zero_request_queue.empty()):
             chunk = min(0.05, remaining)
             await asyncio.sleep(chunk)
             remaining -= chunk
@@ -1451,7 +1456,7 @@ class FlowSession(QObject):
                       f"ceiling is {maximum:.3f} SLPM.")
             return False
         if (unit in self._zero_locked_units
-                or unit in self._watchdog_locked_units) and abs(value) > 0.001:
+                or unit in self._watchdog_locked_units) and value > 0.0:
             return False
         self.setpoint_queue.put((unit, value))
         self._note_setpoint(unit, value)
@@ -1990,7 +1995,7 @@ class FlowSession(QObject):
                 request, {}, {"serial worker": f"{type(exc).__name__}: {exc}"})
         return True
 
-    async def _service_zero_requests(self, controllers):
+    async def _service_zero_requests(self, controllers, *, pending=None):
         """Service priority zero commands on the monitor's serial owner."""
         serviced = False
         while not self._zero_request_queue.empty():
@@ -2000,6 +2005,9 @@ class FlowSession(QObject):
                 break
             serviced = True
             targets = set(request.units)
+            if pending is not None:
+                for unit in targets:
+                    pending.pop(unit, None)
 
             # Drop stale normal commands for the targeted units, and *only*
             # those: a unit outside the safety scope must keep the setpoint
@@ -2727,7 +2735,7 @@ class FlowSession(QObject):
                       f"{type(exc).__name__}: {exc}")
             self._settle.enabled = False
             holding, was_holding = False, self._settle.holding
-        if holding:
+        if holding or self._player.returning:
             self._replay_held_s += elapsed
         position = min(max(0.0, now - self._replay_started_at
                            - self._replay_held_s), duration)
@@ -2737,6 +2745,7 @@ class FlowSession(QObject):
             # setpoint that is holding things up has to keep moving, or it
             # never arrives, never settles, and the hold never ends.
             done = self._player.tick(position, elapsed)
+            position = self._player.position
         except Exception as exc:
             self._log(f"Replay failed: {type(exc).__name__}: {exc}")
             self.stop_replay(reason="aborted after an error")
@@ -2916,6 +2925,8 @@ class FlowSession(QObject):
 
     def shutdown(self):
         """Stop everything in the order that leaves the rig safest."""
+        if not self.history_export.shutdown():
+            return False
         self.experiment_plans.shutdown()
         self._ramps.cancel_all()
         self.stop_replay(reason="cancelled at shutdown")

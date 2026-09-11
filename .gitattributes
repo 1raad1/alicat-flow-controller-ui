@@ -1,1 +1,4 @@
 *.sh text eol=lf
+
+# Preserve the exact bytes recorded in the bundled runtime manifest.
+/flow_controller/camera_runtime/** -text -whitespace

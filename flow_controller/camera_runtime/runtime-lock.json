@@ -1,0 +1,196 @@
+{
+  "build": {
+    "canon_native": [],
+    "deterministic": true,
+    "patches": [
+      "CameraDeviceManager implements IDisposable and releases WMI/WIA/Canon resources"
+    ],
+    "target": ".NET Framework 4.8 / x64"
+  },
+  "packages": {
+    "accord": {
+      "sha256": "7a4bdb5726b4736abda33ea9c14bc2a1e7d7a29a7e820db01c2fae9bc2d643df",
+      "version": "3.8.2-alpha"
+    },
+    "accord.video": {
+      "sha256": "7fcbf27dfeac2f5bfe61594bc924da14c6fe8d421ddaf3145b2b557abe1fabd6",
+      "version": "3.8.2-alpha"
+    },
+    "accord.video.directshow": {
+      "sha256": "5992090e711947d420c5c2a31dbe62dbd9ceb6c5a1ca02e20bd300a18a090cb7",
+      "version": "3.8.2-alpha"
+    },
+    "microsoft.net.compilers.toolset": {
+      "sha256": "37333f4f1e2ce55e621355d6da651dc23d4cb5f94a8f76b9478816e87f110ad9",
+      "version": "4.8.0"
+    },
+    "microsoft.windows.sdk.cpp": {
+      "sha256": "1a06225596800cab0c2877c01ac97b1673b9c250efcfd65f008ee531fd39169d",
+      "version": "10.0.22621.2428"
+    },
+    "newtonsoft.json": {
+      "sha256": "872fc189e638ab1056555b03aaa38f68bcb54286e221aa646eb1129babf63c77",
+      "version": "13.0.3"
+    },
+    "rssdp": {
+      "sha256": "ae061bccc295af031d76f72a02963b200bbf3b1f84b438ce2d32fa5df1a0f56e",
+      "version": "2.0.9"
+    },
+    "websocketsharp": {
+      "sha256": "24679c0a316e0ca3e2c73e865be1e663961a40abb6d9a775af6064aa19022266",
+      "version": "1.0.3-rc11"
+    }
+  },
+  "runtime": {
+    "Accord.Video.DirectShow.dll": {
+      "bytes": 73728,
+      "sha256": "d6d14d02fafdefae7755c0dfdd19bbe0b67a247a384990bcb73fbc47b253b4e5"
+    },
+    "Accord.Video.dll": {
+      "bytes": 40960,
+      "sha256": "5b49d8f970b2b6d331e1af26c882bec7611a4b96cde9c92dfa9094ddf7362b8a"
+    },
+    "Accord.dll": {
+      "bytes": 131072,
+      "sha256": "e998aa6efd211cc0a7e4e386a585e9d66f16eb4b7ffa525a10a7a94273847964"
+    },
+    "CameraControl.Devices.dll": {
+      "bytes": 335872,
+      "sha256": "4c7a7edae613eff85371b9871fb07603bbe807512a1620a535c66dc8f6354e66"
+    },
+    "Canon.Eos.Framework.dll": {
+      "bytes": 81408,
+      "sha256": "4258e0e48935b36d1e61054f34564cf42a4829cf0724516dedd8a6e4df03a563"
+    },
+    "DeviceData/Canon PowerShot G10.xml": {
+      "bytes": 13043,
+      "sha256": "00c811a8953410f01155590e0dd0b6482f4c7607d8727f8dba8d4eb5775c7905"
+    },
+    "DeviceData/Canon.PowerShot.G10.xml": {
+      "bytes": 12977,
+      "sha256": "b65f7713762ba607be91d69e393f94fe6b76347dda28d74b00b86989df5285eb"
+    },
+    "DeviceData/Canon.PowerShot.SX280HS.xml": {
+      "bytes": 10431,
+      "sha256": "d91f6a982df12c1a5ec9d9d02d6fe31e9d939a841a8175c0489f899255ad037f"
+    },
+    "DeviceData/Gopro3HD+.xml": {
+      "bytes": 227,
+      "sha256": "f5b6a5704ee56a5d1d925e18d1a6cb4b2785579ffcf8c62d99e7516d1151862b"
+    },
+    "DeviceData/HX300-log.xml": {
+      "bytes": 3402,
+      "sha256": "6ec9361aea91fdc1a8647380e82d93dc27a2f68788810914482401f1c4ef7d20"
+    },
+    "DeviceData/L830.xml": {
+      "bytes": 6367,
+      "sha256": "5be14b0e08595fc8a2704a55ca7f8cd1c1e7c3507373156e3fa81af649d80a57"
+    },
+    "DeviceData/Nikon Coolpix l120.xml": {
+      "bytes": 4093,
+      "sha256": "adb0cfd0e5e7f74debe8065d945a020a43b9760c089b5da77e7de2a54d1c8827"
+    },
+    "DeviceData/Pentax_K5_msc.xml": {
+      "bytes": 3389,
+      "sha256": "aa8ca4818205bfc8c6b107d247534af1253bdf44d0f8ea20e0c99d37a566d89b"
+    },
+    "DeviceData/Pentax_K5_ptp.xml": {
+      "bytes": 3389,
+      "sha256": "aa8ca4818205bfc8c6b107d247534af1253bdf44d0f8ea20e0c99d37a566d89b"
+    },
+    "DeviceData/canon/EOS5D2_whwang.xml": {
+      "bytes": 11943,
+      "sha256": "24375ece0cc00149e8b7503d0da652b0a834772c7e5570c50396cbfa8d977cf3"
+    },
+    "DeviceData/fujix.xml": {
+      "bytes": 227,
+      "sha256": "f5b6a5704ee56a5d1d925e18d1a6cb4b2785579ffcf8c62d99e7516d1151862b"
+    },
+    "DeviceData/nikons9900.xml": {
+      "bytes": 11173,
+      "sha256": "4f126aec5369664536aa4ec785377f59715528d42f83a7c43b63476b95ffcbc8"
+    },
+    "DeviceData/olympus_e-pl2.xml": {
+      "bytes": 3254,
+      "sha256": "4d3b062b18a54507ba36f1b8b4f458e687e573a8e37d433f44f05a07b9ea226a"
+    },
+    "DeviceData/p7700.xml": {
+      "bytes": 4445,
+      "sha256": "4d33de941cc40562e3e9f672dad4b0053e3c48cda1098bbb4c0d8a67b3044dac"
+    },
+    "Interop.PortableDeviceApiLib.dll": {
+      "bytes": 32768,
+      "sha256": "fddcdd50c0feb20c077f6da236a81404374f40e24989a05c0cb3f7322e0dffb8"
+    },
+    "Interop.PortableDeviceTypesLib.dll": {
+      "bytes": 32768,
+      "sha256": "708efee56f0e05f91597658a07af46b3805e1d8714824c47a14d8bdb8ca16404"
+    },
+    "LICENSE.digicamcontrol.txt": {
+      "bytes": 1119,
+      "sha256": "1d30d02dca59ac83728a5e08fbd14408ca50167346f79f7ff6f78447a89b84db"
+    },
+    "Newtonsoft.Json.dll": {
+      "bytes": 711952,
+      "sha256": "e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d"
+    },
+    "PROVENANCE.md": {
+      "bytes": 2185,
+      "sha256": "6c994858a6c96c6741ff0b1f965ec4cdb64238295940dfa833a0155a3f99d2a0"
+    },
+    "PortableDeviceLib.dll": {
+      "bytes": 97792,
+      "sha256": "738a8978feca7a30e0fecae69b72e0cbc6e708877157478fd240f73ca987e31d"
+    },
+    "Rssdp.Native.dll": {
+      "bytes": 96768,
+      "sha256": "a6ba33ca67b8ce6a65f2fec6098078bcb725fb8e248f055e1ca7c330af43ed3a"
+    },
+    "licenses/Accord-LGPL-2.1.txt": {
+      "bytes": 26419,
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+    },
+    "licenses/Newtonsoft.Json-MIT.md": {
+      "bytes": 1104,
+      "sha256": "b98a397897ff55f76cddc380041507a95a896b2946e0188703bf0496793d6516"
+    },
+    "licenses/Rssdp-MIT.txt": {
+      "bytes": 1080,
+      "sha256": "1d28b8a3f65b941743fa58ab03bb3bcc9d5b3e0cd50bbe0e2fb2d9656856ac11"
+    },
+    "licenses/accord.nuspec": {
+      "bytes": 908,
+      "sha256": "cf4c97621e064d5527df9fc5a840128da28280b2434fcc4f17618c8fe63eb991"
+    },
+    "licenses/accord.video.directshow.nuspec": {
+      "bytes": 1227,
+      "sha256": "c6779cb2357b4286d353204780d50253f9a5045c13282a3151fd62a3e580810b"
+    },
+    "licenses/accord.video.nuspec": {
+      "bytes": 1110,
+      "sha256": "8ebbf25574ee5bf7449e64bc6e2218459c0857e78782b75f36fe0d46b7349fa8"
+    },
+    "licenses/rssdp.nuspec": {
+      "bytes": 4056,
+      "sha256": "5eb631bd70715a762f8bde9be2d07847dc0c1521a46edc8d13777656ffb69cbc"
+    },
+    "licenses/websocket-sharp-MIT.txt": {
+      "bytes": 1085,
+      "sha256": "9678c808e025829062bcf63057c26357741fc5f0032f078a248c2f9c7ad291af"
+    },
+    "licenses/websocketsharp.nuspec": {
+      "bytes": 1402,
+      "sha256": "666f87d7ad2021525d2b28559da4fe50cbeb4f4a713b5cd63b8809c8eef37c6d"
+    },
+    "websocket-sharp.dll": {
+      "bytes": 250368,
+      "sha256": "fb06ffceb4f8789c893d2f292e5810927dd7266d3bad68df2cedb8775500e8be"
+    }
+  },
+  "schema": 1,
+  "upstream": {
+    "assembly_version": "2.1.6.0",
+    "commit": "9269e7851e5130f7d2278cc9942eccde0fd5e593",
+    "repository": "https://github.com/dukus/digicamcontrol.git"
+  }
+}

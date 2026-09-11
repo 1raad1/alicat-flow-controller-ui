@@ -31,6 +31,7 @@ The desktop interface is built with PySide6 and Qt.
 | Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
 | Connect through Wormhole from the flow-controller app | [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
+| Watch the burner and control a DSLR | [digiCamControl camera setup](docs/CAMERA.md) |
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
 | Fix an installation or connection problem | [Troubleshooting](#troubleshooting) |
@@ -124,7 +125,7 @@ These controls are available from every tab:
 | Control | Action |
 | --- | --- |
 | **SET ALL FLOWS** | Queue the setpoint shown on every controller card. |
-| **ZERO FUEL** | Zero every assigned controller whose gas name is not exactly `Air`. |
+| **ZERO FUEL** | Zero every assigned controller whose gas name, after trimming whitespace, is not `Air` (case-insensitive). |
 | **ZERO ALL** | Zero every assigned controller. |
 
 ### Command and connection safety
@@ -133,8 +134,10 @@ Two rules are enforced in the control layer:
 
 1. A zero command outranks all pending or new nonzero setpoints for its target
    units.
-2. Only the monitoring loop writes to hardware. Typed setpoints, batch sends,
-   ramps, and sequence replay all pass through the same queue and interlocks.
+2. The serial worker owns hardware I/O. While monitoring, typed setpoints,
+   batch sends, ramps, and sequence replay pass through the same queue and
+   interlocks. Zeroing with monitoring stopped uses temporary connections on
+   that same worker.
 
 Zero commands keep the serial connection and monitoring active so the result
 can be verified. They also cancel active ramps and sequence replay. Stopping
@@ -206,8 +209,9 @@ During replay:
 
 - **Hold if flows lag** pauses every track until lagging measurements catch up.
   The maximum hold is 30 seconds.
-- Repeats ramp from the final values back to the opening values. They do not
-  start again as an unprotected jump.
+- Repeats return to the opening values using each controller's current ramp
+  settings. The next pass's clock starts after every return command reaches
+  its opening value. Controllers with ramping **OFF** return in a step.
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
@@ -230,11 +234,9 @@ changes or JSON messages are required. See the
 recording settings and file selection. Existing campaigns still open in
 NO minimisation mode. The analyser input remains NO, not total NOx.
 
-The **Bayesian optimiser** replaces the Agent launcher in the Operation sidebar.
-The desktop app no longer launches an agent terminal or starts its IPC gateway.
-The optimiser runs locally; it needs neither an API key nor an internet connection.
-Legacy agent modules remain in the repository but are not mounted by the app.
-For the algorithms, equations, file format and code map, see the
+The optimiser runs locally without an API key or internet connection. The
+desktop app does not launch the retired agent terminal or its IPC gateway. For
+the algorithms, equations, file format and code map, see the
 [Bayesian optimiser technical manual](docs/BAYESIAN_OPTIMISER_MANUAL.md).
 
 ### Create and run an experiment
@@ -595,6 +597,11 @@ The default log directory is `Documents\Flow Controller`.
 **Logging & Graphs > History & Export** exports the retained in-memory history
 for every assigned controller, not just the plotted series. CSV is always
 available; `.xlsx` is available when `openpyxl` is installed.
+
+After you choose a destination, export takes a snapshot and writes it in the
+background. Monitoring and graph controls remain available. **Cancel export**
+stops the export; failed or cancelled exports leave an existing destination
+file intact. Theme changes preserve the running export.
 
 ### LabVIEW UDP trigger
 

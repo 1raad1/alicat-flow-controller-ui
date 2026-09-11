@@ -47,6 +47,8 @@ _PEN_STYLES = {
     '-.': Qt.PenStyle.DashDotLine,
 }
 
+_NO_REVISION = object()
+
 
 class GraphHistory:
     """The subset of the app's graph state this panel needs.
@@ -91,9 +93,8 @@ class QtGraphPanel(QWidget):
         """``gap_aware`` breaks traces at dropped readings.
 
         ``downsample``/``clip_to_view`` are pyqtgraph's long-history
-        optimisations.  They cost more than they save at the 600-point history
-        this app keeps, so they default off; they become worth turning on if
-        the history limit is raised substantially.
+        optimisations. They default off for the app's bounded history and can
+        be enabled when a larger history makes them worthwhile.
 
         ``pen_width`` of 1 gets Qt's fast cosmetic-pen path; anything wider
         goes through the general stroker and costs noticeably more.
@@ -109,6 +110,8 @@ class QtGraphPanel(QWidget):
         self._plots = {}
         self._curves = {}
         self._frame_index = 0
+        self._last_render_revision = _NO_REVISION
+        self._limits_pending = False
         self._needs_limits = False
         self._manual_limits = {}
         self._grid = True
@@ -177,6 +180,8 @@ class QtGraphPanel(QWidget):
     #  Layout                                                             #
     # ------------------------------------------------------------------ #
     def _rebuild(self):
+        self._last_render_revision = _NO_REVISION
+        self._limits_pending = False
         self._graphics.clear()
         self._plots = {}
         self._curves = {}
@@ -309,6 +314,12 @@ class QtGraphPanel(QWidget):
         """Push the newest history into the curves and rescale if needed."""
         if not self._curves:
             return
+        self._frame_index += 1
+        revision = getattr(self._history, 'revision', _NO_REVISION)
+        if (revision is not _NO_REVISION
+                and revision == self._last_render_revision):
+            self._finish_frame()
+            return
         times = np.fromiter(
             self._history.times, dtype=float, count=len(self._history.times))
         empty = times[:0]
@@ -335,12 +346,21 @@ class QtGraphPanel(QWidget):
                 curve.setData(xs, ys, connect='finite')
             else:
                 curve.setData(xs, ys)
-        self._frame_index += 1
+        self._limits_pending = True
+        self._finish_frame()
+        if revision is not _NO_REVISION:
+            self._last_render_revision = revision
+
+    def _finish_frame(self):
+        """Run one required axis pass at the established timer cadence."""
         if self._needs_limits:
             self._update_limits(force=True)
             self._needs_limits = False
-        elif self._frame_index % self.LIMIT_CHECK_FRAMES == 0:
+            self._limits_pending = False
+        elif (self._limits_pending
+              and self._frame_index % self.LIMIT_CHECK_FRAMES == 0):
             self._update_limits()
+            self._limits_pending = False
 
     def _group_bounds(self, group):
         low = high = None

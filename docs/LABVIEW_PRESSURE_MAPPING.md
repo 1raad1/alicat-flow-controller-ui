@@ -54,8 +54,10 @@ Initial suggestions fill the operating space. Later suggestions fit three separa
 
 After the initial completed design, open **Operating-space maps**, choose **Horizontal** and **Vertical**, then click **Refresh maps**. Other variables stay at the selected completed test's measured condition, or their bounds midpoint. **Show uncertainty (latent SD)** switches between predicted means and uncertainty. Blank cells exceed bounds or flow ceilings. These response maps do not classify flame stability or establish a safe operating region.
 
-## Existing JSON support and previous version
+## Existing JSON support
 
 The `flow-pressure-v1` JSON summary and file-ready routes remain available for advanced integrations and compatibility. They are optional; this TDMS workflow does not require exported IDs, a manifest, UDP acknowledgements or changes to the LabVIEW VI. The files in `docs/examples` illustrate those advanced payloads rather than the normal recording procedure.
 
-The working branch is `codex/nox-pressure-mapping`. The prior version is preserved in the sibling folder `flow-controller-backups/flow-controller-v3-before-pressure-mapping-20260903-133746`; Git tag `backup/before-pressure-mapping-20260903-133746` marks starting commit `aa78cbe`. This version writes campaign schema 4 and supports schema 1–3 campaigns. Keep copies of campaign files before switching versions: the backup application cannot read the new schema.
+This version writes campaign schema 4 and supports schema 1–3 campaigns. Keep
+copies of campaign files before switching versions because older applications
+cannot read schema 4.
