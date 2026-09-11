@@ -69,13 +69,32 @@ source provenance, licenses, dependency versions, and local lifecycle patches.
 The build downloads dependencies at build time; ordinary USB operation does not
 need internet access.
 
-Canon EOS support has an additional native SDK dependency. The upstream
-repository includes 32-bit Canon DLLs, which cannot load in this 64-bit app.
-They are not bundled as if they worked. The build supports supplying a
-compatible Canon 64-bit SDK; see the runtime provenance for the required files
-and build option. Until that SDK is supplied and validated, Canon EOS support
-is incomplete. Other device drivers remain available through automatic
-discovery.
+## Set up a Canon camera
+
+Canon EOS requires Canon's Windows EDSDK. Obtain the SDK under your own Canon
+developer agreement from the [Canon Developer Portal](https://developers.canon-europe.com/developers/s/article/Latest-EOS-SDK-Version-13-x).
+The SDK is not included in this application's public download.
+
+1. Download the Windows EDSDK 13.20 package from Canon.
+2. Choose Canon setup during `install.bat`, or run `setup_canon.bat` later.
+3. Select the SDK ZIP. You can also select `EDSDK.dll` inside an extracted
+   SDK's `EDSDK_64/Dll` directory. Setup selects the 64-bit files automatically,
+   copies companion libraries, removes download blocks, and tests native SDK
+   initialization before saving the configuration.
+4. Restart the flow app, connect and switch on the camera, then choose
+   **Discover USB cameras**. Close other tethering software that owns the camera.
+
+Imported SDKs are stored under `%USERPROFILE%\.flow-controller-v3\canon-sdk`,
+outside the application directory, so extracting an application upgrade does
+not remove them. A failed SDK import preserves the previous configuration.
+The loader verifies the imported file hashes before enabling Canon support.
+The supported version families are EDSDK 13.18 with EdsImage 3.18 and EDSDK 13.20
+with EdsImage 3.20. It no longer requires one exact historical DLL build.
+
+For command-line setup, run `setup_canon.bat "C:\Downloads\CanonSDK.zip"`.
+No digiCamControl desktop app or camera web server is required. Camera-specific
+capture and live-view capabilities still need verification on the connected
+camera.
 
 This integrates the device engine and native flow-app capture controls. It does
 not load digiCamControl's desktop, window-command system, photo-editing plugins,

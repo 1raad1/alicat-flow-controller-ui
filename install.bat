@@ -31,6 +31,12 @@ echo.
 echo Preparing bundled USB camera support...
 "%VENV%\Scripts\python.exe" scripts\setup_camera_runtime.py || goto :cameraerror
 echo.
+choice /C YN /M "Install or update Canon camera support using your official Canon SDK"
+if errorlevel 2 goto :installed
+call setup_canon.bat
+if errorlevel 1 goto :cameraerror
+:installed
+echo.
 echo Installation complete. Start the program with run.bat.
 pause
 exit /b 0
