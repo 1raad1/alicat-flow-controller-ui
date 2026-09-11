@@ -379,40 +379,14 @@ class OperationTab(QWidget):
     # ------------------------------------------------------------------ #
     #  Mode strip                                                         #
     # ------------------------------------------------------------------ #
-    def _build_mode_strip(self):
-        """Mode and monitoring, at the head of the left column.
-
-        These used to sit in a bar spanning both columns, which spent a row of
-        the window's height on two controls -- and spent it on the right-hand
-        side too, where the plots are and where every pixel of height is
-        another few seconds of trace.  Mode belongs beside the cards it
-        governs: switching to Standard is what hides the staged target
-        calculator below it, so the switch and its effect are visible in the
-        same glance.
-
-        The strip is pinned above the left column's scroll area rather than
-        placed inside it, so scrolling down to the sequence list does not
-        carry Start Monitoring off the top of the screen.
-        """
+    def _build_monitor_strip(self):
+        """Keep monitoring pinned above the left column's scroll area."""
         holder = QWidget()
         holder.setObjectName('Row')
         bar = QHBoxLayout(holder)
         bar.setContentsMargins(theme.PAD_LG, theme.PAD_SM,
                                theme.PAD_SM + 2, theme.PAD_SM)
         bar.setSpacing(theme.PAD_SM)
-
-        bar.addWidget(label('MODE', color=theme.TEXT_DIM, size=7, bold=True))
-        self._mode_buttons = {}
-        for mode, text in ((MODE_STANDARD, 'Standard'),
-                           (MODE_STAGED, 'Staged (RQL)')):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setProperty('density', 'compact')
-            button.clicked.connect(
-                lambda _checked=False, value=mode:
-                self.session.set_operating_mode(value))
-            bar.addWidget(button)
-            self._mode_buttons[mode] = button
 
         bar.addStretch(1)
         self.monitor_btn = QPushButton('Start Monitoring')
@@ -457,6 +431,19 @@ class OperationTab(QWidget):
         layout.addWidget(reset)
         for button in self._cards_view_buttons.values():
             layout.addWidget(button)
+        layout.addSpacing(theme.PAD_MD)
+        layout.addWidget(label('MODE', color=theme.TEXT_DIM, size=7, bold=True))
+        self._mode_buttons = {}
+        for mode, text in ((MODE_STANDARD, 'Standard'),
+                           (MODE_STAGED, 'Staged (RQL)')):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setProperty('density', 'compact')
+            button.clicked.connect(
+                lambda _checked=False, value=mode:
+                self.session.set_operating_mode(value))
+            layout.addWidget(button)
+            self._mode_buttons[mode] = button
         layout.addStretch(1)
         return bar
 
@@ -516,7 +503,7 @@ class OperationTab(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
-        column.addWidget(self._build_mode_strip())
+        column.addWidget(self._build_monitor_strip())
         column.addWidget(self._build_left_cards(), 1)
         return holder
 

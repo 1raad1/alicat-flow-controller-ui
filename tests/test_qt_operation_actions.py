@@ -58,7 +58,7 @@ class QtOperationActionTests(unittest.TestCase):
             'Logging & Acquisition')
 
         self.assertIs(tab.layout().itemAt(0).widget(), tab.panel_bar)
-        for button in tab._cards_view_buttons.values():
+        for button in (*tab._cards_view_buttons.values(), *tab._mode_buttons.values()):
             self.assertIs(button.parentWidget(), tab.panel_bar)
         self.assertTrue(tab._cards_view_buttons[tab._cards_view].isChecked())
 
