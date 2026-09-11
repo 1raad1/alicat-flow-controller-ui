@@ -424,31 +424,29 @@ class DccEngineTests(unittest.TestCase):
         camera.Manufacturer = "Nikon Corporation"
         self.assertFalse(self.engine.snapshot()["capture_preserves_live_view"])
 
-    def test_canon_capture_verifies_host_and_card_destinations_before_shutter(self) -> None:
+    def test_canon_capture_target_verifies_host_and_card_destinations(self) -> None:
         camera = FakeCanonCamera(save_to=2)
         self.use_camera(camera)
         self.engine.open()
 
-        self.engine.execute("capture", {"capture_in_ram": True})
+        self.engine.execute("capture_target", {"capture_in_ram": True})
 
         self.assertEqual(camera.destination_events, [
             ("get_property", 0xB), ("set_capture_in_ram", True),
             ("get_property", 0xB),
         ])
-        self.assertEqual([name for name, _args in camera.calls].count("capture"), 1)
+        self.assertFalse(any(name == "capture" for name, _args in camera.calls))
         self.assertEqual(camera.Camera.reset_calls, 0)
-        camera.CaptureCompleted.fire()
-        self.engine.poll_events()
 
         camera.destination_events.clear()
         camera.Camera.save_to = 1
-        self.engine.execute("capture", {"capture_in_ram": False})
+        self.engine.execute("capture_target", {"capture_in_ram": False})
 
         self.assertEqual(camera.destination_events, [
             ("get_property", 0xB), ("set_capture_in_ram", False),
             ("get_property", 0xB),
         ])
-        self.assertEqual([name for name, _args in camera.calls].count("capture"), 2)
+        self.assertFalse(any(name == "capture" for name, _args in camera.calls))
         self.assertEqual(camera.Camera.reset_calls, 0)
 
     def test_canon_destination_mismatch_aborts_before_shutter(self) -> None:
@@ -458,7 +456,7 @@ class DccEngineTests(unittest.TestCase):
         self.engine.open()
 
         with self.assertRaisesRegex(RuntimeError, "SaveTo=1"):
-            self.engine.execute("capture", {"capture_in_ram": True})
+            self.engine.execute("capture_target", {"capture_in_ram": True})
 
         self.assertEqual(camera.destination_events, [
             ("get_property", 0xB), ("set_capture_in_ram", True),
@@ -481,7 +479,7 @@ class DccEngineTests(unittest.TestCase):
         self.assertEqual(camera.destination_events, [])
         self.assertFalse(any(name == "capture" for name, _args in camera.calls))
 
-    def test_canon_capture_reapplies_cached_destination_without_parameter(self) -> None:
+    def test_canon_capture_without_target_parameter_uses_cached_destination(self) -> None:
         camera = FakeCanonCamera(save_to=1)
         camera.CaptureInSdRam = True
         camera.Camera.save_to = 1
@@ -491,13 +489,10 @@ class DccEngineTests(unittest.TestCase):
 
         self.engine.execute("capture", {})
 
-        self.assertEqual(camera.destination_events, [
-            ("get_property", 0xB), ("set_capture_in_ram", True),
-            ("get_property", 0xB),
-        ])
+        self.assertEqual(camera.destination_events, [])
         self.assertEqual([name for name, _args in camera.calls].count("capture"), 1)
 
-    def test_canon_capture_with_matching_native_destination_skips_reset(self) -> None:
+    def test_canon_same_target_shots_make_no_native_destination_calls(self) -> None:
         camera = FakeCanonCamera(save_to=2)
         camera.CaptureInSdRam = True
         camera.destination_events.clear()
@@ -505,16 +500,73 @@ class DccEngineTests(unittest.TestCase):
         self.engine.open()
 
         self.engine.execute("capture", {"capture_in_ram": True})
-        self.assertEqual(camera.destination_events, [("get_property", 0xB)])
+        self.assertEqual(camera.destination_events, [])
         camera.CaptureCompleted.fire()
         self.engine.poll_events()
 
-        camera.CaptureInSdRam = False
-        camera.Camera.save_to = 1
-        camera.destination_events.clear()
-        self.engine.execute("capture", {"capture_in_ram": False})
-        self.assertEqual(camera.destination_events, [("get_property", 0xB)])
+        self.engine.execute("capture", {"capture_in_ram": True})
+        self.assertEqual(camera.destination_events, [])
         self.assertEqual([name for name, _args in camera.calls].count("capture"), 2)
+
+    def test_canon_live_view_capture_orders_af_then_no_af_shutter(self) -> None:
+        camera = FakeCanonCamera(save_to=1)
+        trace = []
+        camera.AutoFocus = lambda: trace.append(("autofocus", camera.IsBusy))
+        camera.CapturePhoto = lambda: trace.append(("capture", camera.IsBusy))
+        camera.CapturePhotoNoAf = lambda: trace.append(("capture_no_af", camera.IsBusy))
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.sleep") as delay:
+            self.engine.execute("capture", {
+                "live_view_capture": True,
+                "autofocus_before_capture": True,
+            })
+
+        self.assertEqual(trace, [
+            ("autofocus", False), ("capture_no_af", False),
+        ])
+        delay.assert_not_called()
+        self.assertFalse(any(name == "capture" for name, _busy in trace))
+
+    def test_canon_live_view_no_af_path_never_autofocuses(self) -> None:
+        camera = FakeCanonCamera(save_to=1)
+        trace = []
+        camera.AutoFocus = lambda: trace.append("autofocus")
+        camera.CapturePhoto = lambda: trace.append("capture")
+        camera.CapturePhotoNoAf = lambda: trace.append("capture_no_af")
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.sleep") as delay:
+            self.engine.execute("capture_no_af", {
+                "live_view_capture": True,
+                "autofocus_before_capture": True,
+            })
+
+        delay.assert_not_called()
+        self.assertEqual(trace, ["capture_no_af"])
+
+    def test_failed_canon_live_view_capture_is_not_retried(self) -> None:
+        camera = FakeCanonCamera(save_to=1)
+        attempts = []
+
+        def fail_capture():
+            attempts.append("capture_no_af")
+            raise RuntimeError("shutter rejected")
+
+        camera.CapturePhotoNoAf = fail_capture
+        camera.CapturePhoto = lambda: attempts.append("capture")
+        self.use_camera(camera)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "shutter rejected"):
+                self.engine.execute("capture", {"live_view_capture": True})
+
+        self.assertEqual(attempts, ["capture_no_af"])
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
 
     def test_failed_canon_capture_releases_shutter_once_and_keeps_error_details(self) -> None:
         camera = FakeCanonCamera(save_to=2)

@@ -610,7 +610,7 @@ class DccEngine:
             code = _value(exc, "EosErrorCode", "ErrorCode", default="unknown")
             message = _value(exc, "Message", default=str(exc))
             raise RuntimeError(
-                f"Canon capture failed (destination: {target}; code: {code}). "
+                f"Canon capture failed (destination: {target}; code: {code}; command: {names[0]}). "
                 f"{message}{cleanup_error}"
             ) from exc
 
@@ -638,15 +638,15 @@ class DccEngine:
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
             self._set_capture_target(device, requested)
             return {"ok": True, "action": action, "snapshot": self._snapshot()}
-        if action in {"capture", "capture_no_af"} and (
-                "capture_in_ram" in params or self._canon_camera(device) is not None):
+        if action in {"capture", "capture_no_af"} and "capture_in_ram" in params:
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
             if not hasattr(device, "CaptureInSdRam"):
                 raise RuntimeError("The selected camera does not expose capture-in-RAM control")
             if bool(_value(device, "IsBusy", default=False)):
                 raise RuntimeError("The selected camera is busy with another capture")
-            self._set_capture_target(device, bool(params.get(
-                "capture_in_ram", _value(device, "CaptureInSdRam", default=True))))
+            requested = bool(params["capture_in_ram"])
+            if self._canon_camera(device) is None or requested != bool(device.CaptureInSdRam):
+                self._set_capture_target(device, requested)
 
         if action == "capture_no_af":
             self._require_capability(device, action, ("CaptureNoAf",))
@@ -654,27 +654,25 @@ class DccEngine:
         if action in {"capture", "capture_no_af"}:
             if bool(_value(device, "IsBusy", default=False)):
                 raise RuntimeError("The selected camera is busy with another capture")
-            try:
-                device.IsBusy = True
-            except Exception:
-                pass
-            self._capture_started = time.monotonic()
-            self._capture_device = device
-
-        if action == "capture":
-            try:
-                self._invoke(device, action, ("CapturePhoto",))
-            except Exception:
-                self._capture_started = None
-                self._capture_device = None
+            canon = self._canon_camera(device)
+            # The native Canon driver owns IsBusy, just as in CameraHelper.
+            if canon is None:
                 try:
-                    device.IsBusy = False
+                    device.IsBusy = True
                 except Exception:
                     pass
-                raise
-        elif action == "capture_no_af":
+            self._capture_started = time.monotonic()
+            self._capture_device = device
             try:
-                self._invoke(device, action, ("CapturePhotoNoAf",))
+                live_capture = canon is not None and bool(params.get("live_view_capture"))
+                if live_capture:
+                    # LiveViewViewModel uses separate AF then CapturePhotoNoAf.
+                    # Our STA worker has already returned from the synchronous
+                    # frame read, so its timer-drain sleep is unnecessary here.
+                    if action == "capture" and params.get("autofocus_before_capture", False):
+                        self._invoke(device, "autofocus", ("AutoFocus",))
+                method = "CapturePhotoNoAf" if live_capture or action == "capture_no_af" else "CapturePhoto"
+                self._invoke(device, action, (method,))
             except Exception:
                 self._capture_started = None
                 self._capture_device = None

@@ -136,13 +136,22 @@ and [Python.NET embedding](https://pythonnet.github.io/pythonnet/python.html).
 
 ## Capture and preview behaviour
 
-For Canon single-format photos, capture uses digiCamControl's live-view shutter
-path while frame polling pauses until transfer completes. RAW+JPEG and other
-drivers retain the stop/capture/restart path. The last frame remains visible
-during capture. Canon capture destinations are verified against the camera's
-SaveTo property before triggering the shutter. A failed shot releases the
-shutter button and reports the Canon error and destination without retrying.
-Failed transfers report an error rather than a saved photo.
+Canon single-format capture follows digiCamControl's live-view window: pause
+frame reads, then call `CapturePhotoNoAf()`. Live view stays active. Unlike the
+desktop's timer, frame reads and capture share one worker here: the current
+synchronous download returns before capture starts, so no extra 300 ms
+timer-drain sleep is needed. The native driver's own pause handling remains.
+The optional **Autofocus before live-view capture** checkbox focuses separately
+before that sequence; it is off by default, as in digiCamControl. Sequence
+workflows retain their explicit autofocus choice. With live view off, Capture
+uses `CapturePhoto()`, matching digiCamControl's main capture command.
+
+The Canon driver controls its busy state. Storage is configured when the
+capture destination changes, with native SaveTo readback; ordinary shots do
+not reset or re-read it. RAW+JPEG and other drivers retain the stop/capture/
+restart path. The last frame remains visible during capture. Failed shots
+release the shutter and report the Canon error without retrying. Failed
+transfers report an error rather than a saved photo.
 If no completion arrives within 60 seconds, the app clears its pending capture
 and reports a timeout. Camera errors leave preview stopped so the error can be
 addressed before restarting it.
