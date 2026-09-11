@@ -6,10 +6,17 @@ contains the complete `CameraControl.Devices`, `Canon.Eos.Framework`, and
 `PortableDeviceLib` source graphs plus upstream `DeviceData` XML definitions.
 It does not contain the desktop application or web server.
 
-The sole source patch adds `IDisposable` to `CameraDeviceManager`. It tracks and
+The lifecycle source patch adds `IDisposable` to `CameraDeviceManager`. It tracks and
 disposes WMI watchers, detaches WIA and Canon events, closes a snapshot of open
 cameras, and ignores device callbacks after disposal. This prevents monitor and
 native framework resources surviving an in-process disconnect.
+
+Camera-control patches bound Canon property retries and return immediately after
+a successful write. A synchronous property setter keeps writes on the owning
+STA worker and propagates failures. Canon ISO changes verify the camera
+readback and restore live view in a finally block. Pointer-based file transfers
+also restore live view and propagate failures. These patches are applied by
+`scripts/patch_camera_controls.py` during the reproducible runtime build.
 
 `scripts/build_camera_runtime.py` pins and SHA-256 verifies every download. The
 compiler is Microsoft.Net.Compilers.Toolset 4.8.0. Microsoft.Windows.SDK.CPP

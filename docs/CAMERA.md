@@ -133,3 +133,16 @@ not functions of the USB camera engine.
 Sources: [device library](https://github.com/dukus/digicamcontrol/tree/master/CameraControl.Devices),
 [direct-use example](https://github.com/dukus/digicamcontrol/blob/master/CameraControl.Devices.Example/Form1.cs),
 and [Python.NET embedding](https://pythonnet.github.io/pythonnet/python.html).
+
+## Capture and preview behaviour
+
+Taking a photo stops live view while the camera captures and transfers the file,
+then resumes it if preview is still enabled. The last frame remains visible
+during capture. Failed transfers report an error rather than a saved photo.
+If no completion arrives within 60 seconds, the app clears its pending capture
+and reports a timeout. Camera errors leave preview stopped so the error can be
+addressed before restarting it.
+
+ISO changes wait for the camera write and verify its reported value. A rejected
+setting is shown as an error. The embedded preview adjusts to the available
+width; both embedded and popped-out images preserve the camera aspect ratio.

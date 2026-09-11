@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QRect, QSettings, QStandardPaths, Qt, QUrl, Signal
+from PySide6.QtCore import QRect, QSize, QSettings, QStandardPaths, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QImage, QPainter
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QLabel,
-    QLineEdit, QListWidget, QPushButton, QScrollArea, QSpinBox, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .qt_widgets import Card, row
@@ -20,16 +20,69 @@ def _key(value):
 class CameraImage(QWidget):
     """Paint a shared frame without allowing its dimensions to drive layout."""
 
-    def __init__(self, camera, parent=None):
+    DEFAULT_ASPECT_RATIO = 16 / 9
+    INLINE_MINIMUM_HEIGHT = 120
+    INLINE_MAXIMUM_HEIGHT = 420
+    PREFERRED_WIDTH = 320
+
+    def __init__(self, camera, parent=None, *, fit_height_to_width=True):
         super().__init__(parent)
         self.image = QImage()
-        self.setMinimumSize(160, 180)
+        self._fit_height_to_width = fit_height_to_width
+        policy = QSizePolicy.Policy.Expanding
+        vertical_policy = (QSizePolicy.Policy.Preferred
+                           if fit_height_to_width else policy)
+        size_policy = QSizePolicy(policy, vertical_policy)
+        size_policy.setHeightForWidth(fit_height_to_width)
+        self.setSizePolicy(size_policy)
+        if fit_height_to_width:
+            self.setMinimumSize(160, self.INLINE_MINIMUM_HEIGHT)
+            self.setMaximumHeight(self.INLINE_MAXIMUM_HEIGHT)
+        else:
+            self.setMinimumSize(160, 90)
         self.setAccessibleName('Burner camera image')
         camera.frame_received.connect(self.set_image)
 
     def set_image(self, image):
+        previous_ratio = self._aspect_ratio()
         self.image = QImage(image)
+        if self._aspect_ratio() != previous_ratio:
+            self.updateGeometry()
         self.update()
+
+    def _aspect_ratio(self):
+        if not self.image.isNull() and self.image.height() > 0:
+            return self.image.width() / self.image.height()
+        return self.DEFAULT_ASPECT_RATIO
+
+    def heightForWidth(self, width):
+        height = round(max(1, width) / self._aspect_ratio())
+        if self._fit_height_to_width:
+            return max(self.INLINE_MINIMUM_HEIGHT,
+                       min(self.INLINE_MAXIMUM_HEIGHT, height))
+        return height
+
+    def hasHeightForWidth(self):
+        return self._fit_height_to_width
+
+    def sizeHint(self):
+        width = self.PREFERRED_WIDTH
+        return QSize(width, self.heightForWidth(width))
+
+    def minimumSizeHint(self):
+        if self._fit_height_to_width:
+            return QSize(160, self.INLINE_MINIMUM_HEIGHT)
+        return QSize(160, 90)
+
+    def image_rect(self):
+        """Return the aspect-fit destination used to paint the current frame."""
+        if self.image.isNull() or self.width() <= 0 or self.height() <= 0:
+            return QRect()
+        size = self.image.size().scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        return QRect((self.width() - size.width()) // 2,
+                     (self.height() - size.height()) // 2,
+                     size.width(), size.height())
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -39,12 +92,8 @@ class CameraImage(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
                              'No camera image\nStart live view to begin')
             return
-        size = self.image.size().scaled(
-            self.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        x = (self.width() - size.width()) // 2
-        y = (self.height() - size.height()) // 2
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        painter.drawImage(QRect(x, y, size.width(), size.height()), self.image)
+        painter.drawImage(self.image_rect(), self.image)
 
 
 class _CameraPopout(QWidget):
@@ -53,7 +102,7 @@ class _CameraPopout(QWidget):
         self.setWindowTitle('Burner camera')
         self.resize(960, 640)
         layout = QVBoxLayout(self)
-        self.preview = CameraImage(camera)
+        self.preview = CameraImage(camera, fit_height_to_width=False)
         self.preview.set_image(image)
         layout.addWidget(self.preview, 1)
         self.status = QLabel(status)
@@ -75,7 +124,6 @@ class BurnerCameraCard(Card):
         self._busy = bool(getattr(camera, 'busy', False))
         self._state = dict(getattr(camera, 'state', {}) or {})
         self.preview = CameraImage(camera)
-        self.preview.setMaximumHeight(320)
         self.add(self.preview)
         self.feed_status = QLabel('Preview stopped')
         self.feed_status.setWordWrap(True)
@@ -524,6 +572,7 @@ class CameraTab(QWidget):
         self.recent.insertItem(0, str(path))
         self.recent.setCurrentRow(0)
         self.open_capture_button.setEnabled(True)
+        self.connection_status.setText(f'Photo saved: {Path(path).name}')
 
     def _open_capture(self):
         item = self.recent.currentItem()
@@ -531,6 +580,13 @@ class CameraTab(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(item.text()))
 
     def _action_finished(self, name, result):
+        if name in ('capture', 'capture_no_af'):
+            self.connection_status.setText('Capture requested; waiting for the photo…')
+            return
+        if name == 'set_property' and isinstance(result, dict) and 'value' in result:
+            self.connection_status.setText(
+                f"{result.get('property', 'Camera setting')}: {result['value']}")
+            return
         title = str(name).replace('_', ' ').capitalize()
         if isinstance(result, (str, int, float)) and str(result):
             self.connection_status.setText(f'{title}: {result}')

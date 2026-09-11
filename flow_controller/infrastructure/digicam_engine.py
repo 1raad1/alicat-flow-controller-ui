@@ -16,6 +16,7 @@ import re
 import struct
 import sys
 import threading
+import time
 from typing import Any, Callable
 
 
@@ -100,6 +101,8 @@ class DccEngine:
         self._pending_events: queue.SimpleQueue[tuple[str, object | None]] = queue.SimpleQueue()
         self._owner_ident: int | None = None
         self._bulb_device: object | None = None
+        self._capture_started: float | None = None
+        self._capture_device: object | None = None
 
     def _call(self, function: Callable[[], Any], *, bind: bool = False) -> Any:
         current = threading.get_ident()
@@ -595,11 +598,15 @@ class DccEngine:
                 device.IsBusy = True
             except Exception:
                 pass
+            self._capture_started = time.monotonic()
+            self._capture_device = device
 
         if action == "capture":
             try:
                 self._invoke(device, action, ("CapturePhoto",))
             except Exception:
+                self._capture_started = None
+                self._capture_device = None
                 try:
                     device.IsBusy = False
                 except Exception:
@@ -609,6 +616,8 @@ class DccEngine:
             try:
                 self._invoke(device, action, ("CapturePhotoNoAf",))
             except Exception:
+                self._capture_started = None
+                self._capture_device = None
                 try:
                     device.IsBusy = False
                 except Exception:
@@ -665,7 +674,7 @@ class DccEngine:
                 values = [str(item) for item in _items(prop.Values)]
                 if requested not in values:
                     raise ValueError(f"Invalid zoom value {requested!r}; choose one of {values}")
-                prop.Value = requested
+                self._set_property_value(prop, requested)
                 if bool(_value(prop, "HaveError", default=False)):
                     raise RuntimeError(
                         f"Camera rejected zoom value {requested!r}; current value is {prop.Value!r}"
@@ -688,15 +697,26 @@ class DccEngine:
             values = [str(item) for item in _items(_value(prop, "Values", default=[]))]
             if requested not in values:
                 raise ValueError(f"Invalid value {requested!r} for {name}; choose one of {values}")
-            prop.Value = requested
+            self._set_property_value(prop, requested)
             if bool(_value(prop, "HaveError", default=False)):
                 raise RuntimeError(
                     f"Camera rejected {name}={requested!r}; current value is {prop.Value!r}"
                 )
-            return {"ok": True, "action": action, "snapshot": self._snapshot()}
+            return {"ok": True, "action": action, "property": name,
+                    "value": str(prop.Value), "snapshot": self._snapshot()}
         else:
             raise ValueError(f"Unknown camera action {action!r}")
         return {"ok": True, "action": action}
+
+    @staticmethod
+    def _set_property_value(prop: object, requested: str) -> None:
+        # Keep native camera writes on the owning STA worker. Upstream's Value
+        # setter otherwise starts a second thread and returns before completion.
+        setter = _value(prop, "SetValueSynchronously")
+        if callable(setter):
+            setter(requested)
+        else:
+            prop.Value = requested
 
     def _frame(self) -> bytes | None:
         device = self._selected(required=True)
@@ -822,6 +842,8 @@ class DccEngine:
         try:
             destination = self._capture_destination(event)
             self._invoke(device, "file transfer", ("TransferFile",), handle, str(destination))
+            if not destination.is_file() or destination.stat().st_size == 0:
+                raise RuntimeError("Camera transfer returned without a photo file")
             return {"path": str(destination)}
         except Exception:
             if destination is not None:
@@ -842,6 +864,9 @@ class DccEngine:
                     device.IsBusy = False
                 except Exception:
                     pass
+                if device is self._capture_device or _same_object(device, self._capture_device):
+                    self._capture_started = None
+                    self._capture_device = None
 
     def _poll_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -871,6 +896,9 @@ class DccEngine:
                     events.append({"type": "error", "message": f"Could not refresh cameras: {exc}"})
             elif kind == "capture_completed":
                 device = payload
+                if device is self._capture_device or _same_object(device, self._capture_device):
+                    self._capture_started = None
+                    self._capture_device = None
                 try:
                     if device is not None:
                         device.IsBusy = False
@@ -880,6 +908,15 @@ class DccEngine:
                 events.append({"type": "capture_completed", "camera_id": camera_id})
             elif kind == "error":
                 events.append({"type": "error", "message": str(payload)})
+        if self._capture_started is not None and time.monotonic() - self._capture_started > 60:
+            device = self._capture_device
+            self._capture_started = None
+            self._capture_device = None
+            if device is not None:
+                device.IsBusy = False
+            events.append({"type": "error", "message":
+                "Capture did not complete within 60 seconds. Check focus, exposure and "
+                "camera messages; reconnect the camera if it remains unresponsive."})
         return events
 
     def _pump(self) -> None:
@@ -961,6 +998,8 @@ class DccEngine:
             raise RuntimeError("Camera cleanup failed: " + "; ".join(cleanup_errors))
 
     def _cleanup_runtime(self) -> None:
+        self._capture_started = None
+        self._capture_device = None
         self._native_libraries.clear()
         self._canon_sdk_ready = False
         if self._canon_directory_handle is not None:

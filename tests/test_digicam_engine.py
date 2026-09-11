@@ -212,6 +212,34 @@ class DccEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown camera action"):
             self.engine.execute("DeleteEverything", {})
 
+    def test_property_write_prefers_native_synchronous_setter(self) -> None:
+        class NativeProperty(FakeProperty):
+            def __init__(self):
+                super().__init__("100", ["100", "200"])
+                self.writes = []
+
+            def SetValueSynchronously(self, value):
+                self.writes.append(value)
+                self.Value = value
+
+        prop = NativeProperty()
+        self.manager.camera.IsoNumber = prop
+        self.engine.open()
+
+        self.engine.execute("set_property", {"name": "isonumber", "value": "200"})
+
+        self.assertEqual(prop.writes, ["200"])
+        self.assertEqual(prop.Value, "200")
+
+        def reject(_value):
+            raise RuntimeError("native setter rejected value")
+
+        prop.SetValueSynchronously = reject
+        with self.assertRaisesRegex(RuntimeError, "native setter rejected value"):
+            self.engine.execute(
+                "set_property", {"name": "isonumber", "value": "100"}
+            )
+
     def test_disconnected_or_incapable_camera_is_rejected(self) -> None:
         self.engine.open()
         self.manager.camera.capability_names.remove("RecordMovie")
@@ -263,6 +291,19 @@ class DccEngineTests(unittest.TestCase):
         events = self.engine.poll_events()
 
         self.assertIn("disk full", events[0]["message"])
+        self.assertEqual(self.manager.camera.released, [7])
+        self.assertFalse(self.manager.camera.IsBusy)
+
+    def test_empty_transfer_is_an_error_and_is_not_reported_as_captured(self) -> None:
+        self.engine.open()
+        self.manager.camera.TransferFile = lambda _handle, _destination: None
+        self.manager.PhotoCaptured.fire(FakeCaptureEvent(self.manager.camera))
+
+        events = self.engine.poll_events()
+
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("without a photo file", events[0]["message"])
+        self.assertEqual(list(Path(self.temp_dir.name).iterdir()), [])
         self.assertEqual(self.manager.camera.released, [7])
         self.assertFalse(self.manager.camera.IsBusy)
 
@@ -358,6 +399,46 @@ class DccEngineTests(unittest.TestCase):
             events, [{"type": "capture_completed", "camera_id": "SERIAL-1"}]
         )
         self.assertFalse(self.engine.snapshot()["busy"])
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
+    def test_capture_command_failure_clears_tracking_and_software_busy(self) -> None:
+        self.engine.open()
+
+        def fail_capture():
+            raise RuntimeError("shutter rejected")
+
+        self.manager.camera.CapturePhoto = fail_capture
+
+        with self.assertRaisesRegex(RuntimeError, "shutter rejected"):
+            self.engine.execute("capture", {})
+
+        self.assertFalse(self.manager.camera.IsBusy)
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
+    def test_capture_timeout_clears_busy_and_emits_one_actionable_error(self) -> None:
+        self.engine.open()
+        self.engine.execute("capture", {})
+        started = self.engine._capture_started
+        self.assertIsNotNone(started)
+
+        with patch(
+            "flow_controller.infrastructure.digicam_engine.time.monotonic",
+            return_value=started + 61,
+        ):
+            events = self.engine.poll_events()
+            repeated = self.engine.poll_events()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("Check focus, exposure and camera messages",
+                      events[0]["message"])
+        self.assertEqual(repeated, [])
+        self.assertFalse(self.manager.camera.IsBusy)
+        self.assertFalse(self.engine.snapshot()["busy"])
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
 
     def test_close_unsubscribes_and_closes_manager(self) -> None:
         self.engine.open()
