@@ -90,6 +90,7 @@ class DccEngine:
         self._dispatcher_priority: object | None = None
         self._action_type: object | None = None
         self._dll_directory_handle: object | None = None
+        self._canon_directory_handle: object | None = None
         self._native_libraries: list[object] = []
         self._canon_sdk_ready = False
         self._subscriptions: list[tuple[object, object]] = []
@@ -291,82 +292,27 @@ class DccEngine:
         )
 
     def _prepare_native_runtime(self, runtime: Path) -> None:
+        from .canon_sdk import installed_sdk_directory, validate_sdk
+
         self._canon_sdk_ready = False
+        self._dll_directory_handle = os.add_dll_directory(str(runtime))
         try:
-            self._dll_directory_handle = os.add_dll_directory(str(runtime))
-        except OSError as exc:
-            raise RuntimeError(
-                f"Could not register the bundled camera runtime directory {runtime}: {exc}"
-            ) from exc
-
-        names = ("EDSDK.dll", "EdsImage.dll")
-        missing = [name for name in names if not (runtime / name).is_file()]
-        if missing:
-            self._pending_events.put(
-                (
-                    "error",
-                    "Canon camera support is unavailable because the bundled native "
-                    f"camera runtime is missing {', '.join(missing)}. Repair the camera "
-                    "runtime; Nikon, WIA, and other digiCamControl drivers remain available.",
-                )
-            )
-            return
-
-        python_arch = "64-bit" if sys.maxsize > 2**32 else "32-bit"
-        wrong_arch = []
-        for name in names:
-            architecture = self._pe_architecture(runtime / name)
-            if architecture is not None and architecture != python_arch:
-                wrong_arch.append(f"{name} is {architecture}")
-        if wrong_arch:
-            self._pending_events.put(
-                (
-                    "error",
-                    "Canon camera support is unavailable because "
-                    f"{'; '.join(wrong_arch)}, but Python is {python_arch}. Repair the "
-                    "camera runtime with matching Canon SDK files; Nikon, WIA, and other "
-                    "digiCamControl drivers remain available.",
-                )
-            )
-            return
-
-        expected_versions = {
-            "EDSDK.dll": "13.18.40.0",
-            "EdsImage.dll": "3.18.10.2",
-        }
-        version_errors = []
-        for name, expected in expected_versions.items():
-            try:
-                actual = self._file_version(runtime / name)
-            except OSError as exc:
-                version_errors.append(f"{name} version could not be verified ({exc})")
-            else:
-                if actual != expected:
-                    version_errors.append(f"{name} is version {actual}, expected {expected}")
-        if version_errors:
-            self._pending_events.put(
-                (
-                    "error",
-                    "Canon camera support is unavailable because the native SDK does not "
-                    f"match this digiCamControl binding: {'; '.join(version_errors)}. "
-                    "Repair the camera runtime with its matched Canon SDK pair; Nikon, WIA, "
-                    "and other digiCamControl drivers remain available.",
-                )
-            )
-            return
-
-        try:
-            self._native_libraries.append(ctypes.WinDLL(str(runtime / "EDSDK.dll")))
+            # A per-user installation survives application ZIP upgrades and
+            # keeps licensed vendor files outside the published app package.
+            sdk_directory = installed_sdk_directory() or runtime
+            validate_sdk(sdk_directory)
+            if sdk_directory.resolve() != runtime.resolve():
+                self._canon_directory_handle = os.add_dll_directory(str(sdk_directory))
+            for name in ("EdsImage.dll", "EDSDK.dll"):
+                self._native_libraries.append(ctypes.WinDLL(str(sdk_directory / name)))
             self._canon_sdk_ready = True
-        except OSError as exc:
-            self._pending_events.put(
-                (
-                    "error",
-                    "Canon camera support is unavailable because EDSDK.dll or one of its "
-                    f"native dependencies could not load: {exc}. Repair the camera runtime; "
-                    "Nikon, WIA, and other digiCamControl drivers remain available.",
-                )
-            )
+        except Exception as exc:
+            self._pending_events.put((
+                "error",
+                f"Canon camera support is unavailable: {exc}. "
+                "Run setup_canon.bat to import your official Windows Canon SDK. "
+                "Nikon, WIA, and other digiCamControl drivers remain available.",
+            ))
 
     def _require_manager(self) -> object:
         if self._manager is None:
@@ -1007,6 +953,12 @@ class DccEngine:
     def _cleanup_runtime(self) -> None:
         self._native_libraries.clear()
         self._canon_sdk_ready = False
+        if self._canon_directory_handle is not None:
+            try:
+                self._canon_directory_handle.close()
+            except Exception:
+                pass
+            self._canon_directory_handle = None
         if self._dll_directory_handle is not None:
             try:
                 self._dll_directory_handle.close()

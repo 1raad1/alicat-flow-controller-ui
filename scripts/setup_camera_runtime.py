@@ -86,8 +86,18 @@ def main() -> int:
         unblock_dlls(libraries)
         check_library_load(runtime)
         print(f'Camera setup passed: verified, unblocked and loaded {len(libraries)} bundled DLLs.')
-        if not (runtime / 'EDSDK.dll').exists():
-            print('Canon EOS support requires the additional matching 64-bit Canon SDK; see docs/CAMERA.md.')
+        root = runtime.parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from flow_controller.infrastructure.canon_sdk import installed_sdk_directory
+        try:
+            canon = installed_sdk_directory()
+            if canon:
+                print(f'Canon SDK configured: {canon}')
+            else:
+                print('For Canon, choose Canon setup next or run setup_canon.bat with your official SDK ZIP.')
+        except Exception as exc:
+            print(f'Existing Canon SDK needs repair: {exc}. Run setup_canon.bat.')
         return 0
     except Exception as exc:
         print(f'Camera setup failed: {exc}', file=sys.stderr)

@@ -390,56 +390,52 @@ class DccEngineTests(unittest.TestCase):
     def test_missing_canon_native_sdk_is_a_nonfatal_actionable_event(self) -> None:
         runtime = Path(self.temp_dir.name) / "runtime"
         runtime.mkdir()
-
-        self.engine._prepare_native_runtime(runtime)
+        with patch("flow_controller.infrastructure.canon_sdk.installed_sdk_directory", return_value=None):
+            self.engine._prepare_native_runtime(runtime)
         events = self.engine._poll_events()
-
-        self.assertEqual(events[0]["type"], "error")
-        self.assertIn("EDSDK.dll", events[0]["message"])
-        self.assertIn("EdsImage.dll", events[0]["message"])
+        self.assertFalse(self.engine._canon_sdk_ready)
+        self.assertIn("setup_canon.bat", events[0]["message"])
         self.assertIn("other digiCamControl drivers remain available", events[0]["message"])
         self.engine._cleanup_runtime()
 
-    def test_wrong_native_sdk_architecture_is_reported_before_loading(self) -> None:
+    def test_invalid_sdk_is_reported_before_loading(self) -> None:
         runtime = Path(self.temp_dir.name) / "runtime"
         runtime.mkdir()
-        pe = bytearray(256)
-        struct.pack_into("<I", pe, 0x3C, 128)
-        pe[128:132] = b"PE\0\0"
-        wrong_machine = 0x14C if struct.calcsize("P") == 8 else 0x8664
-        struct.pack_into("<H", pe, 132, wrong_machine)
-        (runtime / "EDSDK.dll").write_bytes(pe)
-        (runtime / "EdsImage.dll").write_bytes(pe)
-
-        self.engine._prepare_native_runtime(runtime)
-        events = self.engine._poll_events()
-
-        if struct.calcsize("P") == 8:
-            self.assertIn("EDSDK.dll is 32-bit", events[0]["message"])
-            self.assertIn("Python is 64-bit", events[0]["message"])
-        else:
-            self.assertIn("EDSDK.dll is 64-bit", events[0]["message"])
-            self.assertIn("Python is 32-bit", events[0]["message"])
+        with patch("flow_controller.infrastructure.canon_sdk.installed_sdk_directory", return_value=None), \
+                patch("flow_controller.infrastructure.canon_sdk.validate_sdk", side_effect=RuntimeError("SDK is not x64")), \
+                patch("ctypes.WinDLL") as load:
+            self.engine._prepare_native_runtime(runtime)
+        load.assert_not_called()
+        self.assertFalse(self.engine._canon_sdk_ready)
+        self.assertIn("SDK is not x64", self.engine._poll_events()[0]["message"])
         self.engine._cleanup_runtime()
 
-    def test_unmatched_canon_sdk_versions_are_rejected(self) -> None:
+    def test_registered_sdk_loads_dependencies_and_enables_canon(self) -> None:
+        runtime = Path(self.temp_dir.name) / "runtime"
+        sdk = Path(self.temp_dir.name) / "canon"
+        runtime.mkdir()
+        sdk.mkdir()
+        with patch("flow_controller.infrastructure.canon_sdk.installed_sdk_directory", return_value=sdk), \
+                patch("flow_controller.infrastructure.canon_sdk.validate_sdk", return_value={}), \
+                patch("ctypes.WinDLL", return_value=object()) as load:
+            self.engine._prepare_native_runtime(runtime)
+        self.assertTrue(self.engine._canon_sdk_ready)
+        self.assertEqual([call.args[0] for call in load.call_args_list],
+                         [str(sdk / "EdsImage.dll"), str(sdk / "EDSDK.dll")])
+        self.assertIsNotNone(self.engine._canon_directory_handle)
+        self.engine._cleanup_runtime()
+        self.assertFalse(self.engine._canon_sdk_ready)
+        self.assertIsNone(self.engine._canon_directory_handle)
+
+    def test_corrupted_registered_sdk_does_not_fall_back_silently(self) -> None:
         runtime = Path(self.temp_dir.name) / "runtime"
         runtime.mkdir()
-        pe = bytearray(256)
-        struct.pack_into("<I", pe, 0x3C, 128)
-        pe[128:132] = b"PE\0\0"
-        machine = 0x8664 if struct.calcsize("P") == 8 else 0x14C
-        struct.pack_into("<H", pe, 132, machine)
-        (runtime / "EDSDK.dll").write_bytes(pe)
-        (runtime / "EdsImage.dll").write_bytes(pe)
-
-        with patch.object(DccEngine, "_file_version", return_value="99.0.0.0"):
+        with patch("flow_controller.infrastructure.canon_sdk.installed_sdk_directory", side_effect=RuntimeError("SDK hash mismatch")), \
+                patch("ctypes.WinDLL") as load:
             self.engine._prepare_native_runtime(runtime)
-        events = self.engine._poll_events()
-
+        load.assert_not_called()
         self.assertFalse(self.engine._canon_sdk_ready)
-        self.assertIn("does not match this digiCamControl binding", events[0]["message"])
-        self.assertIn("expected 13.18.40.0", events[0]["message"])
+        self.assertIn("SDK hash mismatch", self.engine._poll_events()[0]["message"])
         self.engine._cleanup_runtime()
 
 
