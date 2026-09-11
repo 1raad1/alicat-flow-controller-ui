@@ -544,19 +544,75 @@ class DccEngine:
             "battery": battery,
             "busy": busy,
             "capture_in_ram": capture_in_ram,
+            "capture_preserves_live_view": self._capture_preserves_live_view(selected),
         }
+
+    @staticmethod
+    def _canon_camera(device: object) -> object | None:
+        if "canon" in str(_value(device, "Manufacturer", default="")).casefold():
+            return _value(device, "Camera")
+        return None
+
+    @classmethod
+    def _capture_preserves_live_view(cls, device: object) -> bool:
+        camera = cls._canon_camera(device)
+        if camera is None:
+            return False
+        quality = _value(camera, "ImageQuality")
+        # Upstream rejects RAW+JPEG in its live-view capture path.
+        return str(_value(quality, "SecondaryImageFormat", default="")) == "Unknown"
+
+    @classmethod
+    def _set_capture_target(cls, device: object, requested: bool) -> None:
+        camera = cls._canon_camera(device)
+        expected = 2 if requested else 1  # Canon SaveTo.Host / Camera
+        if camera is not None:
+            # Avoid resetting SaveTo/capacity before every shot as the desktop
+            # sets these on connection or when the destination changes.
+            actual = int(camera.GetProperty(0x0000000B))
+            if actual == expected and bool(device.CaptureInSdRam) == requested:
+                return
+        device.CaptureInSdRam = requested
+        if camera is not None:
+            # Verify native SaveTo, not the driver's cached checkbox value.
+            actual = int(camera.GetProperty(0x0000000B))
+            if actual != expected:
+                raise RuntimeError(
+                    f"Canon did not accept the capture destination: requested "
+                    f"{'computer' if requested else 'camera card'}, SaveTo={actual}. "
+                    "Reconnect the camera and select the destination again."
+                )
 
     def _require_capability(self, device: object, action: str, aliases: tuple[str, ...]) -> None:
         available = {name.casefold() for name in self._capability_names(device)}
         if not any(alias.casefold() in available for alias in aliases):
             raise RuntimeError(f"The selected camera does not support {action}")
 
-    @staticmethod
-    def _invoke(device: object, action: str, names: tuple[str, ...], *args: Any) -> Any:
+    @classmethod
+    def _invoke(cls, device: object, action: str, names: tuple[str, ...], *args: Any) -> Any:
         method = _value(device, *names)
         if not callable(method):
             raise RuntimeError(f"The selected camera does not expose {action}")
-        return method(*args)
+        try:
+            return method(*args)
+        except Exception as exc:
+            camera = cls._canon_camera(device)
+            if camera is None or action not in {"capture", "capture_no_af"}:
+                raise
+            # Upstream can throw before shutter release. Never retry the shot:
+            # a file-created event may already be queued for this request.
+            cleanup_error = ""
+            try:
+                camera.ResetShutterButton()
+            except Exception as release_exc:
+                cleanup_error = f" Shutter release also failed: {release_exc}"
+            target = "computer" if bool(_value(device, "CaptureInSdRam")) else "camera card"
+            code = _value(exc, "EosErrorCode", "ErrorCode", default="unknown")
+            message = _value(exc, "Message", default=str(exc))
+            raise RuntimeError(
+                f"Canon capture failed (destination: {target}; code: {code}). "
+                f"{message}{cleanup_error}"
+            ) from exc
 
     def _execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
         action = action.strip().casefold()
@@ -580,13 +636,17 @@ class DccEngine:
             if not isinstance(requested, bool):
                 raise ValueError("capture_target requires a capture_in_ram boolean")
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
-            device.CaptureInSdRam = requested
+            self._set_capture_target(device, requested)
             return {"ok": True, "action": action, "snapshot": self._snapshot()}
-        if action in {"capture", "capture_no_af"} and "capture_in_ram" in params:
+        if action in {"capture", "capture_no_af"} and (
+                "capture_in_ram" in params or self._canon_camera(device) is not None):
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
             if not hasattr(device, "CaptureInSdRam"):
                 raise RuntimeError("The selected camera does not expose capture-in-RAM control")
-            device.CaptureInSdRam = bool(params["capture_in_ram"])
+            if bool(_value(device, "IsBusy", default=False)):
+                raise RuntimeError("The selected camera is busy with another capture")
+            self._set_capture_target(device, bool(params.get(
+                "capture_in_ram", _value(device, "CaptureInSdRam", default=True))))
 
         if action == "capture_no_af":
             self._require_capability(device, action, ("CaptureNoAf",))

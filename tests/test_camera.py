@@ -29,6 +29,7 @@ class FakeEngine:
         self.timeline = []
         self.state = dict(cameras=[{'id': '123', 'name': 'USB test'}], selected='123',
             capabilities=['LiveView', 'CaptureNoAf'], battery=70, busy=False,
+            capture_preserves_live_view=False,
             properties=[dict(name='IsoNumber', label='ISO', value='100',
                              values=['100', '200', '400'], readonly=False)])
         image = QImage(64, 48, QImage.Format.Format_RGB32)
@@ -270,6 +271,52 @@ class CameraTests(unittest.TestCase):
                                for name, _params in self.engine.calls),
                            starts_after_stop)
 
+    def test_live_view_capture_suspends_frames_without_toggling_hardware(self):
+        self.engine.state['capture_preserves_live_view'] = True
+        self.connect()
+        self.engine.defer_capture = True
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing and
+                                     self.engine.frames > 0))
+        self.engine.timeline.clear()
+
+        self.camera.action('capture')
+        self.assertTrue(self.wait_for(lambda: 'capture' in self.engine.timeline))
+        frames_while_waiting = self.engine.frames
+        time.sleep(.08)
+        self.app.processEvents()
+
+        self.assertTrue(self.camera.previewing)
+        self.assertEqual(self.engine.frames, frames_while_waiting)
+        self.assertNotIn('live_stop', self.engine.timeline)
+        self.assertNotIn('live_start', self.engine.timeline)
+
+        self.engine.complete_capture()
+        self.assertTrue(self.wait_for(
+            lambda: self.engine.frames > frames_while_waiting))
+        self.assertTrue(self.camera.previewing)
+        self.assertNotIn('live_stop', self.engine.timeline)
+        self.assertNotIn('live_start', self.engine.timeline)
+
+    def test_user_stop_during_preserved_live_view_capture_stops_hardware(self):
+        self.engine.state['capture_preserves_live_view'] = True
+        self.connect()
+        self.engine.defer_capture = True
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing))
+        self.engine.timeline.clear()
+        self.camera.action('capture')
+        self.assertTrue(self.wait_for(lambda: 'capture' in self.engine.timeline))
+
+        self.camera.stop_preview()
+
+        self.assertTrue(self.wait_for(lambda: 'live_stop' in self.engine.timeline))
+        self.assertFalse(self.camera.previewing)
+        self.engine.complete_capture()
+        time.sleep(.08)
+        self.app.processEvents()
+        self.assertNotIn('live_start', self.engine.timeline)
+
     def test_user_stop_during_capture_wait_prevents_preview_restart(self):
         self.connect()
         self.engine.defer_capture = True
@@ -324,8 +371,32 @@ class CameraTests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(self.camera.previewing)
         self.assertFalse(self.camera._control.desired_preview)
+        self.assertTrue(any(name == 'live_stop' for name, _params in self.engine.calls))
         self.assertEqual(sum(name == 'live_start'
                              for name, _params in self.engine.calls), starts)
+
+        frames_after_failure = self.engine.frames
+        self.assertTrue(self.camera.start_preview())
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing and
+                                     self.engine.frames > frames_after_failure))
+
+    def test_preserved_live_view_capture_failure_stops_preview_and_releases_wait(self):
+        self.engine.state['capture_preserves_live_view'] = True
+        self.connect()
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing))
+        self.engine.fail_action = 'capture'
+        self.engine.timeline.clear()
+
+        self.camera.action('capture')
+
+        self.assertTrue(self.wait_for(lambda: 'USB action failed' in self.errors))
+        self.assertTrue(self.wait_for(lambda: 'live_stop' in self.engine.timeline))
+        self.assertFalse(self.camera.previewing)
+        frames_after_failure = self.engine.frames
+        self.assertTrue(self.camera.start_preview())
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing and
+                                     self.engine.frames > frames_after_failure))
 
     def test_timelapse_waits_for_capture_completion_and_stops_at_count(self):
         self.connect()

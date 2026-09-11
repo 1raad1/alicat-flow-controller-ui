@@ -136,9 +136,13 @@ and [Python.NET embedding](https://pythonnet.github.io/pythonnet/python.html).
 
 ## Capture and preview behaviour
 
-Taking a photo stops live view while the camera captures and transfers the file,
-then resumes it if preview is still enabled. The last frame remains visible
-during capture. Failed transfers report an error rather than a saved photo.
+For Canon single-format photos, capture uses digiCamControl's live-view shutter
+path while frame polling pauses until transfer completes. RAW+JPEG and other
+drivers retain the stop/capture/restart path. The last frame remains visible
+during capture. Canon capture destinations are verified against the camera's
+SaveTo property before triggering the shutter. A failed shot releases the
+shutter button and reports the Canon error and destination without retrying.
+Failed transfers report an error rather than a saved photo.
 If no completion arrives within 60 seconds, the app clears its pending capture
 and reports a timeout. Camera errors leave preview stopped so the error can be
 addressed before restarting it.

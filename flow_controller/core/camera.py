@@ -239,9 +239,10 @@ def _camera_worker(control, factory):
 
     def trigger_capture(name, params):
         nonlocal live, capture_waiting
-        # Canon's capture-in-live-view path can leave EVF paused, and rejects
-        # RAW+JPEG. Keep the last frame visible while taking a normal still.
-        if live:
+        # Canon has a dedicated live-view shutter path. Suspend frame reads,
+        # but leave that mode active when the selected image format supports it.
+        keep_live = live and engine.snapshot().get('capture_preserves_live_view', False)
+        if live and not keep_live:
             engine.execute('live_stop', {})
             live = False
             control.emit('preview', (control.generation, False))
@@ -368,6 +369,8 @@ def _camera_worker(control, factory):
                     if capture_changed:
                         state = snapshot()
                         if not state.get('busy', False):
+                            if capture_waiting:
+                                last_good = time.monotonic()
                             capture_waiting = False
                     if control.desired_preview and not live and not capture_waiting:
                         generation = control.generation
@@ -403,7 +406,7 @@ def _camera_worker(control, factory):
                         workflow['received'] = False
                         workflow['triggered_at'] = time.monotonic()
                         control.emit('status', f"Capture sequence: {workflow['done']}/{workflow['count']} shots triggered")
-                    if live and control.desired_preview and now >= next_frame:
+                    if live and control.desired_preview and not capture_waiting and now >= next_frame:
                         generation = control.generation
                         data = engine.frame()
                         if data:
