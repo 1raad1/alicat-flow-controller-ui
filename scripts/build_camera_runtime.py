@@ -19,6 +19,11 @@ import tempfile
 import urllib.request
 import zipfile
 
+try:
+    from patch_camera_controls import patch_camera_controls
+except ModuleNotFoundError:  # Imported as scripts.build_camera_runtime in tests.
+    from scripts.patch_camera_controls import patch_camera_controls
+
 
 REPOSITORY = "https://github.com/dukus/digicamcontrol.git"
 COMMIT = "9269e7851e5130f7d2278cc9942eccde0fd5e593"
@@ -392,6 +397,7 @@ def main() -> int:
 
     checkout_source(cache, staging)
     patch_manager(staging)
+    patch_camera_controls(staging)
 
     windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
     framework = windows / "Microsoft.NET" / "Framework64" / "v4.0.30319"
@@ -478,6 +484,10 @@ def main() -> int:
             "deterministic": True,
             "patches": [
                 "CameraDeviceManager implements IDisposable and releases WMI/WIA/Canon resources",
+                "Canon property writes retry only transient errors and propagate final failure",
+                "PropertyValue supports verified synchronous value changes",
+                "Canon ISO writes use readback verification and restore live view",
+                "Canon pointer transfers restore live view and propagate failure",
             ],
             "canon_native": canon_native,
         },

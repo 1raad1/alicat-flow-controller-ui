@@ -133,3 +133,20 @@ not functions of the USB camera engine.
 Sources: [device library](https://github.com/dukus/digicamcontrol/tree/master/CameraControl.Devices),
 [direct-use example](https://github.com/dukus/digicamcontrol/blob/master/CameraControl.Devices.Example/Form1.cs),
 and [Python.NET embedding](https://pythonnet.github.io/pythonnet/python.html).
+
+## Capture and preview behaviour
+
+For Canon single-format photos, capture uses digiCamControl's live-view shutter
+path while frame polling pauses until transfer completes. RAW+JPEG and other
+drivers retain the stop/capture/restart path. The last frame remains visible
+during capture. Canon capture destinations are verified against the camera's
+SaveTo property before triggering the shutter. A failed shot releases the
+shutter button and reports the Canon error and destination without retrying.
+Failed transfers report an error rather than a saved photo.
+If no completion arrives within 60 seconds, the app clears its pending capture
+and reports a timeout. Camera errors leave preview stopped so the error can be
+addressed before restarting it.
+
+ISO changes wait for the camera write and verify its reported value. A rejected
+setting is shown as an error. The embedded preview adjusts to the available
+width; both embedded and popped-out images preserve the camera aspect ratio.

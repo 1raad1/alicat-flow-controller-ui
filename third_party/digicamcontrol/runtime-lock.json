@@ -15,7 +15,11 @@
     },
     "deterministic": true,
     "patches": [
-      "CameraDeviceManager implements IDisposable and releases WMI/WIA/Canon resources"
+      "CameraDeviceManager implements IDisposable and releases WMI/WIA/Canon resources",
+      "Canon property writes retry only transient errors and propagate final failure",
+      "PropertyValue supports verified synchronous value changes",
+      "Canon ISO writes use readback verification and restore live view",
+      "Canon pointer transfers restore live view and propagate failure"
     ],
     "target": ".NET Framework 4.8 / x64"
   },
@@ -67,12 +71,12 @@
       "sha256": "e998aa6efd211cc0a7e4e386a585e9d66f16eb4b7ffa525a10a7a94273847964"
     },
     "CameraControl.Devices.dll": {
-      "bytes": 335872,
-      "sha256": "4c7a7edae613eff85371b9871fb07603bbe807512a1620a535c66dc8f6354e66"
+      "bytes": 336896,
+      "sha256": "efb60a374a8845f42794b49f6d6f10e780f31f643f612a0ec9f5301be750965d"
     },
     "Canon.Eos.Framework.dll": {
       "bytes": 81408,
-      "sha256": "4258e0e48935b36d1e61054f34564cf42a4829cf0724516dedd8a6e4df03a563"
+      "sha256": "ba89fcc05934f5a46cd114f1ab43a252346ff5a674fb56f2444178685c00aceb"
     },
     "DeviceData/Canon PowerShot G10.xml": {
       "bytes": 13043,
@@ -147,8 +151,8 @@
       "sha256": "e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d"
     },
     "PROVENANCE.md": {
-      "bytes": 2710,
-      "sha256": "3ea3e7a768959356e492f040b09577599752ed3e4bce60b7077ee384235d5423"
+      "bytes": 3183,
+      "sha256": "b54a5695c785ad67c6deaf2428dafb6c4ad4879a014c8cf36768da9a9656a24d"
     },
     "PortableDeviceLib.dll": {
       "bytes": 97792,

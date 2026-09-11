@@ -5,6 +5,7 @@ from enum import Enum
 import struct
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -127,6 +128,46 @@ class FakeCamera:
         self.released.append(handle)
 
 
+class FakeCanonSdkCamera:
+    def __init__(self, destination_events, *, secondary="Unknown", save_to=1) -> None:
+        self.ImageQuality = SimpleNamespace(SecondaryImageFormat=secondary)
+        self.save_to = save_to
+        self.destination_events = destination_events
+        self.reset_calls = 0
+        self.accept_destination_write = True
+
+    def GetProperty(self, property_id):
+        self.destination_events.append(("get_property", property_id))
+        return self.save_to
+
+    def ResetShutterButton(self):
+        self.reset_calls += 1
+
+
+class FakeCanonCamera(FakeCamera):
+    def __init__(self, *, secondary="Unknown", save_to=1) -> None:
+        self.destination_events = []
+        self._capture_in_sd_ram = False
+        super().__init__()
+        self.Manufacturer = "Canon Inc."
+        self.Camera = FakeCanonSdkCamera(
+            self.destination_events, secondary=secondary, save_to=save_to
+        )
+        self.destination_events.clear()
+
+    @property
+    def CaptureInSdRam(self):
+        return self._capture_in_sd_ram
+
+    @CaptureInSdRam.setter
+    def CaptureInSdRam(self, value):
+        self._capture_in_sd_ram = bool(value)
+        self.destination_events.append(("set_capture_in_ram", bool(value)))
+        camera = getattr(self, "Camera", None)
+        if camera is not None and camera.accept_destination_write:
+            camera.save_to = 2 if value else 1
+
+
 class FakeManager:
     def __init__(self) -> None:
         self.camera = FakeCamera()
@@ -155,6 +196,11 @@ class DccEngineTests(unittest.TestCase):
             output_dir=self.temp_dir.name, manager_factory=lambda *_: self.manager
         )
         self.engine._capability_enum = FakeCapability
+
+    def use_camera(self, camera) -> None:
+        self.manager.camera = camera
+        self.manager.ConnectedDevices = [camera]
+        self.manager.SelectedCameraDevice = camera
 
     def tearDown(self) -> None:
         self.engine.close()
@@ -212,6 +258,34 @@ class DccEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown camera action"):
             self.engine.execute("DeleteEverything", {})
 
+    def test_property_write_prefers_native_synchronous_setter(self) -> None:
+        class NativeProperty(FakeProperty):
+            def __init__(self):
+                super().__init__("100", ["100", "200"])
+                self.writes = []
+
+            def SetValueSynchronously(self, value):
+                self.writes.append(value)
+                self.Value = value
+
+        prop = NativeProperty()
+        self.manager.camera.IsoNumber = prop
+        self.engine.open()
+
+        self.engine.execute("set_property", {"name": "isonumber", "value": "200"})
+
+        self.assertEqual(prop.writes, ["200"])
+        self.assertEqual(prop.Value, "200")
+
+        def reject(_value):
+            raise RuntimeError("native setter rejected value")
+
+        prop.SetValueSynchronously = reject
+        with self.assertRaisesRegex(RuntimeError, "native setter rejected value"):
+            self.engine.execute(
+                "set_property", {"name": "isonumber", "value": "100"}
+            )
+
     def test_disconnected_or_incapable_camera_is_rejected(self) -> None:
         self.engine.open()
         self.manager.camera.capability_names.remove("RecordMovie")
@@ -263,6 +337,19 @@ class DccEngineTests(unittest.TestCase):
         events = self.engine.poll_events()
 
         self.assertIn("disk full", events[0]["message"])
+        self.assertEqual(self.manager.camera.released, [7])
+        self.assertFalse(self.manager.camera.IsBusy)
+
+    def test_empty_transfer_is_an_error_and_is_not_reported_as_captured(self) -> None:
+        self.engine.open()
+        self.manager.camera.TransferFile = lambda _handle, _destination: None
+        self.manager.PhotoCaptured.fire(FakeCaptureEvent(self.manager.camera))
+
+        events = self.engine.poll_events()
+
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("without a photo file", events[0]["message"])
+        self.assertEqual(list(Path(self.temp_dir.name).iterdir()), [])
         self.assertEqual(self.manager.camera.released, [7])
         self.assertFalse(self.manager.camera.IsBusy)
 
@@ -325,6 +412,144 @@ class DccEngineTests(unittest.TestCase):
         result = self.engine.execute("capture_target", {"capture_in_ram": False})
         self.assertFalse(result["snapshot"]["capture_in_ram"])
 
+    def test_only_canon_single_format_capture_preserves_live_view(self) -> None:
+        camera = FakeCanonCamera(secondary="Unknown")
+        self.use_camera(camera)
+        self.assertTrue(self.engine.open()["capture_preserves_live_view"])
+
+        camera.Camera.ImageQuality.SecondaryImageFormat = "RAWJPEG"
+        self.assertFalse(self.engine.snapshot()["capture_preserves_live_view"])
+
+        camera.Camera.ImageQuality.SecondaryImageFormat = "Unknown"
+        camera.Manufacturer = "Nikon Corporation"
+        self.assertFalse(self.engine.snapshot()["capture_preserves_live_view"])
+
+    def test_canon_capture_verifies_host_and_card_destinations_before_shutter(self) -> None:
+        camera = FakeCanonCamera(save_to=2)
+        self.use_camera(camera)
+        self.engine.open()
+
+        self.engine.execute("capture", {"capture_in_ram": True})
+
+        self.assertEqual(camera.destination_events, [
+            ("get_property", 0xB), ("set_capture_in_ram", True),
+            ("get_property", 0xB),
+        ])
+        self.assertEqual([name for name, _args in camera.calls].count("capture"), 1)
+        self.assertEqual(camera.Camera.reset_calls, 0)
+        camera.CaptureCompleted.fire()
+        self.engine.poll_events()
+
+        camera.destination_events.clear()
+        camera.Camera.save_to = 1
+        self.engine.execute("capture", {"capture_in_ram": False})
+
+        self.assertEqual(camera.destination_events, [
+            ("get_property", 0xB), ("set_capture_in_ram", False),
+            ("get_property", 0xB),
+        ])
+        self.assertEqual([name for name, _args in camera.calls].count("capture"), 2)
+        self.assertEqual(camera.Camera.reset_calls, 0)
+
+    def test_canon_destination_mismatch_aborts_before_shutter(self) -> None:
+        camera = FakeCanonCamera(save_to=1)
+        camera.Camera.accept_destination_write = False
+        self.use_camera(camera)
+        self.engine.open()
+
+        with self.assertRaisesRegex(RuntimeError, "SaveTo=1"):
+            self.engine.execute("capture", {"capture_in_ram": True})
+
+        self.assertEqual(camera.destination_events, [
+            ("get_property", 0xB), ("set_capture_in_ram", True),
+            ("get_property", 0xB),
+        ])
+        self.assertFalse(any(name == "capture" for name, _args in camera.calls))
+        self.assertFalse(camera.IsBusy)
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
+    def test_busy_canon_capture_does_not_mutate_destination(self) -> None:
+        camera = FakeCanonCamera(save_to=2)
+        self.use_camera(camera)
+        self.engine.open()
+        camera.IsBusy = True
+
+        with self.assertRaisesRegex(RuntimeError, "busy"):
+            self.engine.execute("capture", {"capture_in_ram": True})
+
+        self.assertEqual(camera.destination_events, [])
+        self.assertFalse(any(name == "capture" for name, _args in camera.calls))
+
+    def test_canon_capture_reapplies_cached_destination_without_parameter(self) -> None:
+        camera = FakeCanonCamera(save_to=1)
+        camera.CaptureInSdRam = True
+        camera.Camera.save_to = 1
+        camera.destination_events.clear()
+        self.use_camera(camera)
+        self.engine.open()
+
+        self.engine.execute("capture", {})
+
+        self.assertEqual(camera.destination_events, [
+            ("get_property", 0xB), ("set_capture_in_ram", True),
+            ("get_property", 0xB),
+        ])
+        self.assertEqual([name for name, _args in camera.calls].count("capture"), 1)
+
+    def test_canon_capture_with_matching_native_destination_skips_reset(self) -> None:
+        camera = FakeCanonCamera(save_to=2)
+        camera.CaptureInSdRam = True
+        camera.destination_events.clear()
+        self.use_camera(camera)
+        self.engine.open()
+
+        self.engine.execute("capture", {"capture_in_ram": True})
+        self.assertEqual(camera.destination_events, [("get_property", 0xB)])
+        camera.CaptureCompleted.fire()
+        self.engine.poll_events()
+
+        camera.CaptureInSdRam = False
+        camera.Camera.save_to = 1
+        camera.destination_events.clear()
+        self.engine.execute("capture", {"capture_in_ram": False})
+        self.assertEqual(camera.destination_events, [("get_property", 0xB)])
+        self.assertEqual([name for name, _args in camera.calls].count("capture"), 2)
+
+    def test_failed_canon_capture_releases_shutter_once_and_keeps_error_details(self) -> None:
+        camera = FakeCanonCamera(save_to=2)
+        camera.CaptureInSdRam = True
+        camera.destination_events.clear()
+        self.use_camera(camera)
+        self.engine.open()
+        attempts = []
+
+        class CanonError(RuntimeError):
+            EosErrorCode = 0x8D01
+            Message = "shutter rejected"
+
+        def fail_capture():
+            attempts.append("capture")
+            raise CanonError("fallback text")
+
+        def fail_reset():
+            attempts.append("reset")
+            raise RuntimeError("release rejected")
+
+        camera.CapturePhoto = fail_capture
+        camera.Camera.ResetShutterButton = fail_reset
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "destination: computer.*code: 36097.*shutter rejected.*release rejected",
+        ):
+            self.engine.execute("capture", {})
+
+        self.assertEqual(attempts, ["capture", "reset"])
+        self.assertFalse(camera.IsBusy)
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
     def test_bulb_busy_state_spans_start_and_stop(self) -> None:
         self.engine.open()
         self.engine.execute("bulb_start", {})
@@ -358,6 +583,46 @@ class DccEngineTests(unittest.TestCase):
             events, [{"type": "capture_completed", "camera_id": "SERIAL-1"}]
         )
         self.assertFalse(self.engine.snapshot()["busy"])
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
+    def test_capture_command_failure_clears_tracking_and_software_busy(self) -> None:
+        self.engine.open()
+
+        def fail_capture():
+            raise RuntimeError("shutter rejected")
+
+        self.manager.camera.CapturePhoto = fail_capture
+
+        with self.assertRaisesRegex(RuntimeError, "shutter rejected"):
+            self.engine.execute("capture", {})
+
+        self.assertFalse(self.manager.camera.IsBusy)
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
+
+    def test_capture_timeout_clears_busy_and_emits_one_actionable_error(self) -> None:
+        self.engine.open()
+        self.engine.execute("capture", {})
+        started = self.engine._capture_started
+        self.assertIsNotNone(started)
+
+        with patch(
+            "flow_controller.infrastructure.digicam_engine.time.monotonic",
+            return_value=started + 61,
+        ):
+            events = self.engine.poll_events()
+            repeated = self.engine.poll_events()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("Check focus, exposure and camera messages",
+                      events[0]["message"])
+        self.assertEqual(repeated, [])
+        self.assertFalse(self.manager.camera.IsBusy)
+        self.assertFalse(self.engine.snapshot()["busy"])
+        self.assertIsNone(self.engine._capture_started)
+        self.assertIsNone(self.engine._capture_device)
 
     def test_close_unsubscribes_and_closes_manager(self) -> None:
         self.engine.open()

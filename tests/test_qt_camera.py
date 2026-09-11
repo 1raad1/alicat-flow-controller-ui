@@ -10,7 +10,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QObject, QSettings, Signal
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QPushButton
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QLineEdit, QPushButton, QSizePolicy,
+)
 
 from flow_controller.core.session import FlowSession
 from flow_controller.ui import qt_theme as theme
@@ -145,6 +147,75 @@ class QtCameraTests(unittest.TestCase):
         camera.frame_received.emit(QImage())
         self.assertTrue(first.preview.image.isNull())
         self.assertTrue(second.preview.image.isNull())
+
+    def test_inline_preview_tracks_frame_aspect_ratio_with_bounded_height(self):
+        camera = FakeCamera()
+        preview = CameraImage(camera)
+        self.addCleanup(preview.close)
+        self.assertTrue(preview.hasHeightForWidth())
+        self.assertTrue(preview.sizePolicy().hasHeightForWidth())
+
+        landscape = QImage(1600, 900, QImage.Format.Format_RGB32)
+        camera.frame_received.emit(landscape)
+        self.assertEqual(preview.heightForWidth(640), 360)
+        self.assertEqual(preview.heightForWidth(200),
+                         CameraImage.INLINE_MINIMUM_HEIGHT)
+
+        portrait = QImage(900, 1600, QImage.Format.Format_RGB32)
+        camera.frame_received.emit(portrait)
+        self.assertEqual(preview.heightForWidth(200), 356)
+        self.assertEqual(preview.heightForWidth(640),
+                         CameraImage.INLINE_MAXIMUM_HEIGHT)
+        self.assertEqual(preview.maximumHeight(),
+                         CameraImage.INLINE_MAXIMUM_HEIGHT)
+        self.assertEqual(preview.sizeHint().width(),
+                         CameraImage.PREFERRED_WIDTH)
+
+    def test_preview_aspect_fits_landscape_and_portrait_without_cropping(self):
+        camera = FakeCamera()
+        preview = CameraImage(camera)
+        self.addCleanup(preview.close)
+        preview.resize(400, 300)
+
+        camera.frame_received.emit(
+            QImage(1600, 900, QImage.Format.Format_RGB32))
+        landscape_rect = preview.image_rect()
+        self.assertEqual(landscape_rect.size().width(), 400)
+        self.assertEqual(landscape_rect.size().height(), 225)
+        self.assertEqual(landscape_rect.left(), 0)
+        self.assertGreater(landscape_rect.top(), 0)
+
+        camera.frame_received.emit(
+            QImage(900, 1600, QImage.Format.Format_RGB32))
+        portrait_rect = preview.image_rect()
+        self.assertEqual(portrait_rect.size().width(), 168)
+        self.assertEqual(portrait_rect.size().height(), 300)
+        self.assertGreater(portrait_rect.left(), 0)
+        self.assertEqual(portrait_rect.top(), 0)
+
+    def test_popout_preview_expands_to_window_and_keeps_aspect_fit(self):
+        camera = FakeCamera()
+        card = BurnerCameraCard(camera)
+        self.addCleanup(card.shutdown)
+        frame = QImage(1600, 900, QImage.Format.Format_RGB32)
+        camera.frame_received.emit(frame)
+        card.pop_out()
+        self.app.processEvents()
+
+        preview = card.popout.preview
+        self.assertFalse(preview.hasHeightForWidth())
+        self.assertFalse(preview.sizePolicy().hasHeightForWidth())
+        self.assertEqual(preview.sizePolicy().horizontalPolicy(),
+                         QSizePolicy.Policy.Expanding)
+        self.assertEqual(preview.sizePolicy().verticalPolicy(),
+                         QSizePolicy.Policy.Expanding)
+        self.assertGreater(preview.width(), 0)
+        self.assertGreater(preview.height(), 0)
+        target = preview.image_rect()
+        self.assertLessEqual(target.width(), preview.width())
+        self.assertLessEqual(target.height(), preview.height())
+        self.assertAlmostEqual(target.width() / target.height(), 16 / 9,
+                               delta=0.01)
 
     def test_compact_card_gates_and_dispatches_native_controls(self):
         camera = FakeCamera()
