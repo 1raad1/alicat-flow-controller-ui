@@ -327,7 +327,8 @@ class OperationTab(QWidget):
         self._split.setStretchFactor(1, 0)
         self._split.set_default_sizes([520, 480])
         self._split.set_panel_collapsed(1, True, animate=False)
-        outer.addWidget(self._build_panel_bar())
+        self.panel_bar = self._build_panel_bar()
+        outer.addWidget(self.panel_bar)
         outer.addWidget(self._split, 1)
         self._split.panelCollapsedChanged.connect(self._panel_collapsed)
         self._columns_splitter.panelCollapsedChanged.connect(
@@ -368,6 +369,11 @@ class OperationTab(QWidget):
         # the rig is running.
         self._on_targets(dict(session.target_flows))
         self._on_logging(session.logging_active, session.log_path)
+        udp = session._udp
+        self._on_udp(
+            udp.listening,
+            (f'Listening on {udp.host}:{udp.port}'
+             if udp.listening else 'listener off'))
         self.optimiser.targets_ready.connect(self._load_optimiser_targets)
 
     # ------------------------------------------------------------------ #
@@ -444,12 +450,14 @@ class OperationTab(QWidget):
             button.setObjectName('PanelToggle')
             button.setProperty('density', 'compact')
             layout.addWidget(button)
-        layout.addStretch(1)
         reset = QPushButton('Reset layout')
         reset.setProperty('density', 'compact')
         reset.setToolTip('Restore the default columns and fold the sequence panel')
         reset.clicked.connect(self._reset_panel_layout)
         layout.addWidget(reset)
+        for button in self._cards_view_buttons.values():
+            layout.addWidget(button)
+        layout.addStretch(1)
         return bar
 
     def _controls_collapsed(self, index, collapsed):
@@ -519,11 +527,11 @@ class OperationTab(QWidget):
         column.setContentsMargins(theme.PAD_LG, theme.PAD_LG,
                                   theme.PAD_SM + 2, theme.PAD_LG)
         column.setSpacing(theme.CARD_GAP)
-        column.addWidget(self._card_logging())
         if self.camera is not None:
             from .qt_camera import BurnerCameraCard
             self.camera_card = BurnerCameraCard(self.camera)
             column.addWidget(self.camera_card)
+        column.addWidget(self._card_logging())
         self._autocalc_card = self._card_autocalc()
         column.addWidget(self._autocalc_card)
         self._sequence_card = self._card_sequence()
@@ -567,19 +575,22 @@ class OperationTab(QWidget):
         caption.setObjectName('FieldLabel')
         card.add(row(caption, self.log_path, browse, None))
 
-        self.start_log_btn = QPushButton('Start Logging')
-        self.start_log_btn.setProperty('variant', 'accent')
-        self.start_log_btn.clicked.connect(self._start_logging)
-        self.stop_log_btn = QPushButton('Stop Logging')
-        self.stop_log_btn.setEnabled(False)
-        self.stop_log_btn.clicked.connect(lambda: self.session.stop_logging())
+        self.logging_btn = QPushButton('Start Logging')
+        self.logging_btn.setProperty('variant', 'accent')
+        self.logging_btn.clicked.connect(self._toggle_logging)
+        # Compatibility for callers which used the old start-button name.
+        # This is the same widget, not a second visible action.
+        self.start_log_btn = self.logging_btn
         self.log_state = label('OFF', color=theme.TEXT_DIM, size=9,
                                monospace=True)
-        card.add(row(self.start_log_btn, self.stop_log_btn, self.log_state,
-                     None))
+        card.add(row(self.logging_btn, self.log_state, None))
 
-        grid, entries = field_grid([('LabVIEW UDP host', '127.0.0.1'),
-                                    ('LabVIEW UDP port', 61557)], width=96)
+        udp = self.session._udp
+        self._udp_listening = bool(udp.listening)
+        initial_host = udp.host if udp.listening else '127.0.0.1'
+        initial_port = udp.port if udp.listening else 61557
+        grid, entries = field_grid([('LabVIEW UDP host', initial_host),
+                                    ('LabVIEW UDP port', initial_port)], width=96)
         self.udp_host = entries['LabVIEW UDP host']
         self.udp_port = entries['LabVIEW UDP port']
         card.add_layout(grid)
@@ -622,10 +633,14 @@ class OperationTab(QWidget):
         self.log_path.setText(str(shown))
         self.session.start_logging(actual)
 
+    def _toggle_logging(self):
+        if self._logging_active:
+            self.session.stop_logging()
+        else:
+            self._start_logging()
+
     def _toggle_udp(self):
-        # The button's own text is the state: it is set from ``udp_changed``,
-        # which is the only thing that knows whether the socket really opened.
-        if self.udp_btn.text().startswith('Stop'):
+        if self._udp_listening:
             self.session.stop_udp()
         else:
             self.session.start_udp(self.udp_host.text().strip() or '127.0.0.1',
@@ -1056,7 +1071,6 @@ class OperationTab(QWidget):
             button.clicked.connect(
                 lambda _checked=False, selected=view:
                 self._set_cards_view(selected))
-            self._cards_card.add_header_widget(button)
             self._cards_view_buttons[view] = button
         self._sync_cards_view_buttons()
         self._empty_note = label(
@@ -1772,8 +1786,11 @@ class OperationTab(QWidget):
         self.monitor_btn.style().polish(self.monitor_btn)
 
     def _on_logging(self, active, path):
-        self.start_log_btn.setEnabled(not active)
-        self.stop_log_btn.setEnabled(active)
+        self._logging_active = bool(active)
+        self.logging_btn.setText('Stop Logging' if active else 'Start Logging')
+        self.logging_btn.setProperty('variant', 'danger' if active else 'accent')
+        self.logging_btn.style().unpolish(self.logging_btn)
+        self.logging_btn.style().polish(self.logging_btn)
         self.log_state.setText('RECORDING' if active else 'OFF')
         self.log_state.setStyleSheet(
             f'color: {theme.OK if active else theme.TEXT_DIM};'
@@ -1783,6 +1800,10 @@ class OperationTab(QWidget):
         self.log_path.setEnabled(not active)
 
     def _on_udp(self, active, message):
+        self._udp_listening = bool(active)
+        if active:
+            self.udp_host.setText(str(self.session._udp.host))
+            self.udp_port.setText(str(self.session._udp.port))
         self.udp_btn.setText('Stop Listener' if active else 'Start Listener')
         self.udp_state.setText(message)
         self.udp_state.setStyleSheet(

@@ -25,6 +25,7 @@ class FakeCamera(QObject):
     status_changed = Signal(str)
     error = Signal(str)
     busy_changed = Signal(bool)
+    previewing_changed = Signal(bool)
     state_changed = Signal(dict)
     captured = Signal(str)
     action_finished = Signal(str, object)
@@ -33,10 +34,12 @@ class FakeCamera(QObject):
         super().__init__()
         self.state = {
             'cameras': [], 'selected': '', 'capabilities': [],
-            'properties': [], 'battery': None,
+            'properties': [], 'battery': None, 'recording': False,
+            'bulb_active': False,
         }
         self.busy = False
         self.previewing = False
+        self.failed_actions = set()
         self.calls = []
 
     def connect_camera(self):
@@ -47,13 +50,40 @@ class FakeCamera(QObject):
 
     def action(self, action_name, **parameters):
         self.calls.append(('action', action_name, parameters))
+        if action_name in self.failed_actions:
+            return False
+        if action_name == 'video_start':
+            self.publish(recording=True)
+        elif action_name == 'video_stop':
+            self.publish(recording=False)
+        elif action_name == 'bulb_start':
+            self.publish(bulb_active=True, busy=True)
+        elif action_name == 'bulb_stop':
+            self.publish(bulb_active=False, busy=False)
+        elif action_name == 'disconnect':
+            self.publish(selected='', recording=False, bulb_active=False)
+            self._set_previewing(False)
         return True
 
     def start_preview(self):
         self.calls.append(('start_preview',))
+        if 'live_start' in self.failed_actions:
+            return False
+        self._set_previewing(True)
+        return True
 
     def stop_preview(self):
         self.calls.append(('stop_preview',))
+        if 'live_stop' in self.failed_actions:
+            return False
+        self._set_previewing(False)
+        return True
+
+    def _set_previewing(self, active):
+        active = bool(active)
+        if self.previewing != active:
+            self.previewing = active
+            self.previewing_changed.emit(active)
 
     def set_fps(self, value):
         self.calls.append(('set_fps', value))
@@ -221,30 +251,66 @@ class QtCameraTests(unittest.TestCase):
         camera = FakeCamera()
         card = BurnerCameraCard(camera)
         self.addCleanup(card.shutdown)
-        self.assertFalse(card.start_button.isEnabled())
+        self.assertEqual(card._title_label.text(), 'DSLR camera')
+        self.assertEqual(card.preview.accessibleName(), 'DSLR camera image')
+        self.assertEqual(card.live_button.text(), 'Start live view')
+        self.assertFalse(card.live_button.isEnabled())
+        self.assertFalse(card.video_button.isEnabled())
         self.assertFalse(card.capture_button.isEnabled())
 
         camera.publish(selected='usb:1', capabilities=['LiveView'])
-        self.assertTrue(card.start_button.isEnabled())
+        self.assertTrue(card.live_button.isEnabled())
+        self.assertFalse(card.video_button.isEnabled())
+        card.video_button.click()
+        self.assertNotIn(('action', 'video_start', {}), camera.calls)
+        camera.publish(capabilities=['LiveView', 'RecordMovie'])
+        self.assertTrue(card.video_button.isEnabled())
         self.assertTrue(card.capture_button.isEnabled())
-        card.start_button.click()
+        card.live_button.click()
         card.capture_button.click()
         self.assertIn(('start_preview',), camera.calls)
         self.assertIn(('action', 'capture', {}), camera.calls)
+        self.assertEqual(card.live_button.text(), 'Stop live view')
 
-        camera.previewing = True
-        camera.publish()
-        self.assertTrue(card.stop_button.isEnabled())
-        card.stop_button.click()
+        card.live_button.click()
         self.assertIn(('stop_preview',), camera.calls)
+        self.assertEqual(card.live_button.text(), 'Start live view')
+        card.video_button.click()
+        self.assertEqual(card.video_button.text(), 'Stop video')
+        card.video_button.click()
+        self.assertEqual(camera.calls[-1], ('action', 'video_stop', {}))
         camera.busy_changed.emit(True)
-        self.assertFalse(card.start_button.isEnabled())
+        self.assertFalse(card.live_button.isEnabled())
+        self.assertFalse(card.video_button.isEnabled())
         self.assertFalse(card.capture_button.isEnabled())
         camera.busy_changed.emit(False)
         camera.publish(workflow='timelapse')
-        self.assertFalse(card.start_button.isEnabled())
+        self.assertFalse(card.live_button.isEnabled())
         self.assertFalse(card.capture_button.isEnabled())
-        self.assertTrue(card.stop_button.isEnabled())
+
+    def test_compact_toggles_follow_actual_state_after_failure_and_disconnect(self):
+        camera = FakeCamera()
+        card = BurnerCameraCard(camera)
+        self.addCleanup(card.shutdown)
+        camera.publish(selected='usb:1',
+                       capabilities=['LiveView', 'RecordMovie'])
+        camera.failed_actions.update({'live_start', 'video_start'})
+
+        card.live_button.click()
+        card.video_button.click()
+        self.assertEqual(card.live_button.text(), 'Start live view')
+        self.assertEqual(card.video_button.text(), 'Start video')
+
+        camera.failed_actions.clear()
+        card.live_button.click()
+        card.video_button.click()
+        self.assertEqual(card.live_button.text(), 'Stop live view')
+        self.assertEqual(card.video_button.text(), 'Stop video')
+        camera.action('disconnect')
+        self.assertEqual(card.live_button.text(), 'Start live view')
+        self.assertEqual(card.video_button.text(), 'Start video')
+        self.assertFalse(card.live_button.isEnabled())
+        self.assertFalse(card.video_button.isEnabled())
 
     def test_discovery_selection_disconnect_and_capability_gating(self):
         camera, tab = self.make_tab()
@@ -264,7 +330,7 @@ class QtCameraTests(unittest.TestCase):
         self.assertEqual(tab.battery.text(), 'Battery 73%')
         self.assertTrue(tab.capture_no_af_button.isEnabled())
         self.assertTrue(tab.focus_plus_button.isEnabled())
-        self.assertFalse(tab.video_start_button.isEnabled())
+        self.assertFalse(tab.video_button.isEnabled())
         tab._select_camera(1)
         tab.disconnect_button.click()
         self.assertEqual(camera.calls[-2:], [
@@ -287,9 +353,9 @@ class QtCameraTests(unittest.TestCase):
         tab.focus_step.setCurrentText('3')
         for button in (
             tab.capture_button, tab.capture_no_af_button,
-            tab.live_start_button, tab.live_stop_button,
-            tab.video_start_button, tab.video_stop_button,
-            tab.bulb_start_button, tab.bulb_stop_button,
+            tab.live_button, tab.live_button,
+            tab.video_button, tab.video_button,
+            tab.bulb_button, tab.bulb_button,
             tab.lock_button, tab.unlock_button,
             tab.autofocus_button, tab.focus_minus_button,
             tab.focus_plus_button,
@@ -356,7 +422,8 @@ class QtCameraTests(unittest.TestCase):
         tab.bracket_af.setChecked(False)
         tab.bracket_button.click()
         camera.publish(workflow='bracket')
-        tab.stop_workflow_button.click()
+        self.assertEqual(tab.bracket_button.text(), 'Stop bracket')
+        tab.bracket_button.click()
         self.assertEqual(camera.calls, [
             ('action', 'timelapse_start',
              {'interval': 2.5, 'count': 12, 'autofocus': True}),
@@ -388,9 +455,38 @@ class QtCameraTests(unittest.TestCase):
         self.assertFalse(tab.capture_button.isEnabled())
         self.assertFalse(tab.refresh_properties_button.isEnabled())
         self.assertFalse(tab.output_path.isEnabled())
-        self.assertTrue(tab.stop_workflow_button.isEnabled())
+        self.assertEqual(tab.timelapse_button.text(), 'Stop timelapse')
+        self.assertTrue(tab.timelapse_button.isEnabled())
+        self.assertEqual(tab.bracket_button.text(), 'Start bracket')
+        self.assertFalse(tab.bracket_button.isEnabled())
+        self.assertFalse(hasattr(tab, 'stop_workflow_button'))
         camera.busy_changed.emit(True)
-        self.assertTrue(tab.stop_workflow_button.isEnabled())
+        self.assertTrue(tab.timelapse_button.isEnabled())
+        camera.calls.clear()
+        tab.timelapse_button.click()
+        self.assertEqual(camera.calls, [('action', 'workflow_stop', {})])
+
+    def test_each_active_workflow_uses_its_own_stop_toggle(self):
+        camera, tab = self.make_tab()
+        camera.publish(
+            selected='usb:1', workflow='bracket',
+            properties=[{'name': 'iso', 'value': '100',
+                         'values': ['100', '200'], 'readonly': False}],
+        )
+
+        self.assertEqual(tab.bracket_button.text(), 'Stop bracket')
+        self.assertTrue(tab.bracket_button.isEnabled())
+        self.assertEqual(tab.timelapse_button.text(), 'Start timelapse')
+        self.assertFalse(tab.timelapse_button.isEnabled())
+        camera.calls.clear()
+        tab.bracket_button.click()
+        self.assertEqual(camera.calls, [('action', 'workflow_stop', {})])
+
+        camera.publish(workflow='')
+        self.assertEqual(tab.bracket_button.text(), 'Start bracket')
+        self.assertEqual(tab.timelapse_button.text(), 'Start timelapse')
+        self.assertTrue(tab.bracket_button.isEnabled())
+        self.assertTrue(tab.timelapse_button.isEnabled())
 
     def test_capture_in_ram_is_shared_and_only_sent_when_supported(self):
         camera, tab = self.make_tab()
@@ -429,20 +525,22 @@ class QtCameraTests(unittest.TestCase):
             ('action', 'capture', {}), ('action', 'capture', {}),
         ])
 
-    def test_stop_controls_remain_available_while_camera_is_busy(self):
+    def test_active_toggle_controls_remain_available_while_device_is_busy(self):
         camera, tab = self.make_tab()
         camera.publish(selected='usb:1', busy=True,
+                       recording=True, bulb_active=True,
                        capabilities=['LiveView', 'RecordMovie', 'Bulb'])
-        self.assertFalse(tab.live_start_button.isEnabled())
-        self.assertFalse(tab.video_start_button.isEnabled())
-        self.assertFalse(tab.bulb_start_button.isEnabled())
-        self.assertTrue(tab.live_stop_button.isEnabled())
-        self.assertTrue(tab.video_stop_button.isEnabled())
-        self.assertTrue(tab.bulb_stop_button.isEnabled())
+        camera._set_previewing(True)
+        self.assertEqual(tab.live_button.text(), 'Stop live view')
+        self.assertEqual(tab.video_button.text(), 'Stop video')
+        self.assertEqual(tab.bulb_button.text(), 'Stop bulb exposure')
+        self.assertTrue(tab.live_button.isEnabled())
+        self.assertTrue(tab.video_button.isEnabled())
+        self.assertTrue(tab.bulb_button.isEnabled())
         camera.calls.clear()
-        tab.live_stop_button.click()
-        tab.video_stop_button.click()
-        tab.bulb_stop_button.click()
+        tab.live_button.click()
+        tab.video_button.click()
+        tab.bulb_button.click()
         self.assertEqual(camera.calls, [
             ('stop_preview',),
             ('action', 'video_stop', {}),
@@ -450,14 +548,14 @@ class QtCameraTests(unittest.TestCase):
         ])
 
         camera.busy_changed.emit(True)
-        self.assertTrue(tab.live_stop_button.isEnabled())
-        self.assertFalse(tab.video_stop_button.isEnabled())
-        self.assertFalse(tab.bulb_stop_button.isEnabled())
+        self.assertFalse(tab.live_button.isEnabled())
+        self.assertFalse(tab.video_button.isEnabled())
+        self.assertFalse(tab.bulb_button.isEnabled())
         camera.busy_changed.emit(False)
         camera.publish(workflow='timelapse')
-        self.assertTrue(tab.live_stop_button.isEnabled())
-        self.assertFalse(tab.video_stop_button.isEnabled())
-        self.assertFalse(tab.bulb_stop_button.isEnabled())
+        self.assertFalse(tab.live_button.isEnabled())
+        self.assertFalse(tab.video_button.isEnabled())
+        self.assertFalse(tab.bulb_button.isEnabled())
 
     def test_operation_tab_camera_optional_and_log_path_bounded(self):
         session = FlowSession(worker=SimpleNamespace(shutdown=lambda: None))

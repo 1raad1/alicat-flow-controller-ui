@@ -1,4 +1,4 @@
-# USB burner camera
+# USB DSLR camera
 
 The flow application loads digiCamControl's camera engine directly through
 Python.NET. You do not need to run digiCamControl, enable a web server, or start
@@ -16,8 +16,9 @@ installation. You do not need to add installation commands to `run.bat`.
 2. Open **Camera** and choose **Discover USB cameras**. The engine uses
    digiCamControl's device discovery and camera-specific drivers. Select the
    camera if more than one is connected.
-3. Choose the photo output folder, then start live view. The **Burner camera**
-   card in **Operation & Monitoring** displays the same feed. **Pop out** opens
+3. Choose the photo output folder, then start live view. The **DSLR camera**
+   card at the top left of **Operation & Monitoring** displays the same feed.
+   **Pop out** opens
    a separate preview window, including on a second monitor.
 4. Use the camera controls for capture, autofocus, manual focus, video and bulb
    exposures where supported. The property table reads the connected camera's
@@ -26,6 +27,13 @@ installation. You do not need to add installation commands to `run.bat`.
 Capability availability depends on the camera and its current mode. A USB
 connection alone does not guarantee live view or video support. Unsupported
 features are disabled; driver errors appear in the camera status area.
+
+The card includes **Start live view** and **Start video**. Each becomes its
+corresponding Stop action while active. The full Camera tab uses the same
+toggle controls, including for bulb exposures.
+
+The video toggle follows successful commands sent by this app. Starting or
+stopping recording on the camera body is not currently reflected in the button.
 
 Photos transfer to the selected folder without overwriting an existing filename.
 RAW and JPEG files retain their extensions. Camera video recording follows the

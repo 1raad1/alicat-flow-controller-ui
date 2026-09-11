@@ -205,6 +205,39 @@ class CameraTests(unittest.TestCase):
         self.camera._drain()
         self.assertTrue(all(f.isNull() for f in frames))
 
+    def test_previewing_signal_tracks_worker_state_without_duplicates(self):
+        self.connect()
+        changes = []
+        self.camera.previewing_changed.connect(changes.append)
+
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: changes == [True]))
+        self.camera.start_preview()
+        time.sleep(.05)
+        self.app.processEvents()
+        self.assertEqual(changes, [True])
+
+        self.camera.stop_preview()
+        self.assertEqual(changes, [True, False])
+        self.camera.stop_preview()
+        self.assertEqual(changes, [True, False])
+
+    def test_failed_worker_live_stop_reports_preview_stopped(self):
+        self.connect()
+        changes = []
+        self.camera.previewing_changed.connect(changes.append)
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing))
+        self.engine.fail_action = 'live_stop'
+
+        self.camera._control.desired_preview = False
+        self.camera._control.wake.set()
+
+        self.assertTrue(self.wait_for(lambda: not self.camera.previewing))
+        self.assertEqual(changes, [True, False])
+        self.assertTrue(any('USB action failed' in error
+                            for error in self.errors))
+
     def test_missing_capability_and_invalid_image_are_reported(self):
         self.engine.state['capabilities'] = []
         self.connect()
