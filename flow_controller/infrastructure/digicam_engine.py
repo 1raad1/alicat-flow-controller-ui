@@ -103,6 +103,7 @@ class DccEngine:
         self._bulb_device: object | None = None
         self._capture_started: float | None = None
         self._capture_device: object | None = None
+        self._keep_alive_state: dict[str, tuple[float, float, str]] = {}
 
     def _call(self, function: Callable[[], Any], *, bind: bool = False) -> Any:
         current = threading.get_ident()
@@ -610,7 +611,7 @@ class DccEngine:
             code = _value(exc, "EosErrorCode", "ErrorCode", default="unknown")
             message = _value(exc, "Message", default=str(exc))
             raise RuntimeError(
-                f"Canon capture failed (destination: {target}; code: {code}). "
+                f"Canon capture failed (destination: {target}; code: {code}; command: {names[0]}). "
                 f"{message}{cleanup_error}"
             ) from exc
 
@@ -638,15 +639,15 @@ class DccEngine:
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
             self._set_capture_target(device, requested)
             return {"ok": True, "action": action, "snapshot": self._snapshot()}
-        if action in {"capture", "capture_no_af"} and (
-                "capture_in_ram" in params or self._canon_camera(device) is not None):
+        if action in {"capture", "capture_no_af"} and "capture_in_ram" in params:
             self._require_capability(device, "capture in RAM", ("CaptureInRam",))
             if not hasattr(device, "CaptureInSdRam"):
                 raise RuntimeError("The selected camera does not expose capture-in-RAM control")
             if bool(_value(device, "IsBusy", default=False)):
                 raise RuntimeError("The selected camera is busy with another capture")
-            self._set_capture_target(device, bool(params.get(
-                "capture_in_ram", _value(device, "CaptureInSdRam", default=True))))
+            requested = bool(params["capture_in_ram"])
+            if self._canon_camera(device) is None or requested != bool(device.CaptureInSdRam):
+                self._set_capture_target(device, requested)
 
         if action == "capture_no_af":
             self._require_capability(device, action, ("CaptureNoAf",))
@@ -654,27 +655,25 @@ class DccEngine:
         if action in {"capture", "capture_no_af"}:
             if bool(_value(device, "IsBusy", default=False)):
                 raise RuntimeError("The selected camera is busy with another capture")
-            try:
-                device.IsBusy = True
-            except Exception:
-                pass
-            self._capture_started = time.monotonic()
-            self._capture_device = device
-
-        if action == "capture":
-            try:
-                self._invoke(device, action, ("CapturePhoto",))
-            except Exception:
-                self._capture_started = None
-                self._capture_device = None
+            canon = self._canon_camera(device)
+            # The native Canon driver owns IsBusy, just as in CameraHelper.
+            if canon is None:
                 try:
-                    device.IsBusy = False
+                    device.IsBusy = True
                 except Exception:
                     pass
-                raise
-        elif action == "capture_no_af":
+            self._capture_started = time.monotonic()
+            self._capture_device = device
             try:
-                self._invoke(device, action, ("CapturePhotoNoAf",))
+                live_capture = canon is not None and bool(params.get("live_view_capture"))
+                if live_capture:
+                    # LiveViewViewModel uses separate AF then CapturePhotoNoAf.
+                    # Our STA worker has already returned from the synchronous
+                    # frame read, so its timer-drain sleep is unnecessary here.
+                    if action == "capture" and params.get("autofocus_before_capture", False):
+                        self._invoke(device, "autofocus", ("AutoFocus",))
+                method = "CapturePhotoNoAf" if live_capture or action == "capture_no_af" else "CapturePhoto"
+                self._invoke(device, action, (method,))
             except Exception:
                 self._capture_started = None
                 self._capture_device = None
@@ -856,6 +855,7 @@ class DccEngine:
         return errors
 
     def _refresh_device_subscriptions(self) -> None:
+        self._keep_alive_state.clear()
         errors = self._unsubscribe_device_events()
         if errors:
             raise RuntimeError("; ".join(errors))
@@ -979,7 +979,44 @@ class DccEngine:
                 "camera messages; reconnect the camera if it remains unresponsive."})
         return events
 
+    def _keep_cameras_awake(self) -> None:
+        # Runs on the same STA owner as capture and frame reads, even with
+        # preview off. Native event callbacks only set KeepAliveRequested.
+        if self._manager is None:
+            return
+        now = time.monotonic()
+        active = set()
+        for device in self._devices():
+            keep_alive = _value(device, "KeepAlive")
+            if not callable(keep_alive) or not bool(_value(device, "IsConnected", default=False)):
+                continue
+            key = self._camera_id(device) or str(id(device))
+            active.add(key)
+            if not bool(_value(device, "PreventShutDown", default=True)):
+                self._keep_alive_state.pop(key, None)
+                continue
+            if bool(_value(device, "IsBusy", default=False)):
+                continue
+            due, last_attempt, last_error = self._keep_alive_state.get(
+                key, (0.0, float("-inf"), ""))
+            requested = bool(_value(device, "KeepAliveRequested", default=False))
+            if now - last_attempt < 1.0 or (now < due and not requested):
+                continue
+            try:
+                keep_alive()
+            except Exception as exc:
+                message = f"Could not keep {self._camera_name(device, key)} awake: {exc}"
+                if message != last_error:
+                    self._pending_events.put(("error", message))
+                self._keep_alive_state[key] = (now + 5.0, now, message)
+            else:
+                self._keep_alive_state[key] = (now + 15.0, now, "")
+        self._keep_alive_state = {
+            key: value for key, value in self._keep_alive_state.items() if key in active
+        }
+
     def _pump(self) -> None:
+        self._keep_cameras_awake()
         if self._dispatcher is None:
             return
         frame = self._dispatcher_frame_type()
@@ -1058,6 +1095,7 @@ class DccEngine:
             raise RuntimeError("Camera cleanup failed: " + "; ".join(cleanup_errors))
 
     def _cleanup_runtime(self) -> None:
+        self._keep_alive_state.clear()
         self._capture_started = None
         self._capture_device = None
         self._native_libraries.clear()

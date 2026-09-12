@@ -242,6 +242,9 @@ def _camera_worker(control, factory):
         # Canon has a dedicated live-view shutter path. Suspend frame reads,
         # but leave that mode active when the selected image format supports it.
         keep_live = live and engine.snapshot().get('capture_preserves_live_view', False)
+        params = dict(params)
+        if keep_live:
+            params['live_view_capture'] = True
         if live and not keep_live:
             engine.execute('live_stop', {})
             live = False
@@ -400,7 +403,8 @@ def _camera_worker(control, factory):
                             engine.execute('set_property', {
                                 'name': workflow['property'],
                                 'value': workflow['values'][workflow['done']]})
-                        trigger_capture('capture' if workflow['autofocus'] else 'capture_no_af', {})
+                        trigger_capture('capture' if workflow['autofocus'] else 'capture_no_af',
+                                        {'autofocus_before_capture': workflow['autofocus']})
                         workflow['done'] += 1
                         workflow['waiting'] = True
                         workflow['received'] = False

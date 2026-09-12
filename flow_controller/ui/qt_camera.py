@@ -275,7 +275,11 @@ class CameraTab(QWidget):
         self.capture_in_ram = QCheckBox('Capture in camera RAM')
         self.capture_in_ram.toggled.connect(self._set_capture_target)
         self._gated.append((self.capture_in_ram, ('CaptureInRam',)))
-        capture.add(row(self.capture_in_ram, None))
+        self.autofocus_before_capture = QCheckBox('Autofocus before live-view capture')
+        self.autofocus_before_capture.setToolTip(
+            'Like digiCamControl: focus separately, then capture without shutter autofocus.')
+        self._gated.append((self.autofocus_before_capture, ('LiveView',)))
+        capture.add(row(self.capture_in_ram, self.autofocus_before_capture, None))
         layout.addWidget(capture)
 
         focus = Card('Focus')
@@ -408,6 +412,8 @@ class CameraTab(QWidget):
 
     def _capture(self, action):
         params = {}
+        if action == 'capture' and self.autofocus_before_capture.isChecked():
+            params['autofocus_before_capture'] = True
         if self._has('CaptureInRam') and 'capture_in_ram' in self._state:
             params['capture_in_ram'] = bool(self._state['capture_in_ram'])
         self.camera.action(action, **params)

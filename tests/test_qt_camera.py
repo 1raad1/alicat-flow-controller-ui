@@ -315,6 +315,23 @@ class QtCameraTests(unittest.TestCase):
             ('action', 'focus_point', {'x': 250, 'y': 750}),
         ])
 
+    def test_autofocus_before_capture_is_opt_in_and_capture_only(self):
+        camera, tab = self.make_tab()
+        camera.publish(selected='usb:1', capabilities=[
+            'LiveView', 'CaptureNoAf',
+        ])
+        self.assertFalse(tab.autofocus_before_capture.isChecked())
+        camera.calls.clear()
+
+        tab.autofocus_before_capture.setChecked(True)
+        tab.capture_button.click()
+        tab.capture_no_af_button.click()
+
+        self.assertEqual(camera.calls, [
+            ('action', 'capture', {'autofocus_before_capture': True}),
+            ('action', 'capture_no_af', {}),
+        ])
+
     def test_properties_build_editors_and_apply_exact_values(self):
         camera, tab = self.make_tab()
         camera.publish(

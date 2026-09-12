@@ -176,6 +176,50 @@ def _patch_property_value(source: Path) -> None:
 def _patch_canon_sdk_base(source: Path) -> None:
     path = source / "CameraControl.Devices" / "Canon" / "CanonSDKBase.cs"
     text = path.read_text(encoding="utf-8-sig")
+    text = replace_once(
+        text,
+        "        private System.Timers.Timer _shutdownTimer = new System.Timers.Timer(1000*60);\n",
+        "        private System.Timers.Timer _shutdownTimer = new System.Timers.Timer(1000*60);\n"
+        "        private volatile bool _keepAliveRequested;\n",
+        "keep-alive request field",
+    )
+    text = replace_once(
+        text,
+        """        private void Camera_WillShutdown(object sender, EventArgs e)
+        {
+            try
+            {
+                if (PreventShutDown)
+                {
+                    Camera.SendCommand(Edsdk.CameraCommand_ExtendShutDownTimer);
+                }
+            }
+            catch (Exception exception)
+            {
+                Log.Debug("PreventShutDown", exception);
+            }
+        }
+""",
+        """        public bool KeepAliveRequested
+        {
+            get { return _keepAliveRequested; }
+        }
+
+        public void KeepAlive()
+        {
+            if (!PreventShutDown || !IsConnected || Camera == null || IsBusy)
+                return;
+            ErrorCodes.GetCanonException(Camera.SendCommand(Edsdk.CameraCommand_ExtendShutDownTimer));
+            _keepAliveRequested = false;
+        }
+
+        private void Camera_WillShutdown(object sender, EventArgs e)
+        {
+            _keepAliveRequested = true;
+        }
+""",
+        "explicit owner-thread Canon keep-alive",
+    )
     old_iso = """        private void IsoNumber_ValueChanged(object sender, string key, long val)
         {
             try

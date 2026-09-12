@@ -25,6 +25,7 @@ class FakeEngine:
         self.fail_action = ''
         self.defer_capture = False
         self.frames = 0
+        self.pumps = 0
         self.frame_gate = None
         self.timeline = []
         self.state = dict(cameras=[{'id': '123', 'name': 'USB test'}], selected='123',
@@ -57,7 +58,8 @@ class FakeEngine:
         return copy.deepcopy(self.state)
 
     def pump(self):
-        pass
+        self.threads.add(threading.get_ident())
+        self.pumps += 1
 
     def execute(self, name, params):
         self.threads.add(threading.get_ident())
@@ -152,6 +154,13 @@ class CameraTests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: not self.camera.busy))
         self.assertEqual(len(self.engine.threads), 1)
         self.assertNotIn(threading.get_ident(), self.engine.threads)
+
+    def test_connected_idle_camera_is_pumped_without_starting_preview(self):
+        self.connect()
+
+        self.assertGreaterEqual(self.engine.pumps, 1)
+        self.assertFalse(self.camera.previewing)
+        self.assertEqual(self.engine.frames, 0)
 
     def test_slow_capture_does_not_block_ui_or_accept_duplicate(self):
         self.connect()
@@ -290,11 +299,61 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(self.engine.frames, frames_while_waiting)
         self.assertNotIn('live_stop', self.engine.timeline)
         self.assertNotIn('live_start', self.engine.timeline)
+        capture_params = next(params for name, params in self.engine.calls
+                              if name == 'capture')
+        self.assertEqual(capture_params, {'live_view_capture': True})
 
         self.engine.complete_capture()
         self.assertTrue(self.wait_for(
             lambda: self.engine.frames > frames_while_waiting))
         self.assertTrue(self.camera.previewing)
+        self.assertNotIn('live_stop', self.engine.timeline)
+        self.assertNotIn('live_start', self.engine.timeline)
+
+    def test_preserved_live_view_capture_waits_for_in_flight_frame_boundary(self):
+        self.engine.state['capture_preserves_live_view'] = True
+        self.engine.defer_capture = True
+        self.engine.frame_gate = threading.Event()
+        self.connect()
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.engine.frames == 1))
+        self.engine.timeline.clear()
+
+        self.camera.action('capture')
+        time.sleep(.05)
+        self.app.processEvents()
+        self.assertFalse(any(name == 'capture' for name, _ in self.engine.calls))
+
+        self.engine.frame_gate.set()
+        self.assertTrue(self.wait_for(lambda: any(
+            name == 'capture' for name, _params in self.engine.calls)))
+        frames_at_capture = self.engine.frames
+        time.sleep(.05)
+        self.app.processEvents()
+        self.assertEqual(self.engine.frames, frames_at_capture)
+        self.assertEqual(frames_at_capture, 1)
+        self.assertNotIn('live_stop', self.engine.timeline)
+        self.assertNotIn('live_start', self.engine.timeline)
+
+    def test_preserved_live_view_workflow_propagates_autofocus_without_toggle(self):
+        self.engine.state['capture_preserves_live_view'] = True
+        self.connect()
+        self.camera.start_preview()
+        self.assertTrue(self.wait_for(lambda: self.camera.previewing))
+        self.engine.timeline.clear()
+        self.engine.calls.clear()
+
+        self.camera.action('timelapse_start', count=1, interval=.5,
+                           autofocus=True)
+
+        self.assertTrue(self.wait_for(lambda: any(
+            name == 'capture' for name, _params in self.engine.calls)))
+        capture_params = next(params for name, params in self.engine.calls
+                              if name == 'capture')
+        self.assertEqual(capture_params, {
+            'autofocus_before_capture': True,
+            'live_view_capture': True,
+        })
         self.assertNotIn('live_stop', self.engine.timeline)
         self.assertNotIn('live_start', self.engine.timeline)
 

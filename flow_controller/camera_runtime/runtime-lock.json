@@ -19,7 +19,8 @@
       "Canon property writes retry only transient errors and propagate final failure",
       "PropertyValue supports verified synchronous value changes",
       "Canon ISO writes use readback verification and restore live view",
-      "Canon pointer transfers restore live view and propagate failure"
+      "Canon pointer transfers restore live view and propagate failure",
+      "Canon shutdown events request owner-thread keep-alive with checked native errors"
     ],
     "target": ".NET Framework 4.8 / x64"
   },
@@ -72,7 +73,7 @@
     },
     "CameraControl.Devices.dll": {
       "bytes": 336896,
-      "sha256": "efb60a374a8845f42794b49f6d6f10e780f31f643f612a0ec9f5301be750965d"
+      "sha256": "53e6056474b60d37b48faeba02ca81b2c8c91519ef739d68568ce2a371c255ab"
     },
     "Canon.Eos.Framework.dll": {
       "bytes": 81408,
@@ -151,8 +152,8 @@
       "sha256": "e1e27af7b07eeedf5ce71a9255f0422816a6fc5849a483c6714e1b472044fa9d"
     },
     "PROVENANCE.md": {
-      "bytes": 3183,
-      "sha256": "b54a5695c785ad67c6deaf2428dafb6c4ad4879a014c8cf36768da9a9656a24d"
+      "bytes": 3432,
+      "sha256": "e7d740d293851d5c8877775b2c8d7b0e29e018000bfa37770b73ee7c3110c388"
     },
     "PortableDeviceLib.dll": {
       "bytes": 97792,

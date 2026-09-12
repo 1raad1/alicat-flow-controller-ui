@@ -15,7 +15,11 @@ Camera-control patches bound Canon property retries and return immediately after
 a successful write. A synchronous property setter keeps writes on the owning
 STA worker and propagates failures. Canon ISO changes verify the camera
 readback and restore live view in a finally block. Pointer-based file transfers
-also restore live view and propagate failures. These patches are applied by
+also restore live view and propagate failures. Canon shutdown callbacks now
+set a volatile request flag; a public KeepAlive method checks the native result
+and is called only by the application camera worker. The worker services
+shutdown warnings and sends periodic idle keep-awake commands. These patches
+are applied by
 `scripts/patch_camera_controls.py` during the reproducible runtime build.
 
 `scripts/build_camera_runtime.py` pins and SHA-256 verifies every download. The
