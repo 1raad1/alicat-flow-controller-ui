@@ -17,6 +17,22 @@ calculations, and combustion estimates.
 
 The desktop interface is built with PySide6 and Qt.
 
+## Recent updates
+
+- Application tabs are centred in the title bar. Layout controls and the
+  Standard/Staged selector sit below them, with run status in the footer.
+- The DSLR card at the top left of Operation & Monitoring provides live view,
+  capture, video recording, and a pop-out preview. Camera, logging, and temporary
+  MEXA relay controls switch between Start and Stop as their state changes.
+- **Take a burner photo when recording starts** optionally captures a photo for
+  each manual or LabVIEW-triggered data log. Camera failures leave logging running.
+- The LabVIEW listener starts automatically on `127.0.0.1:61557`. Stopping it
+  manually keeps it stopped across appearance changes.
+- Retained-history CSV and Excel exports run in the background and can be
+  cancelled without replacing an existing destination file.
+- Windows setup includes the camera engine and 64-bit Canon runtime. Canon
+  capture handling verifies storage settings and keeps idle cameras awake.
+
 ## Start here
 
 | I want to... | Read... |
@@ -95,6 +111,8 @@ negative flow.
 | **Connection & Assignment** | Choose serial settings, scan the bus, inspect gas tables, assign roles, connect controllers, and check live telemetry. |
 | **Operation & Monitoring** | Enter setpoints, set ramps and display scales, start logs, calculate RQL targets, run sequences, and read the system log. |
 | **Logging & Graphs** | Plot flow, setpoint, pressure, temperature, internal setpoint error, or valve drive, then export retained history. |
+| **MEXA analyser** | Connect the analyser stream through Direct LAN or Wormhole and configure received-data logging. |
+| **Camera** | Discover USB cameras, choose the photo folder, control live view and capture, and run timelapse or bracketing. |
 
 You can reassign zones after connection unless a CSV log is open. Log columns
 are fixed when recording starts.
@@ -106,10 +124,20 @@ Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
 rising trace does not continually rescale beneath the operator. The default
 history limit is 3,600 samples.
 
+The application tabs sit in the centre of the title bar. Layout controls for
+the active tab sit on the left of the row beneath it, with safety actions on
+the right. Run status appears along the bottom of the window.
+
 Use **Controls** and **Sequence** above the Operation workspace to fold or
 reopen those panels. **Plot controls** on Logging & Graphs makes more room for
 the plots. Reopening a panel restores its width or height and keeps its inputs.
 Folding a panel does not stop acquisition or a running sequence.
+
+Logging uses one button that changes between **Start Logging** and **Stop Logging**.
+Camera live view, video, bulb exposures, capture workflows, and the temporary
+MEXA relay also use Start/Stop toggles. Camera actions depend on the connected
+device's capabilities. The video button tracks commands accepted from this app;
+it does not reflect recording started or stopped on the camera body.
 
 Drag a divider to resize the panels, or double-click it to reset the split.
 With a divider focused, arrow keys resize by 10 pixels (50 with Shift), and
@@ -600,6 +628,20 @@ and a logging error is reported without stopping control.
 
 The default log directory is `Documents\Flow Controller`.
 
+### Burner photos with data logs
+
+In **Operation & Monitoring > Logging & Acquisition**, enable **Take a burner
+photo when recording starts** to request one photo whenever a new data log
+opens, including logs started by LabVIEW. This option is off by default and
+is remembered between launches.
+
+First connect and select a camera in **Camera**, then choose its photo output
+folder. The system log associates the data-log path with the transferred photo
+path. Capture is asynchronous, so the photo is not an exact synchronization
+marker for the first data row. A disconnected or busy camera skips the photo;
+a failed capture or transfer timeout is reported while data logging continues.
+See [Camera setup and controls](docs/CAMERA.md) for supported capture modes.
+
 ### Graph-history export
 
 **Logging & Graphs > History & Export** exports the retained in-memory history
@@ -613,14 +655,18 @@ file intact. Theme changes preserve the running export.
 
 ### LabVIEW UDP trigger
 
+The app starts the listener on `127.0.0.1:61557` when it opens. Use **Stop
+Listener** to turn it off; the same button becomes **Start Listener**. A theme
+change does not restart a listener you have stopped.
+
 The Qt interface can listen for two case-insensitive UDP datagrams:
 
 - `log` starts a new timestamped acquisition log;
 - `stop` closes the active log, or completes the delayed NO collection first when
   a locally armed optimiser capture is running.
 
-The listener defaults to `127.0.0.1:61557` and is started from **Operation &
-Monitoring > Logging & Acquisition**. A second `log` command is refused while a
+Listener controls are in **Operation & Monitoring > Logging & Acquisition**.
+A second `log` command is refused while a
 log is already open. Rows are written only while monitoring is running.
 
 ## Combustion calculations
@@ -738,7 +784,10 @@ flow_controller/
   services/        controller discovery
   core/            session, telemetry, logging, ramps, sequences, and preferences
   ui/              PySide6 interface
+  camera_runtime/  bundled USB camera engine, native libraries, and licenses
 mexa_bridge/        standalone analyser reader, records, transports, and relay
+scripts/            camera runtime build, setup, and Windows packaging tools
+third_party/        camera engine provenance, licenses, and dependency lock
 tests/              hardware-free unit and Qt tests
 run.py              source-tree launcher
 ```
@@ -767,11 +816,14 @@ delivers them to the interface through signals.
 The suite does not require a display or connected controller:
 
 ```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m unittest discover -s tests -v
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install pytest
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pytest tests -q
 ```
 
 It covers protocol parsing, discovery, assignments, safety selection, ramps,
-sequences, preferences, graphing, combustion/RQL arithmetic, and Qt behavior.
+sequences, preferences, graphing, combustion/RQL arithmetic, camera workflows,
+runtime packaging, and Qt behavior. Pytest runs both the unittest classes and
+the camera-driver patch tests written as standalone functions.
 
 Tests do not replace hardware acceptance. Before an experiment, verify scanning,
 device gas tables, assignments, readback, individual and batch setpoints,

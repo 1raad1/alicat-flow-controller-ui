@@ -178,6 +178,28 @@ class QtMexaTests(unittest.TestCase):
             start.assert_called_once_with(tab.token.text(), tab.directory.text(), save_logs=False,
                                           executable="C:/trusted/wormhole.exe")
 
+    def test_relay_toggle_follows_host_state_and_can_stop_while_starting(self):
+        from dataclasses import replace
+        tab = MexaTab(self.controller)
+        self.addCleanup(tab.close)
+        tab.host_consent.setChecked(True)
+        self.assertIs(tab.start_host, tab.stop_host)
+        with patch.object(tab, '_start_host') as start:
+            tab.start_host.click()
+            start.assert_called_once()
+        for state in ('starting', 'ready', 'stopping'):
+            with patch.object(self.controller, 'temporary_host', object()), \
+                 patch.object(self.controller, 'host_status',
+                              replace(self.controller.host_status, state=state)), \
+                 patch.object(self.controller, 'stop_temporary_host') as stop:
+                tab.refresh()
+                self.assertEqual(tab.start_host.text(), 'Stop temporary relay')
+                self.assertEqual(tab.start_host.isEnabled(), state != 'stopping')
+                tab.start_host.click()
+                self.assertEqual(stop.call_count, 0 if state == 'stopping' else 1)
+        tab.refresh()
+        self.assertEqual(tab.start_host.text(), 'Start temporary relay')
+
     def test_full_simulated_bridge_to_qt_receiver_log_and_view(self):
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))

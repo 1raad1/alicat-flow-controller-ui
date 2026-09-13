@@ -101,6 +101,9 @@ class DccEngine:
         self._pending_events: queue.SimpleQueue[tuple[str, object | None]] = queue.SimpleQueue()
         self._owner_ident: int | None = None
         self._bulb_device: object | None = None
+        # The driver exposes MovieIsRecording only on transient live-view
+        # frames. Track commands acknowledged for the selected stable ID.
+        self._recording_camera_id: str | None = None
         self._capture_started: float | None = None
         self._capture_device: object | None = None
         self._keep_alive_state: dict[str, tuple[float, float, str]] = {}
@@ -388,6 +391,8 @@ class DccEngine:
         if self._bulb_device is not None:
             raise RuntimeError("Stop the active bulb exposure before selecting another camera")
         manager = self._require_manager()
+        previous = self._selected()
+        previous_id = self._camera_id(previous) if previous is not None else None
         match = next((d for d in self._devices() if self._camera_id(d) == camera_id), None)
         if match is None:
             raise ValueError(f"Camera {camera_id!r} is not connected")
@@ -396,6 +401,8 @@ class DccEngine:
         except Exception as exc:
             raise RuntimeError(f"Could not select camera {camera_id!r}: {exc}") from exc
         self._refresh_device_subscriptions()
+        if previous_id != camera_id:
+            self._recording_camera_id = None
         return self._snapshot()
 
     def _capability_names(self, device: object) -> list[str]:
@@ -544,6 +551,10 @@ class DccEngine:
             "properties": properties,
             "battery": battery,
             "busy": busy,
+            "recording": (selected_id is not None
+                          and self._recording_camera_id == selected_id),
+            "bulb_active": (selected_id is not None
+                            and self._camera_id(self._bulb_device) == selected_id),
             "capture_in_ram": capture_in_ram,
             "capture_preserves_live_view": self._capture_preserves_live_view(selected),
         }
@@ -700,9 +711,11 @@ class DccEngine:
         elif action == "video_start":
             self._require_capability(device, action, ("RecordMovie",))
             self._invoke(device, action, ("StartRecordMovie",))
+            self._recording_camera_id = self._camera_id(device)
         elif action == "video_stop":
             self._require_capability(device, action, ("RecordMovie",))
             self._invoke(device, action, ("StopRecordMovie",))
+            self._recording_camera_id = None
         elif action == "bulb_start":
             self._require_capability(device, action, ("Bulb",))
             if bool(_value(device, "IsBusy", default=False)):
@@ -1080,6 +1093,7 @@ class DccEngine:
             self._dispatcher_priority = None
             self._action_type = None
             self._bulb_device = None
+            self._recording_camera_id = None
             self._cleanup_runtime()
             while True:
                 try:

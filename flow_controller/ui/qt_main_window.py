@@ -12,8 +12,8 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QSizePolicy, QStackedWidget, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .. import APP_VERSION
@@ -25,6 +25,7 @@ from .qt_logging_tab import LoggingTab
 from .qt_mexa import MexaTab
 from .qt_operation_tab import OperationTab, SafetyBar
 from ..core.camera import DirectCamera
+from ..core.recording_photo import RecordingPhoto
 from .qt_camera import CameraTab
 from .qt_settings import SettingsDialog
 from .qt_widgets import GlassBackdrop, GlassBar, StatusDot, label
@@ -249,6 +250,7 @@ class MainWindow(QMainWindow):
         # started by the desktop application.
         self.optimiser = OptimiserController(self.session, self)
         self.camera = DirectCamera(self)
+        self.session.recording_photo = RecordingPhoto(self.session, self.camera)
         self.camera_tab = CameraTab(self.camera)
 
         self._message_timer = QTimer(self)
@@ -260,6 +262,10 @@ class MainWindow(QMainWindow):
         # Window-level connections survive UI rebuilds without duplication.
         self._connect_session()
         self._sync_from_session()
+        # Start once per window, after subscribers exist. UI rebuilds do not
+        # restart a listener the operator has deliberately stopped.
+        if not self.session._udp.listening:
+            self.session.start_udp('127.0.0.1', 61557)
 
         if theme.CONFIG_ERROR:
             self.show_message(f'Appearance config ignored ({theme.CONFIG_ERROR}) '
@@ -285,7 +291,9 @@ class MainWindow(QMainWindow):
         title_divider.setObjectName('TitleDivider')
         title_divider.setFixedHeight(1)
         layout.addWidget(title_divider)
-        layout.addWidget(self._build_tabs(), 1)
+        pages = self._build_tabs()
+        layout.addWidget(self._build_layout_bar())
+        layout.addWidget(pages, 1)
         layout.addWidget(self._build_status_bar())
         # setCentralWidget destroys the previous frame.
         self._frame = WindowFrame(root)
@@ -297,10 +305,15 @@ class MainWindow(QMainWindow):
 
     def _build_title_bar(self):
         bar = TitleBar(self)
+        self.title_bar = bar
         bar.setObjectName('TitleBar')
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(theme.PAD_MD, theme.scale(3),
-                               theme.PAD_MD, theme.scale(3))
+        grid = QGridLayout(bar)
+        grid.setContentsMargins(theme.PAD_MD, theme.scale(3),
+                                theme.PAD_MD, theme.scale(3))
+        grid.setHorizontalSpacing(theme.PAD_SM)
+        left = QWidget()
+        row = QHBoxLayout(left)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(theme.PAD_SM)
 
         name = QLabel('Alicat Flow Controller')
@@ -309,27 +322,18 @@ class MainWindow(QMainWindow):
         version = QLabel(f'v{APP_VERSION}')
         version.setObjectName('TitleSub')
         row.addWidget(version)
-        row.addSpacing(theme.PAD_SM)
-        # Persistent run state remains visible across tabs.
-        self._status_labels = {}
-        for index, (key, _default) in enumerate(STATUS_FIELDS):
-            if index:
-                separator = QLabel('·')
-                separator.setObjectName('TitleStatusSep')
-                row.addWidget(separator)
-            widget = QLabel(self._status_text[key])
-            widget.setObjectName('TitleStatus')
-            row.addWidget(widget)
-            self._status_labels[key] = widget
         row.addStretch(1)
-
-        self._link_dot = StatusDot(theme.TEXT_DIM)
-        row.addWidget(self._link_dot)
-        self._link_label = label('', color=theme.TEXT_MUTED, size=8,
-                                 monospace=True)
-        row.addWidget(self._link_label)
-
-        row.addSpacing(theme.PAD_SM)
+        self._nav_tabs = QTabBar()
+        self._nav_tabs.setObjectName('TitleTabs')
+        self._nav_tabs.setDocumentMode(True)
+        self._nav_tabs.setExpanding(False)
+        self._nav_tabs.setDrawBase(False)
+        self._nav_tabs.setAccessibleName('Application tabs')
+        right = QWidget()
+        row = QHBoxLayout(right)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(theme.PAD_SM)
+        row.addStretch(1)
         settings = QPushButton(glyph('settings'))
         settings.setObjectName('IconButton')
         settings.setFixedSize(*(theme.scale(n) for n in CHROME_BUTTON))
@@ -350,6 +354,15 @@ class MainWindow(QMainWindow):
         close = self._window_button('close', 'Close', self.close)
         close.setObjectName('WinClose')
         row.addWidget(close)
+        grid.addWidget(left, 0, 0)
+        grid.addWidget(self._nav_tabs, 0, 1, Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(right, 0, 2)
+        # Equal side columns centre navigation on the window, independently
+        # of the different widths of the app name and caption controls.
+        side_width = max(left.minimumSizeHint().width(), right.minimumSizeHint().width())
+        for column in (0, 2):
+            grid.setColumnMinimumWidth(column, side_width)
+            grid.setColumnStretch(column, 1)
         return bar
 
     def _window_button(self, name, tip, slot):
@@ -430,24 +443,64 @@ class MainWindow(QMainWindow):
             lambda text: self._set_field('graphs', f'graphs  {text}'))
         self._set_field('graphs', f'graphs  {self.logging_tab.graphs_text()}')
 
-        tabs.setCornerWidget(SafetyBar(self.session, self.operation_tab.send_all),
-                             Qt.Corner.TopRightCorner)
+        for index in range(tabs.count()):
+            self._nav_tabs.addTab(tabs.tabText(index))
+        tabs.tabBar().hide()
+        self._nav_tabs.currentChanged.connect(tabs.setCurrentIndex)
+        tabs.currentChanged.connect(self._nav_tabs.setCurrentIndex)
         self._tabs = tabs
         return tabs
 
+    def _build_layout_bar(self):
+        bar = GlassBar('bottom')
+        self.layout_bar = bar
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(theme.PAD_MD, 0, theme.PAD_MD, 0)
+        self._layout_stack = QStackedWidget()
+        self._layout_stack.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Maximum)
+        for index in range(self._tabs.count()):
+            page = self._tabs.widget(index)
+            controls = getattr(page, 'panel_bar', None)
+            if controls is None:
+                controls = QWidget()
+            else:
+                page.layout().removeWidget(controls)
+            self._layout_stack.addWidget(controls)
+        row.addWidget(self._layout_stack, 1)
+        row.addWidget(SafetyBar(self.session, self.operation_tab.send_all))
+        self._tabs.currentChanged.connect(self._layout_stack.setCurrentIndex)
+        self._layout_stack.setCurrentIndex(self._tabs.currentIndex())
+        return bar
+
     def _build_status_bar(self):
-        """Build the one-off message strip, hidden while empty."""
+        """Build persistent run status and a separate transient message line."""
         bar = GlassBar('top')
         bar.setObjectName('StatusBar')
-        row = QHBoxLayout(bar)
+        column = QVBoxLayout(bar)
+        column.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
         row.setContentsMargins(theme.PAD_XL, theme.PAD_SM + 1,
                                theme.PAD_XL, theme.PAD_SM + 1)
         row.setSpacing(theme.PAD_MD)
-
+        self._status_labels = {}
+        for key, _default in STATUS_FIELDS:
+            widget = QLabel(self._status_text[key])
+            widget.setObjectName('TitleStatus')
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            row.addWidget(widget, 1)
+            self._status_labels[key] = widget
+        self._link_dot = StatusDot(theme.TEXT_DIM)
+        row.addWidget(self._link_dot)
+        self._link_label = label('', color=theme.TEXT_MUTED, size=8, monospace=True)
+        row.addWidget(self._link_label)
+        column.addLayout(row)
         self._message_label = QLabel(self._message)
-        self._message_label.setWordWrap(False)
-        row.addWidget(self._message_label, 1)
-        bar.setVisible(bool(self._message))
+        self._message_label.setWordWrap(True)
+        self._message_label.setContentsMargins(theme.PAD_XL, 0, theme.PAD_XL, theme.PAD_SM)
+        self._message_label.setVisible(bool(self._message))
+        column.addWidget(self._message_label)
         self._status_bar = bar
         return bar
 
@@ -465,10 +518,11 @@ class MainWindow(QMainWindow):
             return
         for key, widget in labels.items():
             widget.setText(self._status_text[key])
+            widget.setToolTip(self._status_text[key])
         bar = getattr(self, '_status_bar', None)
         if bar is not None:
             self._message_label.setText(self._message)
-            bar.setVisible(bool(self._message))
+            self._message_label.setVisible(bool(self._message))
 
     def show_message(self, text):
         """Put a one-off line in the status bar, or clear it with ``''``."""
@@ -512,6 +566,8 @@ class MainWindow(QMainWindow):
         self._on_connection(session.controllers_connected)
         self._on_logging(session.logging_active, session.log_path)
         self._on_sequence_state(session.sequence_state)
+        if session._udp.listening:
+            self._on_udp(True, f'Listening on {session._udp.host}:{session._udp.port}')
 
     def _on_connection(self, connected):
         if connected:
@@ -542,7 +598,10 @@ class MainWindow(QMainWindow):
         self._settle_pending_theme()
 
     def _on_udp(self, active, message):
-        self._set_field('udp', f"LabVIEW  {message if active else 'off'}")
+        failed = not active and 'error' in message.lower()
+        self._set_field('udp', f"LabVIEW  {message if active or failed else 'off'}")
+        if failed:
+            self.show_message(message)
 
     def _on_sequence_state(self, state):
         word = SEQ_WORDS.get(state, state)
