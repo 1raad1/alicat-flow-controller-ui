@@ -106,6 +106,10 @@ Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
 rising trace does not continually rescale beneath the operator. The default
 history limit is 3,600 samples.
 
+The application tabs sit in the centre of the title bar. Layout controls for
+the active tab sit on the left of the row beneath it, with safety actions on
+the right. Run status appears along the bottom of the window.
+
 Use **Controls** and **Sequence** above the Operation workspace to fold or
 reopen those panels. **Plot controls** on Logging & Graphs makes more room for
 the plots. Reopening a panel restores its width or height and keeps its inputs.
@@ -613,14 +617,18 @@ file intact. Theme changes preserve the running export.
 
 ### LabVIEW UDP trigger
 
+The app starts the listener on `127.0.0.1:61557` when it opens. Use **Stop
+Listener** to turn it off; the same button becomes **Start Listener**. A theme
+change does not restart a listener you have stopped.
+
 The Qt interface can listen for two case-insensitive UDP datagrams:
 
 - `log` starts a new timestamped acquisition log;
 - `stop` closes the active log, or completes the delayed NO collection first when
   a locally armed optimiser capture is running.
 
-The listener defaults to `127.0.0.1:61557` and is started from **Operation &
-Monitoring > Logging & Acquisition**. A second `log` command is refused while a
+Listener controls are in **Operation & Monitoring > Logging & Acquisition**.
+A second `log` command is refused while a
 log is already open. Rows are written only while monitoring is running.
 
 ## Combustion calculations

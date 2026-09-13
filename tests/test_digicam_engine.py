@@ -623,10 +623,68 @@ class DccEngineTests(unittest.TestCase):
         self.engine.open()
         self.engine.execute("bulb_start", {})
         self.assertTrue(self.engine.snapshot()["busy"])
+        self.assertTrue(self.engine.snapshot()["bulb_active"])
 
         self.engine.execute("bulb_stop", {})
 
         self.assertFalse(self.engine.snapshot()["busy"])
+        self.assertFalse(self.engine.snapshot()["bulb_active"])
+
+    def test_video_state_changes_only_after_successful_commands(self) -> None:
+        self.engine.open()
+        self.assertFalse(self.engine.snapshot()["recording"])
+
+        original_start = self.manager.camera.StartRecordMovie
+        self.manager.camera.StartRecordMovie = lambda: (_ for _ in ()).throw(
+            RuntimeError("start rejected"))
+        with self.assertRaisesRegex(RuntimeError, "start rejected"):
+            self.engine.execute("video_start", {})
+        self.assertFalse(self.engine.snapshot()["recording"])
+
+        self.manager.camera.StartRecordMovie = original_start
+        self.engine.execute("video_start", {})
+        self.assertTrue(self.engine.snapshot()["recording"])
+
+        original_stop = self.manager.camera.StopRecordMovie
+        self.manager.camera.StopRecordMovie = lambda: (_ for _ in ()).throw(
+            RuntimeError("stop rejected"))
+        with self.assertRaisesRegex(RuntimeError, "stop rejected"):
+            self.engine.execute("video_stop", {})
+        self.assertTrue(self.engine.snapshot()["recording"])
+
+        self.manager.camera.StopRecordMovie = original_stop
+        self.engine.execute("video_stop", {})
+        self.assertFalse(self.engine.snapshot()["recording"])
+
+    def test_empty_snapshot_does_not_report_active_device_modes(self) -> None:
+        self.engine.open()
+        self.manager.camera.IsConnected = False
+        state = self.engine.snapshot()
+        self.assertFalse(state["recording"])
+        self.assertFalse(state["bulb_active"])
+
+    def test_selecting_another_camera_resets_commanded_video_state(self) -> None:
+        self.engine.open()
+        self.engine.execute("video_start", {})
+        second = FakeCamera()
+        second.SerialNumber = "SERIAL-2"
+        second.DisplayName = "Second DSLR"
+        self.manager.ConnectedDevices.append(second)
+
+        state = self.engine.select("SERIAL-2")
+
+        self.assertEqual(state["selected"], "SERIAL-2")
+        self.assertFalse(state["recording"])
+
+    def test_video_state_uses_stable_id_across_equivalent_device_proxies(self) -> None:
+        self.engine.open()
+        self.engine.execute("video_start", {})
+        equivalent = FakeCamera()
+        self.manager.camera = equivalent
+        self.manager.ConnectedDevices = [equivalent]
+        self.manager.SelectedCameraDevice = equivalent
+
+        self.assertTrue(self.engine.snapshot()["recording"])
 
     def test_close_ends_active_bulb_before_manager_shutdown(self) -> None:
         self.engine.open()
@@ -637,6 +695,7 @@ class DccEngineTests(unittest.TestCase):
         calls = [name for name, _args in self.manager.camera.calls]
         self.assertEqual(calls[-2:], ["bulb_start", "bulb_stop"])
         self.assertFalse(self.manager.camera.IsBusy)
+        self.assertIsNone(self.engine._bulb_device)
 
     def test_capture_busy_state_and_completed_event_prevent_overlap(self) -> None:
         self.engine.open()

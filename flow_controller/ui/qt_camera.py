@@ -40,7 +40,7 @@ class CameraImage(QWidget):
             self.setMaximumHeight(self.INLINE_MAXIMUM_HEIGHT)
         else:
             self.setMinimumSize(160, 90)
-        self.setAccessibleName('Burner camera image')
+        self.setAccessibleName('DSLR camera image')
         camera.frame_received.connect(self.set_image)
 
     def set_image(self, image):
@@ -99,7 +99,7 @@ class CameraImage(QWidget):
 class _CameraPopout(QWidget):
     def __init__(self, camera, image, status, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle('Burner camera')
+        self.setWindowTitle('DSLR camera')
         self.resize(960, 640)
         layout = QVBoxLayout(self)
         self.preview = CameraImage(camera, fit_height_to_width=False)
@@ -118,8 +118,8 @@ class BurnerCameraCard(Card):
     settings_requested = Signal()
 
     def __init__(self, camera, parent=None):
-        super().__init__('Burner camera', parent=parent,
-                         help_text='Live USB camera view for burner observation.')
+        super().__init__('DSLR camera', parent=parent,
+                         help_text='Live USB DSLR view for burner observation.')
         self.camera = camera
         self._busy = bool(getattr(camera, 'busy', False))
         self._state = dict(getattr(camera, 'state', {}) or {})
@@ -129,13 +129,13 @@ class BurnerCameraCard(Card):
         self.feed_status.setWordWrap(True)
         self.add(self.feed_status)
 
-        self.start_button = QPushButton('Start live view')
-        self.stop_button = QPushButton('Stop live view')
+        self.live_button = QPushButton('Start live view')
+        self.video_button = QPushButton('Start video')
         self.capture_button = QPushButton('Capture')
-        self.start_button.clicked.connect(camera.start_preview)
-        self.stop_button.clicked.connect(camera.stop_preview)
+        self.live_button.clicked.connect(self._toggle_preview)
+        self.video_button.clicked.connect(self._toggle_video)
         self.capture_button.clicked.connect(self._capture)
-        self.add(row(self.start_button, self.stop_button,
+        self.add(row(self.live_button, self.video_button,
                      self.capture_button, None))
         self.pop_button = QPushButton('Pop out')
         self.pop_button.clicked.connect(self.pop_out)
@@ -149,6 +149,7 @@ class BurnerCameraCard(Card):
         camera.error.connect(self.feed_status.setText)
         camera.busy_changed.connect(self._set_busy)
         camera.state_changed.connect(self._set_state)
+        camera.previewing_changed.connect(self._previewing_changed)
         self._sync()
 
     def _has(self, *names):
@@ -161,6 +162,19 @@ class BurnerCameraCard(Card):
             params['capture_in_ram'] = bool(self._state['capture_in_ram'])
         self.camera.action('capture', **params)
 
+    def _toggle_preview(self):
+        if self.camera.previewing:
+            self.camera.stop_preview()
+        else:
+            self.camera.start_preview()
+
+    def _toggle_video(self):
+        action = 'video_stop' if self._state.get('recording') else 'video_start'
+        self.camera.action(action)
+
+    def _previewing_changed(self, _previewing):
+        self._sync()
+
     def _set_busy(self, busy):
         self._busy = bool(busy)
         self._sync()
@@ -171,11 +185,19 @@ class BurnerCameraCard(Card):
 
     def _sync(self):
         selected = bool(self._state.get('selected'))
-        blocked = self._busy or bool(self._state.get('busy')) or bool(self._state.get('workflow'))
-        self.start_button.setEnabled(
-            selected and self._has('LiveView') and not blocked)
-        self.stop_button.setEnabled(
-            selected and self._has('LiveView'))
+        workflow = bool(self._state.get('workflow'))
+        blocked = self._busy or bool(self._state.get('busy')) or workflow
+        previewing = bool(self.camera.previewing)
+        recording = bool(self._state.get('recording'))
+        self.live_button.setText(
+            'Stop live view' if previewing else 'Start live view')
+        self.live_button.setEnabled(
+            selected and self._has('LiveView') and (previewing or not blocked))
+        self.video_button.setText('Stop video' if recording else 'Start video')
+        self.video_button.setEnabled(
+            selected and self._has('RecordMovie', 'Video')
+            and ((recording and not self._busy and not workflow)
+                 or (not recording and not blocked)))
         self.capture_button.setEnabled(selected and not blocked)
 
     def pop_out(self):
@@ -247,26 +269,15 @@ class CameraTab(QWidget):
         self.capture_no_af_button.clicked.connect(
             lambda: self._capture('capture_no_af'))
         self._gated.append((self.capture_no_af_button, ('CaptureNoAf',)))
-        self.live_start_button = QPushButton('Start live view')
-        self.live_start_button.clicked.connect(camera.start_preview)
-        self.live_stop_button = QPushButton('Stop live view')
-        self.live_stop_button.clicked.connect(camera.stop_preview)
-        self._gated.extend([
-            (self.live_start_button, ('LiveView',)),
-            (self.live_stop_button, ('LiveView',)),
-        ])
+        self.live_button = QPushButton('Start live view')
+        self.live_button.clicked.connect(self._toggle_preview)
         capture.add(row(self.capture_button, self.capture_no_af_button,
-                        self.live_start_button, self.live_stop_button, None))
-        self.video_start_button = self._button(
-            'Start video', 'video_start', 'RecordMovie', 'Video')
-        self.video_stop_button = self._button(
-            'Stop video', 'video_stop', 'RecordMovie', 'Video')
-        self.bulb_start_button = self._button(
-            'Start bulb exposure', 'bulb_start', 'Bulb')
-        self.bulb_stop_button = self._button(
-            'Stop bulb exposure', 'bulb_stop', 'Bulb')
-        capture.add(row(self.video_start_button, self.video_stop_button,
-                        self.bulb_start_button, self.bulb_stop_button, None))
+                        self.live_button, None))
+        self.video_button = QPushButton('Start video')
+        self.video_button.clicked.connect(self._toggle_video)
+        self.bulb_button = QPushButton('Start bulb exposure')
+        self.bulb_button.clicked.connect(self._toggle_bulb)
+        capture.add(row(self.video_button, self.bulb_button, None))
         self.lock_button = self._button(
             'Lock camera', 'camera_lock', 'CanLockFocus')
         self.unlock_button = self._button(
@@ -366,7 +377,7 @@ class CameraTab(QWidget):
         self.timelapse_af = QCheckBox('Autofocus each capture')
         self.timelapse_af.setChecked(True)
         self.timelapse_button = QPushButton('Start timelapse')
-        self.timelapse_button.clicked.connect(self._start_timelapse)
+        self.timelapse_button.clicked.connect(self._toggle_timelapse)
         workflows.add(row(QLabel('Interval'), self.interval, QLabel('Count'),
                           self.count, self.timelapse_af,
                           self.timelapse_button, None))
@@ -375,20 +386,15 @@ class CameraTab(QWidget):
         self.bracket_af = QCheckBox('Autofocus each capture')
         self.bracket_af.setChecked(True)
         self.bracket_button = QPushButton('Start bracket')
-        self.bracket_button.clicked.connect(self._start_bracket)
+        self.bracket_button.clicked.connect(self._toggle_bracket)
         bracket = QFormLayout()
         bracket.addRow('Property', self.bracket_property)
         bracket.addRow('Values (comma-separated)', self.bracket_values)
         workflows.add_layout(bracket)
         workflows.add(row(self.bracket_af, self.bracket_button, None))
-        self.stop_workflow_button = QPushButton('Stop workflow')
-        self.stop_workflow_button.clicked.connect(
-            lambda: camera.action('workflow_stop'))
-        workflows.add(row(self.stop_workflow_button, None))
         self._gated.extend([
             (self.timelapse_button, ()),
             (self.bracket_button, ()),
-            (self.stop_workflow_button, ()),
         ])
         layout.addWidget(workflows)
         layout.addStretch(1)
@@ -397,6 +403,7 @@ class CameraTab(QWidget):
         camera.error.connect(self.connection_status.setText)
         camera.busy_changed.connect(self._set_busy)
         camera.state_changed.connect(self._set_state)
+        camera.previewing_changed.connect(self._previewing_changed)
         camera.captured.connect(self._captured)
         camera.action_finished.connect(self._action_finished)
         # Safe facade configuration only: no USB discovery or device opening.
@@ -417,6 +424,23 @@ class CameraTab(QWidget):
         if self._has('CaptureInRam') and 'capture_in_ram' in self._state:
             params['capture_in_ram'] = bool(self._state['capture_in_ram'])
         self.camera.action(action, **params)
+
+    def _toggle_preview(self):
+        if self.camera.previewing:
+            self.camera.stop_preview()
+        else:
+            self.camera.start_preview()
+
+    def _toggle_video(self):
+        action = 'video_stop' if self._state.get('recording') else 'video_start'
+        self.camera.action(action)
+
+    def _toggle_bulb(self):
+        action = 'bulb_stop' if self._state.get('bulb_active') else 'bulb_start'
+        self.camera.action(action)
+
+    def _previewing_changed(self, _previewing):
+        self._sync()
 
     def _set_capture_target(self, checked):
         if self._has('CaptureInRam'):
@@ -461,6 +485,12 @@ class CameraTab(QWidget):
                            count=self.count.value(),
                            autofocus=self.timelapse_af.isChecked())
 
+    def _toggle_timelapse(self):
+        if self._state.get('workflow') == 'timelapse':
+            self.camera.action('workflow_stop')
+        else:
+            self._start_timelapse()
+
     def _start_bracket(self):
         values = [v.strip() for v in self.bracket_values.text().split(',')
                   if v.strip()]
@@ -468,6 +498,12 @@ class CameraTab(QWidget):
                            property=self.bracket_property.text().strip(),
                            values=values,
                            autofocus=self.bracket_af.isChecked())
+
+    def _toggle_bracket(self):
+        if self._state.get('workflow') == 'bracket':
+            self.camera.action('workflow_stop')
+        else:
+            self._start_bracket()
 
     def _set_busy(self, busy):
         self._busy = bool(busy)
@@ -508,20 +544,40 @@ class CameraTab(QWidget):
         for widget, capabilities in self._gated:
             widget.setEnabled(not blocked and selected
                               and (not capabilities or self._has(*capabilities)))
-        # Ending an active device mode must stay reachable while the device
-        # reports itself busy; these commands are the way out of that state.
-        self.live_stop_button.setEnabled(selected and self._has('LiveView'))
-        self.video_stop_button.setEnabled(
+        # Active modes remain stoppable while device state reports busy.
+        previewing = bool(self.camera.previewing)
+        recording = bool(self._state.get('recording'))
+        bulb_active = bool(self._state.get('bulb_active'))
+        self.live_button.setText(
+            'Stop live view' if previewing else 'Start live view')
+        self.live_button.setEnabled(
+            selected and self._has('LiveView') and (previewing or not blocked))
+        self.video_button.setText('Stop video' if recording else 'Start video')
+        self.video_button.setEnabled(
             selected and self._has('RecordMovie', 'Video')
-            and not self._busy and not workflow)
-        self.bulb_stop_button.setEnabled(
+            and ((recording and not self._busy and not workflow)
+                 or (not recording and not blocked)))
+        self.bulb_button.setText(
+            'Stop bulb exposure' if bulb_active else 'Start bulb exposure')
+        self.bulb_button.setEnabled(
             selected and self._has('Bulb')
-            and not self._busy and not workflow)
+            and ((bulb_active and not self._busy and not workflow)
+                 or (not bulb_active and not blocked)))
         writable = any(not prop.get('readonly', False) and prop.get('values')
                        for prop in self._state.get('properties', [])
                        if isinstance(prop, dict))
-        self.bracket_button.setEnabled(not blocked and selected and writable)
-        self.stop_workflow_button.setEnabled(selected and workflow)
+        active_workflow = str(self._state.get('workflow') or '')
+        self.timelapse_button.setText(
+            'Stop timelapse' if active_workflow == 'timelapse'
+            else 'Start timelapse')
+        self.timelapse_button.setEnabled(
+            selected and (active_workflow == 'timelapse' or not blocked))
+        self.bracket_button.setText(
+            'Stop bracket' if active_workflow == 'bracket'
+            else 'Start bracket')
+        self.bracket_button.setEnabled(
+            selected and (active_workflow == 'bracket'
+                          or (not blocked and writable)))
         self.output_path.setEnabled(not blocked)
         self.output_button.setEnabled(not blocked)
         self.fps.setEnabled(not blocked)

@@ -19,7 +19,8 @@ from PySide6.QtGui import QImage
 
 def empty_state():
     return dict(cameras=[], selected='', capabilities=[], properties=[],
-                battery=None, workflow='')
+                battery=None, workflow='', recording=False,
+                bulb_active=False)
 
 
 def _engine_factory():
@@ -54,6 +55,7 @@ class DirectCamera(QObject):
     status_changed = Signal(str)
     error = Signal(str)
     busy_changed = Signal(bool)
+    previewing_changed = Signal(bool)
     state_changed = Signal(dict)
     captured = Signal(str)
     action_finished = Signal(str, object)
@@ -135,7 +137,7 @@ class DirectCamera(QObject):
         self._control.desired_preview = False
         self._control.generation += 1
         self._control.clear_frame()
-        self.previewing = False
+        self._set_previewing(False)
         self.frame_received.emit(QImage())
         self.status_changed.emit('Live view stopped')
         self._control.wake.set()
@@ -158,6 +160,12 @@ class DirectCamera(QObject):
             self._busy_since = time.monotonic() if busy else None
             self._slow_reported = False
             self.busy_changed.emit(busy)
+
+    def _set_previewing(self, previewing):
+        previewing = bool(previewing)
+        if self.previewing != previewing:
+            self.previewing = previewing
+            self.previewing_changed.emit(previewing)
 
     def _drain(self):
         for _ in range(100):
@@ -183,7 +191,7 @@ class DirectCamera(QObject):
             elif kind == 'preview':
                 generation, active = value
                 if generation == self._control.generation:
-                    self.previewing = active
+                    self._set_previewing(active)
                     if not active:
                         self.frame_received.emit(QImage())
             elif kind == 'clear':
@@ -231,7 +239,14 @@ def _camera_worker(control, factory):
     def stop_live():
         nonlocal live
         if live and engine is not None:
-            engine.execute('live_stop', {})
+            try:
+                engine.execute('live_stop', {})
+            finally:
+                live = False
+                control.clear_frame()
+                control.emit('preview', (control.generation, False))
+                control.emit('status', 'Live view stopped')
+            return
         live = False
         control.clear_frame()
         control.emit('preview', (control.generation, False))

@@ -138,6 +138,7 @@ class LoggingTab(QWidget):
         self._split.setStretchFactor(1, 1)
         self._split.set_default_sizes([430, 1130])
         panel_bar = QWidget()
+        self.panel_bar = panel_bar
         panel_layout = QHBoxLayout(panel_bar)
         panel_layout.setContentsMargins(theme.PAD_LG, theme.PAD_XS,
                                         theme.PAD_LG, theme.PAD_XS)
@@ -151,11 +152,11 @@ class LoggingTab(QWidget):
             lambda shown: self._split.set_panel_collapsed(0, not shown))
         self._split.panelCollapsedChanged.connect(self._controls_collapsed)
         panel_layout.addWidget(self.controls_panel_btn)
-        panel_layout.addStretch(1)
         reset = QPushButton('Reset layout')
         reset.setProperty('density', 'compact')
         reset.clicked.connect(lambda: self._split.reset_layout())
         panel_layout.addWidget(reset)
+        panel_layout.addStretch(1)
         outer.addWidget(panel_bar)
         outer.addWidget(self._split, 1)
 
