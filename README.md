@@ -133,7 +133,7 @@ reopen those panels. **Plot controls** on Logging & Graphs makes more room for
 the plots. Reopening a panel restores its width or height and keeps its inputs.
 Folding a panel does not stop acquisition or a running sequence.
 
-Logging uses one button that changes between **Start logging** and **Stop logging**.
+Logging uses one button that changes between **Start Logging** and **Stop Logging**.
 Camera live view, video, bulb exposures, capture workflows, and the temporary
 MEXA relay also use Start/Stop toggles. Camera actions depend on the connected
 device's capabilities. The video button tracks commands accepted from this app;
@@ -816,11 +816,14 @@ delivers them to the interface through signals.
 The suite does not require a display or connected controller:
 
 ```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m unittest discover -s tests -v
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install pytest
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pytest tests -q
 ```
 
 It covers protocol parsing, discovery, assignments, safety selection, ramps,
-sequences, preferences, graphing, combustion/RQL arithmetic, and Qt behavior.
+sequences, preferences, graphing, combustion/RQL arithmetic, camera workflows,
+runtime packaging, and Qt behavior. Pytest runs both the unittest classes and
+the camera-driver patch tests written as standalone functions.
 
 Tests do not replace hardware acceptance. Before an experiment, verify scanning,
 device gas tables, assignments, readback, individual and batch setpoints,
