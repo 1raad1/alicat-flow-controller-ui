@@ -28,6 +28,28 @@ class Metric:
     dash: str           # 'solid' | 'dash' | 'dot' | 'dashdot'
 
 
+@dataclass(frozen=True)
+class HistoryExportSnapshot:
+    """Immutable columns copied from live history for background export."""
+
+    header: tuple[str, ...]
+    times: tuple[float, ...]
+    columns: tuple[tuple | None, ...]
+
+    def iter_rows(self):
+        """Yield rows with shorter, late-added columns aligned to the end."""
+        count = len(self.times)
+        for index, moment in enumerate(self.times):
+            row = [moment]
+            for column in self.columns:
+                if column is None:
+                    row.append(None)
+                    continue
+                offset = index - (count - len(column))
+                row.append(column[offset] if 0 <= offset < len(column) else None)
+            yield tuple(row)
+
+
 #: Everything the monitor records.  ``flow`` and ``sp`` deliberately share the
 #: ``flow`` group so a trace and its command sit on one axis and can be read
 #: against each other.
@@ -69,6 +91,12 @@ class GraphHistory:
         self._t0 = None
         self._history: dict[str, dict[str, deque]] = {}
         self._last_generation = None
+        self._revision = 0
+
+    @property
+    def revision(self):
+        """Monotonic version of the stored data and shape."""
+        return self._revision
 
     # -- shape ------------------------------------------------------------ #
 
@@ -78,14 +106,20 @@ class GraphHistory:
 
     def set_units(self, units):
         """Track exactly ``units``, keeping history for those already present."""
+        units = list(units)
+        changed = False
         for unit in units:
             if unit not in self._history:
                 self._history[unit] = {
                     metric.key: deque(maxlen=self.limit) for metric in METRICS
                 }
+                changed = True
         for unit in list(self._history):
             if unit not in units:
                 del self._history[unit]
+                changed = True
+        if changed:
+            self._revision += 1
 
     def set_limit(self, limit):
         """Re-bound every deque, keeping the most recent ``limit`` samples."""
@@ -96,6 +130,7 @@ class GraphHistory:
         for metrics in self._history.values():
             for key, history in list(metrics.items()):
                 metrics[key] = deque(history, maxlen=limit)
+        self._revision += 1
 
     # -- writing ---------------------------------------------------------- #
 
@@ -122,6 +157,7 @@ class GraphHistory:
                 else:
                     value = sample.get(metric.sample_key)
                 metrics[metric.key].append(value)
+        self._revision += 1
         return True
 
     def clear(self, generation=None):
@@ -131,6 +167,7 @@ class GraphHistory:
         for metrics in self._history.values():
             for history in metrics.values():
                 history.clear()
+        self._revision += 1
 
     # -- reading ---------------------------------------------------------- #
 
@@ -165,8 +202,8 @@ class GraphHistory:
         """
         return self._history.get(unit, {}).get(metric_key) or ()
 
-    def export_rows(self, units=None, metric_keys=None):
-        """``(header, rows)`` covering every stored sample.
+    def export_snapshot(self, units=None, metric_keys=None):
+        """Copy the selected history into an immutable export payload.
 
         Missing readings stay empty, matching the CSV log: a blank cell is a
         read that failed, and filling it in would invent data.
@@ -180,17 +217,15 @@ class GraphHistory:
             for key in keys:
                 metric = METRICS_BY_KEY[key]
                 header.append(f"U{unit}_{metric.key}_{metric.unit}")
-                columns.append(self._history.get(unit, {}).get(key))
-        rows = []
-        times = list(self._times)
-        for index, moment in enumerate(times):
-            row = [moment]
-            for column in columns:
-                if column is None:
-                    row.append(None)
-                    continue
-                # Tail-align the same way series() does.
-                offset = index - (len(times) - len(column))
-                row.append(column[offset] if 0 <= offset < len(column) else None)
-            rows.append(row)
-        return header, rows
+                column = self._history.get(unit, {}).get(key)
+                columns.append(None if column is None else tuple(column))
+        return HistoryExportSnapshot(
+            header=tuple(header),
+            times=tuple(self._times),
+            columns=tuple(columns),
+        )
+
+    def export_rows(self, units=None, metric_keys=None):
+        """Return the legacy mutable ``(header, rows)`` export result."""
+        snapshot = self.export_snapshot(units, metric_keys)
+        return list(snapshot.header), [list(row) for row in snapshot.iter_rows()]

@@ -17,6 +17,22 @@ calculations, and combustion estimates.
 
 The desktop interface is built with PySide6 and Qt.
 
+## Recent updates
+
+- Application tabs are centred in the title bar. Layout controls and the
+  Standard/Staged selector sit below them, with run status in the footer.
+- The DSLR card at the top left of Operation & Monitoring provides live view,
+  capture, video recording, and a pop-out preview. Camera, logging, and temporary
+  MEXA relay controls switch between Start and Stop as their state changes.
+- **Take a burner photo when recording starts** optionally captures a photo for
+  each manual or LabVIEW-triggered data log. Camera failures leave logging running.
+- The LabVIEW listener starts automatically on `127.0.0.1:61557`. Stopping it
+  manually keeps it stopped across appearance changes.
+- Retained-history CSV and Excel exports run in the background and can be
+  cancelled without replacing an existing destination file.
+- Windows setup includes the camera engine and 64-bit Canon runtime. Canon
+  capture handling verifies storage settings and keeps idle cameras awake.
+
 ## Start here
 
 | I want to... | Read... |
@@ -31,6 +47,7 @@ The desktop interface is built with PySide6 and Qt.
 | Stream the analyser from another PC | [MEXA two-PC setup](docs/MEXA_SETUP.md) |
 | Connect through Wormhole from the flow-controller app | [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) |
 | Log data, plot history, or use the LabVIEW trigger | [Logging, graphs, and LabVIEW](#logging-graphs-and-labview) |
+| Watch the burner and control a DSLR | [digiCamControl camera setup](docs/CAMERA.md) |
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
 | Fix an installation or connection problem | [Troubleshooting](#troubleshooting) |
@@ -94,6 +111,8 @@ negative flow.
 | **Connection & Assignment** | Choose serial settings, scan the bus, inspect gas tables, assign roles, connect controllers, and check live telemetry. |
 | **Operation & Monitoring** | Enter setpoints, set ramps and display scales, start logs, calculate RQL targets, run sequences, and read the system log. |
 | **Logging & Graphs** | Plot flow, setpoint, pressure, temperature, internal setpoint error, or valve drive, then export retained history. |
+| **MEXA analyser** | Connect the analyser stream through Direct LAN or Wormhole and configure received-data logging. |
+| **Camera** | Discover USB cameras, choose the photo folder, control live view and capture, and run timelapse or bracketing. |
 
 You can reassign zones after connection unless a CSV log is open. Log columns
 are fixed when recording starts.
@@ -105,6 +124,26 @@ Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
 rising trace does not continually rescale beneath the operator. The default
 history limit is 3,600 samples.
 
+The application tabs sit in the centre of the title bar. Layout controls for
+the active tab sit on the left of the row beneath it, with safety actions on
+the right. Run status appears along the bottom of the window.
+
+Use **Controls** and **Sequence** above the Operation workspace to fold or
+reopen those panels. **Plot controls** on Logging & Graphs makes more room for
+the plots. Reopening a panel restores its width or height and keeps its inputs.
+Folding a panel does not stop acquisition or a running sequence.
+
+Logging uses one button that changes between **Start logging** and **Stop logging**.
+Camera live view, video, bulb exposures, capture workflows, and the temporary
+MEXA relay also use Start/Stop toggles. Camera actions depend on the connected
+device's capabilities. The video button tracks commands accepted from this app;
+it does not reflect recording started or stopped on the camera body.
+
+Drag a divider to resize the panels, or double-click it to reset the split.
+With a divider focused, arrow keys resize by 10 pixels (50 with Shift), and
+Enter folds or reopens its panel. **Reset layout** restores the default columns;
+on Operation it also folds the sequence panel.
+
 ## Controls and safety behavior
 
 ### Batch controls
@@ -114,7 +153,7 @@ These controls are available from every tab:
 | Control | Action |
 | --- | --- |
 | **SET ALL FLOWS** | Queue the setpoint shown on every controller card. |
-| **ZERO FUEL** | Zero every assigned controller whose gas name is not exactly `Air`. |
+| **ZERO FUEL** | Zero every assigned controller whose gas name, after trimming whitespace, is not `Air` (case-insensitive). |
 | **ZERO ALL** | Zero every assigned controller. |
 
 ### Command and connection safety
@@ -123,8 +162,10 @@ Two rules are enforced in the control layer:
 
 1. A zero command outranks all pending or new nonzero setpoints for its target
    units.
-2. Only the monitoring loop writes to hardware. Typed setpoints, batch sends,
-   ramps, and sequence replay all pass through the same queue and interlocks.
+2. The serial worker owns hardware I/O. While monitoring, typed setpoints,
+   batch sends, ramps, and sequence replay pass through the same queue and
+   interlocks. Zeroing with monitoring stopped uses temporary connections on
+   that same worker.
 
 Zero commands keep the serial connection and monitoring active so the result
 can be verified. They also cancel active ramps and sequence replay. Stopping
@@ -196,8 +237,9 @@ During replay:
 
 - **Hold if flows lag** pauses every track until lagging measurements catch up.
   The maximum hold is 30 seconds.
-- Repeats ramp from the final values back to the opening values. They do not
-  start again as an unprotected jump.
+- Repeats return to the opening values using each controller's current ramp
+  settings. The next pass's clock starts after every return command reaches
+  its opening value. Controllers with ramping **OFF** return in a step.
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
@@ -220,11 +262,9 @@ changes or JSON messages are required. See the
 recording settings and file selection. Existing campaigns still open in
 NO minimisation mode. The analyser input remains NO, not total NOx.
 
-The **Bayesian optimiser** replaces the Agent launcher in the Operation sidebar.
-The desktop app no longer launches an agent terminal or starts its IPC gateway.
-The optimiser runs locally; it needs neither an API key nor an internet connection.
-Legacy agent modules remain in the repository but are not mounted by the app.
-For the algorithms, equations, file format and code map, see the
+The optimiser runs locally without an API key or internet connection. The
+desktop app does not launch the retired agent terminal or its IPC gateway. For
+the algorithms, equations, file format and code map, see the
 [Bayesian optimiser technical manual](docs/BAYESIAN_OPTIMISER_MANUAL.md).
 
 ### Create and run an experiment
@@ -443,12 +483,20 @@ https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
 
 ### Install and run on Windows
 
-1. Double-click `install.bat`. You only need to do this once.
+1. Extract the complete application ZIP, then double-click `install.bat`. Run it again after an upgrade to install new dependencies.
 2. Double-click `run.bat` to start the application.
 
 The installer puts the virtual environment in
 `%USERPROFILE%\.flow-controller-v3\venv`. This keeps PySide6's deeply nested
 files out of OneDrive and avoids common Windows path-length failures.
+
+Setup installs Python.NET in that environment, verifies the bundled camera
+DLLs, removes their Windows downloaded-file blocks, and checks that the camera
+library loads. No edits to `run.bat` are needed. Camera setup requires .NET
+Framework 4.8 or newer; setup reports a missing framework or failed library
+check before declaring installation complete. The GitHub download includes the
+64-bit Canon SDK, so Canon support needs no separate SDK download or import.
+See [Camera setup](docs/CAMERA.md).
 
 To run from PowerShell instead:
 
@@ -580,13 +628,36 @@ and a logging error is reported without stopping control.
 
 The default log directory is `Documents\Flow Controller`.
 
+### Burner photos with data logs
+
+In **Operation & Monitoring > Logging & Acquisition**, enable **Take a burner
+photo when recording starts** to request one photo whenever a new data log
+opens, including logs started by LabVIEW. This option is off by default and
+is remembered between launches.
+
+First connect and select a camera in **Camera**, then choose its photo output
+folder. The system log associates the data-log path with the transferred photo
+path. Capture is asynchronous, so the photo is not an exact synchronization
+marker for the first data row. A disconnected or busy camera skips the photo;
+a failed capture or transfer timeout is reported while data logging continues.
+See [Camera setup and controls](docs/CAMERA.md) for supported capture modes.
+
 ### Graph-history export
 
 **Logging & Graphs > History & Export** exports the retained in-memory history
 for every assigned controller, not just the plotted series. CSV is always
 available; `.xlsx` is available when `openpyxl` is installed.
 
+After you choose a destination, export takes a snapshot and writes it in the
+background. Monitoring and graph controls remain available. **Cancel export**
+stops the export; failed or cancelled exports leave an existing destination
+file intact. Theme changes preserve the running export.
+
 ### LabVIEW UDP trigger
+
+The app starts the listener on `127.0.0.1:61557` when it opens. Use **Stop
+Listener** to turn it off; the same button becomes **Start Listener**. A theme
+change does not restart a listener you have stopped.
 
 The Qt interface can listen for two case-insensitive UDP datagrams:
 
@@ -594,8 +665,8 @@ The Qt interface can listen for two case-insensitive UDP datagrams:
 - `stop` closes the active log, or completes the delayed NO collection first when
   a locally armed optimiser capture is running.
 
-The listener defaults to `127.0.0.1:61557` and is started from **Operation &
-Monitoring > Logging & Acquisition**. A second `log` command is refused while a
+Listener controls are in **Operation & Monitoring > Logging & Acquisition**.
+A second `log` command is refused while a
 log is already open. Rows are written only while monitoring is running.
 
 ## Combustion calculations
@@ -713,7 +784,10 @@ flow_controller/
   services/        controller discovery
   core/            session, telemetry, logging, ramps, sequences, and preferences
   ui/              PySide6 interface
+  camera_runtime/  bundled USB camera engine, native libraries, and licenses
 mexa_bridge/        standalone analyser reader, records, transports, and relay
+scripts/            camera runtime build, setup, and Windows packaging tools
+third_party/        camera engine provenance, licenses, and dependency lock
 tests/              hardware-free unit and Qt tests
 run.py              source-tree launcher
 ```

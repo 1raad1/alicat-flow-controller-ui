@@ -30,6 +30,7 @@ from .sequence import Sequence, opening_mismatches
 PLAN_TICK_MS = 100
 ACTIVE_STATES = frozenset(
     (RUN_RUNNING, RUN_HOLDING, RUN_AWAITING_OPERATOR))
+_CURRENT_PLAN_PATH = object()
 
 
 class ExperimentPlanController(QObject):
@@ -119,7 +120,7 @@ class ExperimentPlanController(QObject):
             return False
         try:
             self._validate(plan, plan_path=path)
-        except PlanValidationError as exc:
+        except (PlanValidationError, OSError, ValueError) as exc:
             self.session.failed.emit("Experiment Plan", str(exc))
             return False
         self.plan = plan
@@ -364,10 +365,13 @@ class ExperimentPlanController(QObject):
             result[role] = dict(samples.get(unit, {}) or {})
         return result
 
-    def _resolve_sequence(self, raw, *, plan_path=None):
+    def _resolve_sequence(self, raw, *, plan_path=_CURRENT_PLAN_PATH):
         path = Path(raw)
         if not path.is_absolute():
-            owner = Path(plan_path) if plan_path else self.plan_path
+            if plan_path is _CURRENT_PLAN_PATH:
+                owner = self.plan_path
+            else:
+                owner = Path(plan_path) if plan_path else None
             base = owner.parent if owner else self.session.sequence_dir
             path = base / path
         return path

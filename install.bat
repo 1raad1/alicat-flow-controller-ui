@@ -18,13 +18,30 @@ rem Store one puts only python.exe on PATH -- so try it and fall back.
 set "PY=py -3"
 %PY% --version >nul 2>&1 || set "PY=python"
 %PY% --version >nul 2>&1 || goto :nopython
+%PY% -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) and sys.maxsize > 2**32 else 1)" || goto :nopython
 
 echo Creating environment in "%VENV%"
 echo.
 %PY% -m venv "%VENV%" || goto :error
 if not exist "%VENV%\Scripts\python.exe" goto :redirected
+"%VENV%\Scripts\python.exe" -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) and sys.maxsize > 2**32 else 1)" || goto :error
 "%VENV%\Scripts\python.exe" -m pip install --upgrade pip || goto :error
 "%VENV%\Scripts\python.exe" -m pip install -r requirements.txt || goto :error
+echo.
+echo Preparing bundled USB camera support...
+"%VENV%\Scripts\python.exe" scripts\setup_camera_runtime.py || goto :cameraerror
+echo.
+"%VENV%\Scripts\python.exe" scripts\setup_camera_runtime.py --canon-ready
+if errorlevel 2 goto :canonprompt
+if errorlevel 1 goto :cameraerror
+goto :installed
+
+:canonprompt
+choice /C YN /M "Install or update Canon camera support using your official Canon SDK"
+if errorlevel 2 goto :installed
+call setup_canon.bat
+if errorlevel 1 goto :cameraerror
+:installed
 echo.
 echo Installation complete. Start the program with run.bat.
 pause
@@ -34,6 +51,13 @@ exit /b 0
 echo.
 echo No Python found on PATH. Install 64-bit Python 3.11 or newer, ticking
 echo "Add python.exe to PATH" in the installer, then run this again.
+pause
+exit /b 1
+
+:cameraerror
+echo.
+echo Camera setup did not complete. See the specific error above.
+echo Correct that issue and rerun install.bat before using the camera.
 pause
 exit /b 1
 

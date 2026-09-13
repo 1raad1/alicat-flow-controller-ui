@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QInputDialog, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-                               QSplitter, QVBoxLayout, QWidget, QWidgetAction)
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from ..core.combustion_prefs import (
     GEOMETRY_AREA, GEOMETRY_DIAMETER, MAX_INLET_COUNT, SCOPE_ALL,
@@ -42,6 +42,7 @@ from ..domain.graphing import auto_bar_span
 from . import qt_theme as theme
 from ..core.optimiser_controller import OptimiserController
 from .qt_optimiser import OptimiserPane
+from .qt_motion_panels import MotionSplitter
 from .qt_sequence_panel import SequencePanel
 from .qt_widgets import (Card, MetricTile, StageHeader, UnitCard,
                          divider, field_grid, label, mono, row)
@@ -269,9 +270,10 @@ class OperationTab(QWidget):
     #: so the window can put it in the status bar rather than a dialog.
     status = Signal(str)
 
-    def __init__(self, session, parent=None, *, optimiser=None):
+    def __init__(self, session, parent=None, *, optimiser=None, camera=None):
         super().__init__(parent)
         self.session = session
+        self.camera = camera
         if optimiser is None:
             optimiser = getattr(session, '_optimiser_controller', None)
             if optimiser is None:
@@ -316,15 +318,21 @@ class OperationTab(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self._split = QSplitter(Qt.Orientation.Vertical)
-        self._split.setHandleWidth(4)
+        self._split = MotionSplitter(Qt.Orientation.Vertical)
         self._split.addWidget(self._build_columns())
         self.sequence_panel = SequencePanel(session)
-        self.sequence_panel.setVisible(False)
         self._split.addWidget(self.sequence_panel)
+        self._split.configure_panel(1, 'Sequence')
         self._split.setStretchFactor(0, 1)
         self._split.setStretchFactor(1, 0)
+        self._split.set_default_sizes([520, 480])
+        self._split.set_panel_collapsed(1, True, animate=False)
+        self.panel_bar = self._build_panel_bar()
+        outer.addWidget(self.panel_bar)
         outer.addWidget(self._split, 1)
+        self._split.panelCollapsedChanged.connect(self._panel_collapsed)
+        self._columns_splitter.panelCollapsedChanged.connect(
+            self._controls_collapsed)
 
         session.mode_changed.connect(self._on_mode)
         session.connection_changed.connect(self._on_connection)
@@ -361,45 +369,24 @@ class OperationTab(QWidget):
         # the rig is running.
         self._on_targets(dict(session.target_flows))
         self._on_logging(session.logging_active, session.log_path)
+        udp = session._udp
+        self._on_udp(
+            udp.listening,
+            (f'Listening on {udp.host}:{udp.port}'
+             if udp.listening else 'listener off'))
         self.optimiser.targets_ready.connect(self._load_optimiser_targets)
 
     # ------------------------------------------------------------------ #
     #  Mode strip                                                         #
     # ------------------------------------------------------------------ #
-    def _build_mode_strip(self):
-        """Mode and monitoring, at the head of the left column.
-
-        These used to sit in a bar spanning both columns, which spent a row of
-        the window's height on two controls -- and spent it on the right-hand
-        side too, where the plots are and where every pixel of height is
-        another few seconds of trace.  Mode belongs beside the cards it
-        governs: switching to Standard is what hides the staged target
-        calculator below it, so the switch and its effect are visible in the
-        same glance.
-
-        The strip is pinned above the left column's scroll area rather than
-        placed inside it, so scrolling down to the sequence list does not
-        carry Start Monitoring off the top of the screen.
-        """
+    def _build_monitor_strip(self):
+        """Keep monitoring pinned above the left column's scroll area."""
         holder = QWidget()
         holder.setObjectName('Row')
         bar = QHBoxLayout(holder)
         bar.setContentsMargins(theme.PAD_LG, theme.PAD_SM,
                                theme.PAD_SM + 2, theme.PAD_SM)
         bar.setSpacing(theme.PAD_SM)
-
-        bar.addWidget(label('MODE', color=theme.TEXT_DIM, size=7, bold=True))
-        self._mode_buttons = {}
-        for mode, text in ((MODE_STANDARD, 'Standard'),
-                           (MODE_STAGED, 'Staged (RQL)')):
-            button = QPushButton(text)
-            button.setCheckable(True)
-            button.setProperty('density', 'compact')
-            button.clicked.connect(
-                lambda _checked=False, value=mode:
-                self.session.set_operating_mode(value))
-            bar.addWidget(button)
-            self._mode_buttons[mode] = button
 
         bar.addStretch(1)
         self.monitor_btn = QPushButton('Start Monitoring')
@@ -415,31 +402,86 @@ class OperationTab(QWidget):
         self.saved_list.setEnabled(state == SEQ_IDLE)
 
     def _toggle_sequence(self, shown):
-        self.sequence_btn.setText((
-            '▾  Record / Replay Flow Sequence' if shown
-            else '▸  Record / Replay Flow Sequence'))
-        self.sequence_panel.setVisible(shown)
-        if shown:
-            # Opening the panel is the other moment the folder is worth
-            # re-reading: a sequence saved from the panel's own Save button in a
-            # previous session landed there without this tab hearing about it.
+        self._split.set_panel_collapsed(1, not shown)
+
+    def _build_panel_bar(self):
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(theme.PAD_LG, theme.PAD_XS,
+                                  theme.PAD_LG, theme.PAD_XS)
+        layout.setSpacing(theme.PAD_SM)
+        self.controls_panel_btn = QPushButton('Controls')
+        self.controls_panel_btn.setCheckable(True)
+        self.controls_panel_btn.setChecked(True)
+        self.controls_panel_btn.setToolTip('Show or fold the setup controls')
+        self.controls_panel_btn.toggled.connect(
+            lambda shown: self._columns_splitter.set_panel_collapsed(0, not shown))
+        self.sequence_panel_btn = QPushButton('Sequence')
+        self.sequence_panel_btn.setCheckable(True)
+        self.sequence_panel_btn.setToolTip('Show or fold the record / replay panel')
+        self.sequence_panel_btn.toggled.connect(self._toggle_sequence)
+        for button in (self.controls_panel_btn, self.sequence_panel_btn):
+            button.setObjectName('PanelToggle')
+            button.setProperty('density', 'compact')
+            layout.addWidget(button)
+        reset = QPushButton('Reset layout')
+        reset.setProperty('density', 'compact')
+        reset.setToolTip('Restore the default columns and fold the sequence panel')
+        reset.clicked.connect(self._reset_panel_layout)
+        layout.addWidget(reset)
+        for button in self._cards_view_buttons.values():
+            layout.addWidget(button)
+        layout.addSpacing(theme.PAD_MD)
+        layout.addWidget(label('MODE', color=theme.TEXT_DIM, size=7, bold=True))
+        self._mode_buttons = {}
+        for mode, text in ((MODE_STANDARD, 'Standard'),
+                           (MODE_STAGED, 'Staged (RQL)')):
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setProperty('density', 'compact')
+            button.clicked.connect(
+                lambda _checked=False, value=mode:
+                self.session.set_operating_mode(value))
+            layout.addWidget(button)
+            self._mode_buttons[mode] = button
+        layout.addStretch(1)
+        return bar
+
+    def _controls_collapsed(self, index, collapsed):
+        if index == 0:
+            self.controls_panel_btn.blockSignals(True)
+            self.controls_panel_btn.setChecked(not collapsed)
+            self.controls_panel_btn.blockSignals(False)
+
+    def _panel_collapsed(self, index, collapsed):
+        if index != 1:
+            return
+        for button in (self.sequence_btn, self.sequence_panel_btn):
+            button.blockSignals(True)
+            button.setChecked(not collapsed)
+            button.blockSignals(False)
+        self.sequence_btn.setText('▸  Record / replay' if collapsed
+                                  else '▾  Record / replay')
+        if not collapsed:
+            # Refresh whichever way the panel opens: button, keyboard or drag.
             self._refresh_saved()
-        if shown and self._split.sizes()[1] < 80:
-            total = sum(self._split.sizes()) or self.height()
-            self._split.setSizes([int(total * 0.52), int(total * 0.48)])
+
+    def _reset_panel_layout(self):
+        self._columns_splitter.reset_layout()
+        self._toggle_sequence(False)
 
     # ------------------------------------------------------------------ #
     #  Columns                                                            #
     # ------------------------------------------------------------------ #
     def _build_columns(self):
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = MotionSplitter(Qt.Orientation.Horizontal)
         self._columns_splitter = splitter
-        splitter.setHandleWidth(4)
         splitter.addWidget(self._build_left_column())
         splitter.addWidget(self._build_right_column())
+        splitter.configure_panel(0, 'Controls')
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([
+        splitter.set_default_sizes([
             theme.scale(OPERATION_LEFT_START_WIDTH),
             theme.scale(OPERATION_RIGHT_START_WIDTH),
         ])
@@ -461,7 +503,7 @@ class OperationTab(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
-        column.addWidget(self._build_mode_strip())
+        column.addWidget(self._build_monitor_strip())
         column.addWidget(self._build_left_cards(), 1)
         return holder
 
@@ -472,6 +514,10 @@ class OperationTab(QWidget):
         column.setContentsMargins(theme.PAD_LG, theme.PAD_LG,
                                   theme.PAD_SM + 2, theme.PAD_LG)
         column.setSpacing(theme.CARD_GAP)
+        if self.camera is not None:
+            from .qt_camera import BurnerCameraCard
+            self.camera_card = BurnerCameraCard(self.camera)
+            column.addWidget(self.camera_card)
         column.addWidget(self._card_logging())
         self._autocalc_card = self._card_autocalc()
         column.addWidget(self._autocalc_card)
@@ -499,6 +545,10 @@ class OperationTab(QWidget):
                        'written only while monitoring is running.'))
 
         self.log_path = QLineEdit(str(DEFAULT_LOG_DIR / 'run.csv'))
+        self.log_path.setMaximumWidth(theme.scale(280))
+        self.log_path.setMinimumWidth(theme.scale(100))
+        self.log_path.setToolTip(self.log_path.text())
+        self.log_path.textChanged.connect(self.log_path.setToolTip)
         # textEdited, not textChanged: the field is also written to from
         # ``_on_logging`` to show the file actually opened, and a LabVIEW run
         # opens a timestamped sibling.  Feeding that back would stamp the
@@ -510,21 +560,36 @@ class OperationTab(QWidget):
         browse.clicked.connect(self._browse_log)
         caption = QLabel('Log file')
         caption.setObjectName('FieldLabel')
-        card.add(row(caption, self.log_path, browse, stretch_at=1))
+        card.add(row(caption, self.log_path, browse, None))
 
-        self.start_log_btn = QPushButton('Start Logging')
-        self.start_log_btn.setProperty('variant', 'accent')
-        self.start_log_btn.clicked.connect(self._start_logging)
-        self.stop_log_btn = QPushButton('Stop Logging')
-        self.stop_log_btn.setEnabled(False)
-        self.stop_log_btn.clicked.connect(lambda: self.session.stop_logging())
+        self.logging_btn = QPushButton('Start Logging')
+        self.logging_btn.setProperty('variant', 'accent')
+        self.logging_btn.clicked.connect(self._toggle_logging)
+        # Compatibility for callers which used the old start-button name.
+        # This is the same widget, not a second visible action.
+        self.start_log_btn = self.logging_btn
         self.log_state = label('OFF', color=theme.TEXT_DIM, size=9,
                                monospace=True)
-        card.add(row(self.start_log_btn, self.stop_log_btn, self.log_state,
-                     None))
+        card.add(row(self.logging_btn, self.log_state, None))
 
-        grid, entries = field_grid([('LabVIEW UDP host', '127.0.0.1'),
-                                    ('LabVIEW UDP port', 61557)], width=96)
+        self.recording_photo_toggle = QCheckBox('Take a burner photo when recording starts')
+        self.recording_photo_toggle.setToolTip(
+            'Take one photo for each manual or LabVIEW-triggered data recording. '
+            'Photos use the output folder in the Camera tab. '
+            'Changes apply to the next recording; camera failures do not stop data logging.')
+        photo = getattr(self.session, 'recording_photo', None)
+        self.recording_photo_toggle.setEnabled(photo is not None)
+        if photo is not None:
+            self.recording_photo_toggle.setChecked(photo.enabled)
+            self.recording_photo_toggle.toggled.connect(photo.set_enabled)
+        card.add(self.recording_photo_toggle)
+
+        udp = self.session._udp
+        self._udp_listening = bool(udp.listening)
+        initial_host = udp.host if udp.listening else '127.0.0.1'
+        initial_port = udp.port if udp.listening else 61557
+        grid, entries = field_grid([('LabVIEW UDP host', initial_host),
+                                    ('LabVIEW UDP port', initial_port)], width=96)
         self.udp_host = entries['LabVIEW UDP host']
         self.udp_port = entries['LabVIEW UDP port']
         card.add_layout(grid)
@@ -567,10 +632,14 @@ class OperationTab(QWidget):
         self.log_path.setText(str(shown))
         self.session.start_logging(actual)
 
+    def _toggle_logging(self):
+        if self._logging_active:
+            self.session.stop_logging()
+        else:
+            self._start_logging()
+
     def _toggle_udp(self):
-        # The button's own text is the state: it is set from ``udp_changed``,
-        # which is the only thing that knows whether the socket really opened.
-        if self.udp_btn.text().startswith('Stop'):
+        if self._udp_listening:
             self.session.stop_udp()
         else:
             self.session.start_udp(self.udp_host.text().strip() or '127.0.0.1',
@@ -692,22 +761,20 @@ class OperationTab(QWidget):
     def _card_sequence(self):
         card = Card(
             'Sequences', index=None,
-            help_text=('Record every commanded setpoint while monitoring, '
-                       'edit the resulting curve, then replay or repeat it. '
-                       'Clicking a saved name loads it into the panel and '
-                       'nothing moves. ▶ loads and runs it once, with no '
-                       'repeats, and only if the rig is already standing at '
-                       'the flows it opens with; otherwise the lines that '
-                       'disagree are shown. ✎ renames the saved file. '
+            help_text=('Record commanded setpoints while monitoring, edit '
+                       'them, then replay or repeat the sequence. Click a '
+                       'saved name to load it without changing flows. '
+                       '▶ loads and runs it once after checking the opening '
+                       'flows. A mismatch requires review. ✎ renames the file. '
                        '✕ deletes it after confirmation.'))
-        self.sequence_btn = QPushButton('▸  Record / Replay Flow Sequence')
+        self.sequence_btn = QPushButton('▸  Record / replay')
         self.sequence_btn.setCheckable(True)
         self.sequence_btn.setProperty('variant', 'quiet')
         self.sequence_btn.toggled.connect(self._toggle_sequence)
         card.add(self.sequence_btn)
 
         card.add(divider())
-        card.add(label('SAVED FLOW SEQUENCES  —  CLICK LOAD,  ▶ RUN,  ✎ RENAME,  ✕ DELETE',
+        card.add(label('Saved sequences · Click a name to load',
                        color=theme.TEXT_DIM, size=7, bold=True))
         self.saved_list = QListWidget()
         self.saved_list.setFixedHeight(theme.scale(104))
@@ -988,10 +1055,9 @@ class OperationTab(QWidget):
         column.setSpacing(theme.CARD_GAP)
 
         self._cards_card = Card(
-            'Live Controller Readings & Manual Control', collapsible=False,
-            help_text=('Review each assigned controller, enter individual '
-                       'setpoints, and configure its remembered full scale and '
-                       'ramp behavior.'))
+            'Controllers', collapsible=False,
+            help_text=('View readings and enter setpoints. Use each controller\'s '
+                       'menu to set its display scale, command limit and ramp rate.'))
         self._cards_view_buttons = {}
         for view, text in (('list', 'List'), ('grid', 'Grid')):
             button = QPushButton(text)
@@ -1004,12 +1070,11 @@ class OperationTab(QWidget):
             button.clicked.connect(
                 lambda _checked=False, selected=view:
                 self._set_cards_view(selected))
-            self._cards_card.add_header_widget(button)
             self._cards_view_buttons[view] = button
         self._sync_cards_view_buttons()
         self._empty_note = label(
-            'No controllers assigned yet — connect and assign them on the '
-            'Connection tab.', color=theme.TEXT_DIM, size=9)
+            'Connect and assign controllers in Connection & Assignment.',
+            color=theme.TEXT_DIM, size=9)
         self._empty_note.setWordWrap(True)
         self._cards_card.add(self._empty_note)
 
@@ -1720,8 +1785,11 @@ class OperationTab(QWidget):
         self.monitor_btn.style().polish(self.monitor_btn)
 
     def _on_logging(self, active, path):
-        self.start_log_btn.setEnabled(not active)
-        self.stop_log_btn.setEnabled(active)
+        self._logging_active = bool(active)
+        self.logging_btn.setText('Stop Logging' if active else 'Start Logging')
+        self.logging_btn.setProperty('variant', 'danger' if active else 'accent')
+        self.logging_btn.style().unpolish(self.logging_btn)
+        self.logging_btn.style().polish(self.logging_btn)
         self.log_state.setText('RECORDING' if active else 'OFF')
         self.log_state.setStyleSheet(
             f'color: {theme.OK if active else theme.TEXT_DIM};'
@@ -1731,6 +1799,10 @@ class OperationTab(QWidget):
         self.log_path.setEnabled(not active)
 
     def _on_udp(self, active, message):
+        self._udp_listening = bool(active)
+        if active:
+            self.udp_host.setText(str(self.session._udp.host))
+            self.udp_port.setText(str(self.session._udp.port))
         self.udp_btn.setText('Stop Listener' if active else 'Start Listener')
         self.udp_state.setText(message)
         self.udp_state.setStyleSheet(

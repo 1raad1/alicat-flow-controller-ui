@@ -1,0 +1,68 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Rssdp</id>
+    <version>2.0.9</version>
+    <title>Rssdp</title>
+    <authors>Troy Willmot</authors>
+    <owners>Yortw</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <licenseUrl>https://github.com/Yortw/RSSDP/blob/master/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/Yortw/RSSDP</projectUrl>
+    <iconUrl>https://raw.githubusercontent.com/Yortw/RSSDP/master/RssdpIcon.png</iconUrl>
+    <description>Really Simple Service Discovery Protocol - a 100% .Net implementation of the SSDP protocol for publishing custom/basic devices, and discovering all device types on a network.</description>
+    <summary>A 100% .Net implementation of the SSDP protocol for basic and custom device types.</summary>
+    <releaseNotes>Fix for .Net 4.5 projects so SsdpDevicePublisher is included.
+Package fix for UWP and WPA8.1 projects so only one (correct) assembly is referenced.
+Previously:
+Xamarin platforms now serviced by .Net Standard library, old Xamarin binaries dropped.
+Reduced dependencies for Xamarin/Net45+ projects.
+Improvements to alive notifications to ensure compatibility with non-conforming devices.
+Added NotificationBroadcastInterval property to publisher to allow for configurable, fixed period, alive notification broadcasts.
+Improved handling of unexpectedly closed sockets.
+Improved logging capability.
+Support for publishing UPnP services (previously only devices supported)</releaseNotes>
+    <copyright>Copyright 2017</copyright>
+    <language>en-AU</language>
+    <tags>portable xamarin ios android windowsphone winrt uwp mobile ssdp discovery device service protocol upnp netfx40 .net4</tags>
+    <dependencies>
+      <group targetFramework=".NETFramework4.0">
+        <dependency id="Microsoft.Net.Http" version="2.2.29" />
+        <dependency id="Microsoft.Bcl.Async" version="1.0.168" />
+        <dependency id="Microsoft.Bcl.Build" version="1.0.21" />
+      </group>
+      <group targetFramework=".NETFramework4.5" />
+      <group targetFramework="WindowsPhone8.0">
+        <dependency id="Microsoft.Net.Http" version="2.2.29" />
+        <dependency id="Microsoft.Bcl.Async" version="1.0.168" />
+        <dependency id="Microsoft.Bcl.Build" version="1.0.21" />
+      </group>
+      <group targetFramework="WindowsPhoneApp8.1">
+        <dependency id="Microsoft.Net.Http" version="2.2.29" />
+        <dependency id="Microsoft.Bcl.Async" version="1.0.168" />
+        <dependency id="Microsoft.Bcl.Build" version="1.0.21" />
+      </group>
+      <group targetFramework=".NETStandard1.3">
+        <dependency id="System.Collections" version="4.0.11" />
+        <dependency id="System.Diagnostics.Debug" version="4.0.11" />
+        <dependency id="System.Diagnostics.Tools" version="4.0.1" />
+        <dependency id="System.IO" version="4.1.0" />
+        <dependency id="System.Linq" version="4.1.0" />
+        <dependency id="System.Net.Http" version="4.1.0" />
+        <dependency id="System.Net.Primitives" version="4.0.11" />
+        <dependency id="System.Net.Sockets" version="4.1.0" />
+        <dependency id="System.Resources.ResourceManager" version="4.0.1" />
+        <dependency id="System.Runtime" version="4.1.0" />
+        <dependency id="System.Runtime.Extensions" version="4.1.0" />
+        <dependency id="System.Runtime.InteropServices.RuntimeInformation" version="4.0.0" />
+        <dependency id="System.Text.Encoding" version="4.0.11" />
+        <dependency id="System.Text.Encoding.Extensions" version="4.0.11" />
+        <dependency id="System.Threading" version="4.0.11" />
+        <dependency id="System.Threading.Tasks" version="4.0.11" />
+        <dependency id="System.Threading.Timer" version="4.0.1" />
+        <dependency id="System.Xml.ReaderWriter" version="4.0.11" />
+      </group>
+      <group targetFramework="UAP10.0" />
+    </dependencies>
+  </metadata>
+</package>

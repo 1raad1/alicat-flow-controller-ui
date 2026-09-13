@@ -1,0 +1,157 @@
+"""Verify and prepare the bundled Windows camera libraries during installation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def runtime_directory() -> Path:
+    return Path(__file__).resolve().parents[1] / 'flow_controller/camera_runtime'
+
+
+def bundled_canon_sdk_directory(runtime: Path) -> Path | None:
+    """Return a validated nested Canon SDK bundle, if one is present."""
+    directory = runtime / 'canon'
+    if not directory.exists() and not directory.is_symlink():
+        return None
+    from flow_controller.infrastructure.canon_sdk import validate_sdk
+    validate_sdk(directory, verify_manifest=True)
+    return directory.resolve()
+
+
+def configured_canon_sdk_directory() -> Path | None:
+    from flow_controller.infrastructure.canon_sdk import installed_sdk_directory
+    return installed_sdk_directory()
+
+
+def probe_bundled_canon_sdk(directory: Path) -> None:
+    from flow_controller.infrastructure.canon_sdk import _run_probe
+    _run_probe(directory)
+
+
+def verified_dlls(runtime: Path) -> list[Path]:
+    """Check the complete DLL set before removing downloaded-file markers."""
+    runtime = runtime.resolve()
+    manifest = json.loads((runtime / 'runtime-lock.json').read_text(encoding='utf-8'))
+    verified = []
+    for name, entry in manifest['runtime'].items():
+        if not name.lower().endswith('.dll'):
+            continue
+        path = (runtime / name).resolve()
+        if not path.is_relative_to(runtime):
+            raise RuntimeError(f'Invalid camera library path: {name}')
+        if not path.is_file():
+            raise RuntimeError(f'Missing camera library: {name}. Extract the complete application ZIP again.')
+        if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
+            raise RuntimeError(f'Camera library failed verification: {name}. Extract a fresh application ZIP.')
+        verified.append(path)
+    if not any(path.name == 'CameraControl.Devices.dll' for path in verified):
+        raise RuntimeError('The runtime manifest does not include CameraControl.Devices.dll.')
+    actual = {path.resolve() for path in runtime.rglob('*')
+              if path.is_file() and path.suffix.lower() == '.dll'}
+    if actual != set(verified):
+        raise RuntimeError('Unlisted camera DLLs found. Use the complete bundled runtime or rebuild its manifest.')
+    return verified
+
+
+def unblock_dlls(paths: list[Path]) -> None:
+    environment = dict(os.environ)
+    environment['FLOW_CAMERA_SETUP_FILES'] = json.dumps([str(path) for path in paths])
+    subprocess.run([
+        'powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+        "$ErrorActionPreference = 'Stop'; "
+        '$env:FLOW_CAMERA_SETUP_FILES | ConvertFrom-Json | '
+        'ForEach-Object { Unblock-File -LiteralPath $_ -ErrorAction Stop }',
+    ], env=environment, check=True)
+
+
+def check_framework() -> None:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full',
+                            0, winreg.KEY_READ | winreg.KEY_WOW64_32KEY) as key:
+            release = winreg.QueryValueEx(key, 'Release')[0]
+        if release >= 528040:
+            return
+    except OSError:
+        pass
+    raise RuntimeError('Install Microsoft .NET Framework 4.8 or newer, then rerun install.bat. '
+                       'Download: https://dotnet.microsoft.com/download/dotnet-framework/net48')
+
+
+def check_library_load(runtime: Path) -> None:
+    # Import types only: setup does not construct a manager or open a camera.
+    import pythonnet
+    pythonnet.load('netfx')
+    import clr
+    sys.path.insert(0, str(runtime))
+    clr.AddReference(str(runtime / 'CameraControl.Devices.dll'))
+    windows_base = (Path(os.environ.get('WINDIR', r'C:\Windows')) /
+                    'Microsoft.NET/Framework64/v4.0.30319/WPF/WindowsBase.dll')
+    clr.AddReference(str(windows_base))
+    from CameraControl.Devices import CameraDeviceManager
+    from CameraControl.Devices.Classes import CapabilityEnum
+    from System.Windows.Threading import Dispatcher
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Prepare the bundled camera runtime')
+    parser.add_argument('--canon-ready', action='store_true',
+                        help='report whether valid Canon support is already available')
+    args = parser.parse_args([] if argv is None else argv)
+    runtime = runtime_directory()
+    root = runtime.parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    if args.canon_ready:
+        try:
+            canon = bundled_canon_sdk_directory(runtime)
+            if canon is None:
+                canon = configured_canon_sdk_directory()
+            if canon is None:
+                print('Canon SDK is not configured.')
+                return 2
+            print(f'Canon SDK ready: {canon}')
+            return 0
+        except Exception as exc:
+            print(f'Canon SDK validation failed: {exc}', file=sys.stderr)
+            return 1
+
+    try:
+        if sys.platform != 'win32' or sys.maxsize <= 2**32:
+            raise RuntimeError('Camera setup requires 64-bit Windows and 64-bit Python.')
+        check_framework()
+        libraries = verified_dlls(runtime)
+        unblock_dlls(libraries)
+        check_library_load(runtime)
+        print(f'Camera setup passed: verified, unblocked and loaded {len(libraries)} bundled DLLs.')
+        canon = bundled_canon_sdk_directory(runtime)
+        if canon is not None:
+            probe_bundled_canon_sdk(canon)
+            print(f'Bundled Canon SDK ready: {canon}')
+        else:
+            try:
+                canon = configured_canon_sdk_directory()
+            except Exception as exc:
+                print(f'Existing Canon SDK needs repair: {exc}. Run setup_canon.bat.')
+            else:
+                if canon:
+                    print(f'Canon SDK configured: {canon}')
+                else:
+                    print('For Canon, choose Canon setup next or run setup_canon.bat with your official SDK ZIP.')
+        return 0
+    except Exception as exc:
+        print(f'Camera setup failed: {exc}', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

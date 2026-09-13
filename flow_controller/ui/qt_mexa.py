@@ -96,9 +96,8 @@ class MexaTab(QWidget):
         host_layout.addLayout(host_form)
         host_actions = QHBoxLayout()
         self.start_host = QPushButton("Start temporary relay")
-        self.stop_host = QPushButton("Stop temporary relay")
+        self.stop_host = self.start_host
         host_actions.addWidget(self.start_host)
-        host_actions.addWidget(self.stop_host)
         host_layout.addLayout(host_actions)
         self.host_status = note("")
         host_layout.addWidget(self.host_status)
@@ -107,8 +106,7 @@ class MexaTab(QWidget):
                                    "Copy keys only into the bridge, not logs or screenshots."))
         card.add(self.host_panel)
         self.host_consent.toggled.connect(self.refresh)
-        self.start_host.clicked.connect(self._start_host)
-        self.stop_host.clicked.connect(controller.stop_temporary_host)
+        self.start_host.clicked.connect(self._toggle_host)
         self.helper_browse.clicked.connect(self._helper_folder)
         self.copy_url.clicked.connect(lambda: QApplication.clipboard().setText(self.public_url.text()))
         self.copy_publisher.clicked.connect(lambda: QApplication.clipboard().setText(self.publisher_key.text()))
@@ -176,6 +174,12 @@ class MexaTab(QWidget):
         except (ValueError, OSError) as exc:
             self.status.setText(str(exc))
 
+    def _toggle_host(self):
+        if self.controller.temporary_host is not None:
+            self.controller.stop_temporary_host()
+        else:
+            self._start_host()
+
     def _start_host(self):
         if not self.host_consent.isChecked():
             self.host_status.setText("Confirm that publishing through Wormhole is permitted before starting.")
@@ -216,8 +220,10 @@ class MexaTab(QWidget):
             widget.setEnabled(not connected and not host_mode)
             self.connection_form.setRowVisible(widget, not host_mode)
         self.host_panel.setVisible(host_mode)
-        self.start_host.setEnabled(host_mode and not connected and not hosting and self.host_consent.isChecked())
-        self.stop_host.setEnabled(hosting and c.host_status.state != "stopping")
+        self.start_host.setText("Stop temporary relay" if hosting else "Start temporary relay")
+        self.start_host.setEnabled(
+            (c.host_status.state != "stopping") if hosting else
+            (host_mode and not connected and self.host_consent.isChecked()))
         for widget in (self.host_consent, self.helper_path, self.helper_browse):
             widget.setEnabled(not hosting and not connected)
         self.host_consent.setText("Allow temporary publishing through Wormhole")

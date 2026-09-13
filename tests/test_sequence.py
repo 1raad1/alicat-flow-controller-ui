@@ -514,6 +514,35 @@ class RepeatTests(unittest.TestCase):
         player.tick(5.0, 0.1)
         self.assertAlmostEqual(self.sent[-1], 9.0)
 
+    def test_return_completes_before_linear_or_smooth_opening_segment(self):
+        for interpolation in (LINEAR, SMOOTH):
+            with self.subTest(interpolation=interpolation):
+                sequence = Sequence(tracks=[
+                    track(frames=[(0.0, 1.0, interpolation), (5.0, 9.0, HOLD)]),
+                    track(key='h2_rich', frames=[
+                        (0.0, 2.0, interpolation), (5.0, 6.0, HOLD)])])
+                sent = []
+                player = SequencePlayer(
+                    sequence, {'nh3_rich': 'A', 'h2_rich': 'B'},
+                    lambda unit, value: sent.append((unit, value)),
+                    repeats=2, rate_limited={'nh3_rich'}, min_ramp_s=1.0)
+                player.prime()
+                self.assertTrue(player.tick(5.0, 10.0))
+                player.next_cycle()
+                for index in range(1, 20):
+                    player.tick(index * .1, .1)
+                    self.assertEqual(player.position, 0.0)
+                    self.assertEqual(player.commanded['h2_rich'], 2.0)
+                    if not player.returning:
+                        break
+                self.assertFalse(player.returning)
+                self.assertEqual(player.commanded['nh3_rich'], 1.0)
+                self.assertIn(('A', 1.0), sent)
+                player.tick(.1, .1)
+                self.assertAlmostEqual(player.position, .1)
+                self.assertAlmostEqual(
+                    player.commanded['nh3_rich'], sequence.tracks[0].value_at(.1))
+
 
 class RampRateTests(unittest.TestCase):
     """A slew limit per controller, on top of the lines that always have one."""

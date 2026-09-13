@@ -206,7 +206,7 @@ QWidget {{
 QMainWindow, QDialog {{ background-color: {BG}; }}
 
 /* ---- Title bar ---------------------------------------------------- */
-#TitleName {{ color: {TEXT_BRIGHT}; font-size: {pt(13)}pt; }}
+#TitleName {{ color: {TEXT_BRIGHT}; font-size: {pt(10)}pt; }}
 #TitleSub  {{ color: {TEXT_DIM};    font-size: {pt(9)}pt; }}
 
 /* The run states that outlive a single screen -- poll rate, log file, LabVIEW
@@ -593,6 +593,14 @@ QPushButton[density="compact"] {{ padding: 7px 8px; }}
                           color: {TEXT_DIM}; }}
 
 /* ---- Splitter, scroll --------------------------------------------- */
+#PanelToggle {{ color: {TEXT_MUTED}; }}
+#PanelToggle:checked {{
+    color: {TEXT_BRIGHT};
+    background-color: {rgba(tint(ACCENT, 28))};
+    border-color: {rgba(tint(ACCENT, 120))};
+}}
+#PanelToggle:focus {{ border-color: {ACCENT}; }}
+
 QSplitter::handle {{ background-color: rgba(255, 255, 255, 14);
                      margin: 12px 0; border-radius: 2px; }}
 QSplitter::handle:horizontal {{ width: 4px; }}

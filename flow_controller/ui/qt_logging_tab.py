@@ -1,39 +1,26 @@
-"""The Logging & Graphs tab: what the run looked like, after the fact and live.
+"""Select, plot and export retained acquisition history.
 
-Controls on the left, plots on the right.  The split is the same one the
-operation screen makes -- things you set once beside things that change ten
-times a second -- but here it also carries a performance rule.
-
-**Nothing is plotted until it is asked for.**  The history is collected
-regardless, because a trace you only thought to look at after the interesting
-minute is worthless if it starts when you tick the box.  Rendering, though,
-runs only while this tab is on screen *and* at least one series is selected:
-:class:`QtGraphPanel` starts its timer on ``showEvent`` and stops it on
-``hideEvent``, so an operator who never opens this tab pays nothing for it,
-and one who opens it and selects nothing pays nothing either.  That is the
-whole reason the graphs were moved off the main screen.
-
-CSV logging is not here.  It is on Operation & Monitoring, next to the
-monitor button that governs it, because starting a log and starting a run are
-one decision.  The export on this tab is a different thing: a dump of the
-plotted history for someone doing arithmetic afterwards.
+Acquisition continues while the tab is hidden. Graphs render only when visible
+and selected. Exports include every retained series and run on a session-owned
+worker, which survives replacement of the widgets during a theme change.
 """
 
 from __future__ import annotations
 
-import csv
 from datetime import datetime
+from importlib.util import find_spec
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QLineEdit,
-                               QPushButton, QScrollArea, QSplitter,
+from PySide6.QtWidgets import (QCheckBox, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit,
+                               QPushButton, QScrollArea,
                                QVBoxLayout, QWidget)
 
 from ..domain.graphing import parse_axis_limits
 from ..core.session import DEFAULT_LOG_DIR
 from . import qt_theme as theme
 from .qt_graph_panel import GRAPH_METRICS, QtGraphPanel
+from .qt_motion_panels import MotionSplitter
 from .qt_widgets import Card, divider, label, row
 
 #: ``(key, caption, default minimum, default maximum)`` for every axis the
@@ -59,9 +46,7 @@ METRIC_KEYS = tuple(GRAPH_METRICS)
 
 
 def _wrapped(text, **kwargs):
-    """A label that wraps.  ``label`` builds one line; the notes here are
-    sentences, and a sentence clipped at the card edge is a sentence the
-    operator has to guess the end of."""
+    """Build a label that wraps within the control column."""
     widget = label(text, **kwargs)
     widget.setWordWrap(True)
     return widget
@@ -77,14 +62,7 @@ def _lighten(color, amount):
 
 
 def trace_colors(units, selection):
-    """One colour per unit, keyed by gas but never repeated.
-
-    Everywhere else on this screen a gas has a colour, and a graph that broke
-    that rule would make the operator learn a second colour language.  But two
-    traces the same colour is worse than either: a plot exists to be told
-    apart.  So the gas colour is kept and each repeat of a gas is lightened,
-    which reads as "another NH3 line" rather than as a new substance.
-    """
+    """Use the gas colour, lightening subsequent units of the same gas."""
     seen = {}
     colors = {}
     for unit in units:
@@ -97,15 +75,7 @@ def trace_colors(units, selection):
 
 
 class _HistoryView:
-    """Presents :class:`FlowSession`'s history the way the panel reads it.
-
-    The panel was written against a duck-typed history so the benchmark could
-    drive it with synthetic data, and keeping that seam is worth a small
-    adapter: it is the reason ``bench_render_cpu.py`` measures this exact
-    widget rather than a lookalike.  ``values`` hands back the stored deque
-    rather than a copy -- the panel converts to an array and tail-aligns as it
-    goes, which is precisely what the deque is already shaped for.
-    """
+    """Adapt session history to the renderer without copying its deques."""
 
     def __init__(self, session):
         self._session = session
@@ -114,6 +84,10 @@ class _HistoryView:
     @property
     def times(self):
         return self._session.history.times()
+
+    @property
+    def revision(self):
+        return self._session.history.revision
 
     def values(self, unit, metric):
         return self._session.history.raw(unit, metric)
@@ -156,18 +130,50 @@ class LoggingTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self._split = QSplitter(Qt.Orientation.Horizontal)
-        self._split.setHandleWidth(4)
+        self._split = MotionSplitter(Qt.Orientation.Horizontal)
         self._split.addWidget(self._build_controls())
         self._split.addWidget(self._build_plots())
+        self._split.configure_panel(0, 'Plot controls')
         self._split.setStretchFactor(0, 0)
         self._split.setStretchFactor(1, 1)
-        self._split.setSizes([430, 1130])
+        self._split.set_default_sizes([430, 1130])
+        panel_bar = QWidget()
+        self.panel_bar = panel_bar
+        panel_layout = QHBoxLayout(panel_bar)
+        panel_layout.setContentsMargins(theme.PAD_LG, theme.PAD_XS,
+                                        theme.PAD_LG, theme.PAD_XS)
+        self.controls_panel_btn = QPushButton('Plot controls')
+        self.controls_panel_btn.setObjectName('PanelToggle')
+        self.controls_panel_btn.setCheckable(True)
+        self.controls_panel_btn.setChecked(True)
+        self.controls_panel_btn.setProperty('density', 'compact')
+        self.controls_panel_btn.setToolTip('Fold the controls to give the plots more space')
+        self.controls_panel_btn.toggled.connect(
+            lambda shown: self._split.set_panel_collapsed(0, not shown))
+        self._split.panelCollapsedChanged.connect(self._controls_collapsed)
+        panel_layout.addWidget(self.controls_panel_btn)
+        reset = QPushButton('Reset layout')
+        reset.setProperty('density', 'compact')
+        reset.clicked.connect(lambda: self._split.reset_layout())
+        panel_layout.addWidget(reset)
+        panel_layout.addStretch(1)
+        outer.addWidget(panel_bar)
         outer.addWidget(self._split, 1)
 
         session.assignments_changed.connect(lambda _map: self._refresh_units())
         session.monitoring_changed.connect(lambda _on: self._update_status())
+        session.history_export.active_changed.connect(self._export_active_changed)
+        session.history_export.completed.connect(self._export_finished)
+        session.history_export.failed.connect(self._export_failed)
+        session.history_export.cancelled.connect(self._export_cancelled)
+        self._export_active_changed(session.history_export.active)
         self._refresh_units()
+
+    def _controls_collapsed(self, index, collapsed):
+        if index == 0:
+            self.controls_panel_btn.blockSignals(True)
+            self.controls_panel_btn.setChecked(not collapsed)
+            self.controls_panel_btn.blockSignals(False)
 
     # ------------------------------------------------------------------ #
     #  Left column                                                        #
@@ -434,13 +440,17 @@ class LoggingTab(QWidget):
         card.add_spacing(theme.PAD_SM)
 
         export = QPushButton('Export Data…')
+        self._export_button = export
         export.setProperty('density', 'compact')
         export.clicked.connect(lambda: self._export())
+        self._cancel_export_button = QPushButton('Cancel export')
+        self._cancel_export_button.setProperty('variant', 'quiet')
+        self._cancel_export_button.clicked.connect(self._cancel_export)
         clear = QPushButton('Clear History')
         clear.setProperty('variant', 'quiet')
         clear.setProperty('density', 'compact')
         clear.clicked.connect(lambda: self._clear())
-        card.add(row(export, clear, None))
+        card.add(row(export, self._cancel_export_button, clear, None))
         return card
 
     def _apply_limit(self):
@@ -460,53 +470,55 @@ class LoggingTab(QWidget):
         self.status.emit('Graph history cleared.')
 
     def _export(self):
-        header, rows = self.session.history.export_rows()
-        if not rows:
-            self.status.emit('Nothing to export yet — no samples collected.')
+        if self.session.history_export.active:
+            return
+        if not self.session.history.times():
+            self.status.emit('Nothing to export yet. No samples collected.')
             return
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         suggested = DEFAULT_LOG_DIR / f'alicat_export_{stamp}.csv'
         filters = 'CSV (*.csv)'
-        if _openpyxl() is not None:
+        if find_spec('openpyxl') is not None:
             filters += ';;Excel workbook (*.xlsx)'
-        path, _chosen = QFileDialog.getSaveFileName(
+        path, chosen = QFileDialog.getSaveFileName(
             self, 'Export graph history', str(suggested), filters)
         if not path:
             return
         path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix('.xlsx' if '*.xlsx' in chosen else '.csv')
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.suffix.lower() == '.xlsx':
-                self._write_xlsx(path, header, rows)
-            else:
-                self._write_csv(path, header, rows)
-        except Exception as exc:                      # noqa: BLE001
-            # An export is a convenience; it must not take the screen down
-            # with it while a rig is running.
+            snapshot = self.session.history.export_snapshot()
+            if not snapshot.times:
+                self.status.emit('Nothing to export. History was cleared.')
+                return
+            started = self.session.history_export.start(snapshot, path)
+        except Exception as exc:
             self.status.emit(f'Export failed: {exc}')
             return
-        self.status.emit(f'Exported {len(rows)} samples to {path}')
+        if started:
+            self.status.emit(f'Exporting {len(snapshot.times)} samples to {path}…')
 
-    @staticmethod
-    def _write_csv(path, header, rows):
-        with open(path, 'w', newline='', encoding='utf-8') as handle:
-            writer = csv.writer(handle)
-            writer.writerow(header)
-            for line in rows:
-                # A failed read stays an empty cell, exactly as it does in the
-                # CSV log.  Writing a zero there would invent a measurement.
-                writer.writerow(['' if value is None else value
-                                 for value in line])
+    def _export_active_changed(self, active):
+        self._export_button.setEnabled(not active)
+        self._export_button.setText('Exporting…' if active else 'Export Data…')
+        self._cancel_export_button.setVisible(active)
+        self._cancel_export_button.setEnabled(active)
+        self._cancel_export_button.setText('Cancel export')
 
-    @staticmethod
-    def _write_xlsx(path, header, rows):
-        workbook = _openpyxl().Workbook()
-        sheet = workbook.active
-        sheet.title = 'Live Data'
-        sheet.append(header)
-        for line in rows:
-            sheet.append(line)
-        workbook.save(path)
+    def _cancel_export(self):
+        if self.session.history_export.cancel():
+            self._cancel_export_button.setEnabled(False)
+            self._cancel_export_button.setText('Cancelling…')
+
+    def _export_finished(self, path, count):
+        self.status.emit(f'Exported {count} samples to {path}')
+
+    def _export_failed(self, message):
+        self.status.emit(f'Export failed: {message}')
+
+    def _export_cancelled(self):
+        self.status.emit('History export cancelled.')
 
     # ------------------------------------------------------------------ #
     #  Right column                                                       #
@@ -566,17 +578,3 @@ class LoggingTab(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._update_status()
-
-
-def _openpyxl():
-    """The Excel writer, or ``None`` where it is not installed.
-
-    Resolved at the moment of export rather than at import, so the file-type
-    menu offers only formats that can actually be written -- an operator
-    should not be able to pick .xlsx and then be told it failed.
-    """
-    try:
-        import openpyxl
-    except ImportError:
-        return None
-    return openpyxl
