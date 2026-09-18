@@ -1005,9 +1005,6 @@ class DccEngine:
                 continue
             key = self._camera_id(device) or str(id(device))
             active.add(key)
-            if not bool(_value(device, "PreventShutDown", default=True)):
-                self._keep_alive_state.pop(key, None)
-                continue
             if bool(_value(device, "IsBusy", default=False)):
                 continue
             due, last_attempt, last_error = self._keep_alive_state.get(
@@ -1016,6 +1013,12 @@ class DccEngine:
             if now - last_attempt < 1.0 or (now < due and not requested):
                 continue
             try:
+                # Keep-awake is the application's connection policy. A driver
+                # reset must not silently disable it for the rest of a session.
+                if not bool(_value(device, "PreventShutDown", default=True)):
+                    device.PreventShutDown = True
+                    if not bool(device.PreventShutDown):
+                        raise RuntimeError("The camera driver did not enable shutdown prevention")
                 keep_alive()
             except Exception as exc:
                 message = f"Could not keep {self._camera_name(device, key)} awake: {exc}"

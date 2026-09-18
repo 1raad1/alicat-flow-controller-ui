@@ -335,6 +335,25 @@ class CameraTests(unittest.TestCase):
         self.assertNotIn('live_stop', self.engine.timeline)
         self.assertNotIn('live_start', self.engine.timeline)
 
+    def test_output_error_does_not_starve_connected_camera_pump(self):
+        self.engine.fail_action = 'set_output'
+        self.connect()
+        self.assertTrue(self.wait_for(lambda: self.engine.pumps >= 4))
+        self.assertTrue(self.camera._thread.is_alive())
+        self.assertFalse(self.engine.closed)
+        self.assertTrue(any(name == 'set_output' for name, _ in self.engine.calls))
+
+    def test_keepalive_warning_does_not_cancel_capture_sequence(self):
+        self.engine.defer_capture = True
+        self.connect()
+        self.camera.action('timelapse_start', count=2, interval=.5)
+        self.assertTrue(self.wait_for(lambda: self.engine.state['busy']))
+        self.engine.events.append({
+            'type': 'keepalive_error', 'message': 'Could not keep camera awake'})
+        self.assertTrue(self.wait_for(lambda: bool(self.errors)))
+        self.assertEqual(self.camera.state['workflow'], 'timelapse')
+        self.assertTrue(self.engine.state['busy'])
+
     def test_preserved_live_view_workflow_propagates_autofocus_without_toggle(self):
         self.engine.state['capture_preserves_live_view'] = True
         self.connect()

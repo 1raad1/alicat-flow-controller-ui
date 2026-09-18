@@ -347,12 +347,14 @@ def _camera_worker(control, factory):
                     break
             if engine is not None:
                 try:
+                    # Keep camera timers serviced even if the output folder
+                    # remains unavailable and its setup fails on every retry.
+                    engine.pump()
                     # Physical shutter presses also produce transfer events, so
                     # apply the destination before draining those events.
                     if last_output != control.output:
                         engine.execute('set_output', {'path': control.output})
                         last_output = control.output
-                    engine.pump()
                     capture_changed = False
                     for event in engine.poll_events():
                         if event['type'] == 'captured':
@@ -365,6 +367,8 @@ def _camera_worker(control, factory):
                             capture_changed = True
                             if workflow and workflow.get('waiting'):
                                 workflow['received'] = True
+                        elif event['type'] == 'keepalive_error':
+                            control.emit('error', event['message'])
                         elif event['type'] == 'error':
                             control.emit('error', event['message'])
                             capture_changed = True
