@@ -1,7 +1,8 @@
 # Alicat Flow Controller
 
-Control, monitor, sequence, and log addressed Alicat mass flow controllers on a
-shared serial bus from a Windows desktop.
+Control Alicat mass flow controllers from a Windows desktop. Set flows,
+monitor live readings, replay sequences, and record experiment data over a
+shared serial bus.
 
 The application supports general multi-channel control and an
 ammonia/hydrogen rich-quench-lean (RQL) burner rig. Use **Standard** mode for
@@ -19,19 +20,15 @@ The desktop interface is built with PySide6 and Qt.
 
 ## Recent updates
 
-- Application tabs are centred in the title bar. Layout controls and the
-  Standard/Staged selector sit below them, with run status in the footer.
-- The DSLR card at the top left of Operation & Monitoring provides live view,
-  capture, video recording, and a pop-out preview. Camera, logging, and temporary
-  MEXA relay controls switch between Start and Stop as their state changes.
-- **Take a burner photo when recording starts** optionally captures a photo for
-  each manual or LabVIEW-triggered data log. Camera failures leave logging running.
-- The LabVIEW listener starts automatically on `127.0.0.1:61557`. Stopping it
-  manually keeps it stopped across appearance changes.
-- Retained-history CSV and Excel exports run in the background and can be
-  cancelled without replacing an existing destination file.
-- Windows setup includes the camera engine and 64-bit Canon runtime. Canon
-  capture handling verifies storage settings and keeps idle cameras awake.
+| Update | What it means for you |
+| --- | --- |
+| Desktop layout | Tabs sit in the title bar, layout controls below, and run status at the bottom. |
+| DSLR controls | Use live view, capture, video, and a pop-out preview from the Operation tab. |
+| Photos with logs | Optionally take a burner photo when a manual or LabVIEW recording starts. |
+| Start/Stop buttons | Camera, logging, and temporary MEXA relay buttons show the action available next. |
+| LabVIEW listener | Starts automatically on `127.0.0.1:61557`; stays stopped if you turn it off. |
+| History export | Save CSV or Excel in the background, with cancellation support. |
+| Canon setup | Windows setup includes the camera runtime, improved capture handling, and idle keep-awake. |
 
 ## Start here
 
@@ -51,6 +48,93 @@ The desktop interface is built with PySide6 and Qt.
 | Check the RQL equations and constants | [Combustion calculations](#combustion-calculations) |
 | Work on the code | [Development](#development) |
 | Fix an installation or connection problem | [Troubleshooting](#troubleshooting) |
+
+## Quick start
+
+### Install and run on Windows
+
+1. Extract the complete application ZIP.
+2. Double-click `install.bat` to install dependencies. Run it again after an upgrade.
+3. Double-click `run.bat` to start the application.
+
+The installer puts the virtual environment in
+`%USERPROFILE%\.flow-controller-v3\venv`. This keeps PySide6's deeply nested
+files out of OneDrive and avoids common Windows path-length failures.
+
+Setup installs Python.NET in that environment, verifies the bundled camera
+DLLs, removes their Windows downloaded-file blocks, and checks that the camera
+library loads. No edits to `run.bat` are needed. Camera setup requires .NET
+Framework 4.8 or newer; setup reports a missing framework or failed library
+check before declaring installation complete. The GitHub download includes the
+64-bit Canon SDK, so Canon support needs no separate SDK download or import.
+See [Camera setup](docs/CAMERA.md).
+
+To run from PowerShell instead:
+
+```powershell
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" run.py
+```
+
+`python -m flow_controller` is equivalent.
+
+### Requirements
+
+- Windows 10 or 11
+- 64-bit Python 3.11 or newer
+- A USB-to-serial adapter that matches the rig's electrical interface. RS-232
+  and RS-485 are not interchangeable.
+- Alicat controllers with unique single-letter addresses
+
+### Manual installation
+
+The pinned `requirements.txt` installs the application plus Excel-export
+support:
+
+```powershell
+python -m venv "$env:USERPROFILE\.flow-controller-v3\venv"
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install --upgrade pip
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements.txt
+```
+
+For development or a minimal install, use the package metadata:
+
+```powershell
+python -m pip install -e .
+```
+
+Add `.[xlsx]` for Excel export.
+
+LabVIEW TDMS import requires optional `npTDMS` support. Install it into the
+environment that runs the flow app:
+
+```powershell
+& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements-pressure.txt
+```
+
+For a package installation, use `python -m pip install -e ".[pressure]"` with
+that environment's Python. NO-only campaigns do not require this dependency.
+
+## First connection
+
+The normal setup order is:
+
+1. Open **Connection & Assignment**.
+2. Select the COM port and baud rate.
+3. Click **Scan A-Z** to probe Alicat addresses `A` through `Z`.
+4. Assign a gas and zone to each controller you intend to use.
+5. Select those controllers and click **Connect Selected**.
+6. Click **Start Live Monitor** and confirm that the readings are plausible.
+7. Open **Operation & Monitoring** to enter setpoints, start logging, or run a
+   saved sequence.
+
+The application defaults to **57,600 baud**. It does not reconfigure the
+instruments: every device on the selected bus must already use the chosen baud
+rate. Alicat's common factory default is 19,200, so verify the device settings
+before assuming a scan failure is a wiring problem.
+
+During discovery the application reads each controller's supported-gas table.
+The assignment list therefore reflects what that device actually reports,
+rather than a hard-coded gas list.
 
 ## Operating modes
 
@@ -88,8 +172,7 @@ Staged mode groups controllers by stage:
 | Pilot | NH3, H2, or CH4 (one pilot line) |
 
 CH4 assigned directly to Stage 1 or Stage 2 is included in that stage's live
-combustion estimate. The selected pilot fuel is also included in Stage 1. Automatic RQL
-target calculation still uses its established seven required lines:
+combustion estimate. The selected pilot fuel is also included in Stage 1.
 
 Auto-calculation is enabled for either of these assignments:
 
@@ -114,6 +197,8 @@ negative flow.
 | **MEXA analyser** | Connect the analyser stream through Direct LAN or Wormhole and configure received-data logging. |
 | **Camera** | Discover USB cameras, choose the photo folder, control live view and capture, and run timelapse or bracketing. |
 
+### Monitoring and graphs
+
 You can reassign zones after connection unless a CSV log is open. Log columns
 are fixed when recording starts.
 
@@ -124,6 +209,8 @@ Axis limits can be automatic or fixed. Automatic axes use hysteresis so a
 rising trace does not continually rescale beneath the operator. The default
 history limit is 3,600 samples.
 
+### Layout and panels
+
 The application tabs sit in the centre of the title bar. Layout controls for
 the active tab sit on the left of the row beneath it, with safety actions on
 the right. Run status appears along the bottom of the window.
@@ -133,16 +220,20 @@ reopen those panels. **Plot controls** on Logging & Graphs makes more room for
 the plots. Reopening a panel restores its width or height and keeps its inputs.
 Folding a panel does not stop acquisition or a running sequence.
 
-Logging uses one button that changes between **Start Logging** and **Stop Logging**.
-Camera live view, video, bulb exposures, capture workflows, and the temporary
-MEXA relay also use Start/Stop toggles. Camera actions depend on the connected
-device's capabilities. The video button tracks commands accepted from this app;
-it does not reflect recording started or stopped on the camera body.
-
 Drag a divider to resize the panels, or double-click it to reset the split.
 With a divider focused, arrow keys resize by 10 pixels (50 with Shift), and
 Enter folds or reopens its panel. **Reset layout** restores the default columns;
 on Operation it also folds the sequence panel.
+
+### Start/Stop controls
+
+Logging uses one button that changes between **Start Logging** and **Stop Logging**.
+Camera live view, video, bulb exposures, capture workflows, and the temporary
+MEXA relay work the same way.
+
+Available camera actions depend on the connected device. The video button
+tracks commands accepted from this app; it does not reflect recording started
+or stopped on the camera body.
 
 ## Controls and safety behavior
 
@@ -243,14 +334,27 @@ During replay:
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
 
+### Sequencing in operation
+
+The following 90-second excerpt shows a recorded sequence being replayed while
+the controller interface and burner response are monitored. The demonstration
+is shown at 2x speed.
+
+https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
+
+
 ## Bayesian optimiser
 
-New experiments can **Minimise NO** or **Map NO + pressure**. New mapping
-campaigns learn separate responses for corrected NO and the dominant spectral
-amplitude from each of two pressure transducers. Suggestions reduce uncertainty
-across all three maps. **Operating-space maps** shows two-variable slices and
-their uncertainty. Existing one-transducer campaigns retain their saved pressure
-response and continue to open.
+Choose the experiment's objective when you create it:
+
+| Objective | What the optimiser learns |
+| --- | --- |
+| **Minimise NO** | Conditions that reduce oxygen-corrected dry NO. |
+| **Map NO + pressure** | Separate maps of corrected NO and dominant spectral amplitude for two pressure transducers. Suggestions reduce uncertainty across all three maps. |
+
+**Operating-space maps** shows two-variable slices and their uncertainty.
+Existing one-transducer campaigns retain their saved pressure response and
+continue to open.
 
 Choose the LabVIEW TDMS folder and both converted pressure channels in the flow app,
 then arm the current trial and use LabVIEW's existing `log`/`stop` triggers.
@@ -262,76 +366,111 @@ changes or JSON messages are required. See the
 recording settings and file selection. Existing campaigns still open in
 NO minimisation mode. The analyser input remains NO, not total NOx.
 
-The optimiser runs locally without an API key or internet connection. The
-desktop app does not launch the retired agent terminal or its IPC gateway. For
+The optimiser runs locally without an API key or internet connection. For
 the algorithms, equations, file format and code map, see the
 [Bayesian optimiser technical manual](docs/BAYESIAN_OPTIMISER_MANUAL.md).
 
 ### Create and run an experiment
 
-1. Expand **Bayesian optimiser** and choose **New experiment**. Select
-   **Minimise NO** or **Map NO + pressure**. For mapping, set the NO mapping
-   weight. The two pressure maps use the peak in-band Welch spectral amplitude.
-   Enter the nominal
-   NH3/H2 thermal input, stage-1 fuel split, and permitted bounds for H2 volume
-   percentage, stage-1 phi and overall phi. Optionally select thermal input or
-   stage-1 fuel split to add them as fourth and fifth search variables, then enter
-   their bounds. Unselected values remain fixed. Bounds are intentionally blank.
-   This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
-   present. Every assigned pilot fuel line must be off during measurements.
-2. Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
-   initial-design size (default 4, 5 or 6 completed tests for 3, 4 or 5 variables),
-   candidate-pool size and minimum averaging window (default 30 seconds).
-   **Use current O₂**, beside the
-   reference field, copies one fresh, validated, uncorrected dry MEXA reading;
-   receiver logging must be enabled. You can edit it before saving. It does not
-   follow later readings or change burner flows. The initial design must contain
-   at least one more completed test than the number of variables. Save a new
-   `.fcbo.json` experiment. These settings are fixed for the campaign; use a new
-   file to change them.
-3. Click **Suggest next test**, then **Load target fields**. This fills the
-   existing flow fields, including zero for the pilot and unused lines. It
-   sends no commands. Review every field and the transition procedure before
-   applying through the usual controls. Existing MAX FLOW limits and ramps
-   still apply. Do not assume that safe endpoints imply a safe transition.
-4. For mapping, open **TDMS source…** in **Current test**. Choose the LabVIEW
-   recording folder, inspect a sample TDMS file and select a distinct waveform for
-   **Pressure transducer 1** and **Pressure transducer 2**. The display labels are
-   editable, while the saved IDs remain `pressure_1` and `pressure_2`. Declare the
-   units or Pa-per-stored-unit scale, offset, calibration identifier and optional
-   clipping bounds independently for each channel; a group named `converted` does
-   not establish the units. Set the shared minimum pressure recording duration and
-   spectral settings. Follow the
-   [TDMS setup guide](docs/LABVIEW_PRESSURE_MAPPING.md#configure-the-tdms-source)
-   for timing and calibration checks. TDMS reading needs the optional dependency
-   described under [Manual installation](#manual-installation).
-5. After switching the pilot off and allowing the burner and flows to settle,
-   check both confirmations. Allow the analyser to settle or select an appropriate
-   calibrated response delay. For live measurements, connect
-   the bridge in the **MEXA analyser** tab with **Save received MEXA logs on
-   this PC** enabled, then select **Capture NO/O2 automatically from the MEXA
-   network link**. With live capture off, average the analyser's uncorrected dry
-   NO and O2 manually over the saved measurement window.
-6. For **Minimise NO**, click **Start window**, then **Finish window** once the
-   required flow and, for live capture, analyser samples cover the minimum duration.
-   For **Map NO + pressure**, set **LabVIEW UDP host** to `127.0.0.1` and
-   **LabVIEW UDP port** to `61557`, then click **Start Listener** if needed.
-   Click **Arm LabVIEW trigger** and use LabVIEW's existing recording controls
-   to send `log` and `stop`. Meet the source profile's minimum pressure duration.
-   Keep the same condition steady after `stop` while the app collects the selected
-   NO delay tail and any additional samples needed for minimum averaging coverage.
-7. For mapping, wait for the automatic TDMS search and processing to finish,
-   then review the attached pressure metrics. If matching fails or is ambiguous,
-   use **Choose TDMS file…** to select the intended recording; both waveform
-   selections and their common timing are validated. A mapping test needs a valid
-   two-transducer pressure result before
-   it can be completed. Live capture fills and locks the NO/O2 means; manual mode
-   lets you enter those means and an optional NO standard error. Add notes,
-   confirm **Uncorrected dry averages from this saved window**, then click
-   **Save result**. Pressure processing does not save the result automatically.
-   No flows change on save.
-8. Suggest the next test. Use the **History** tab to inspect results, repeat
-   a completed point, or export CSV. Repeating a point creates a separate test.
+#### 1. Create the campaign
+
+Expand **Bayesian optimiser** and choose **New experiment**. Select
+**Minimise NO** or **Map NO + pressure**. For mapping, set the NO mapping
+weight. The two pressure maps use the peak in-band Welch spectral amplitude.
+
+Enter the nominal NH3/H2 thermal input, stage-1 fuel split, and bounds for H2 volume
+percentage, stage-1 phi and overall phi. Optionally select thermal input or
+stage-1 fuel split to add them as fourth and fifth search variables, then enter
+their bounds. Unselected values remain fixed. Bounds are intentionally blank.
+
+This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
+present. Every assigned pilot fuel line must be off during measurements.
+
+#### 2. Set the measurement window
+
+Choose the dry O2 reporting reference (default 15%, not a regulatory claim),
+initial-design size (default 4, 5 or 6 completed tests for 3, 4 or 5 variables),
+candidate-pool size and minimum averaging window (default 30 seconds).
+
+**Use current O₂**, beside the reference field, copies one fresh, validated,
+uncorrected dry MEXA reading;
+receiver logging must be enabled. You can edit it before saving. It does not
+follow later readings or change burner flows.
+
+The initial design must contain
+at least one more completed test than the number of variables. Save a new
+`.fcbo.json` experiment. These settings are fixed for the campaign; use a new
+file to change them.
+
+#### 3. Review target flows
+
+Click **Suggest next test**, then **Load target fields**. This fills the
+existing flow fields, including zero for the pilot and unused lines. It
+sends no commands. Review every field and the transition procedure before
+applying through the usual controls. Existing MAX FLOW limits and ramps
+still apply. Do not assume that safe endpoints imply a safe transition.
+
+#### 4. Configure pressure recordings
+
+For mapping, open **TDMS source…** in **Current test**. Choose the LabVIEW
+recording folder, inspect a sample TDMS file and select a distinct waveform for
+**Pressure transducer 1** and **Pressure transducer 2**. The display labels are
+editable, while the saved IDs remain `pressure_1` and `pressure_2`.
+
+Declare the
+units or Pa-per-stored-unit scale, offset, calibration identifier and optional
+clipping bounds independently for each channel; a group named `converted` does
+not establish the units. Set the shared minimum pressure recording duration and
+spectral settings. Follow the
+[TDMS setup guide](docs/LABVIEW_PRESSURE_MAPPING.md#configure-the-tdms-source)
+for timing and calibration checks. TDMS reading needs the optional dependency
+described under [Manual installation](#manual-installation).
+
+#### 5. Prepare the measurements
+
+After switching the pilot off and allowing the burner and flows to settle,
+check both confirmations. Allow the analyser to settle or select an appropriate
+calibrated response delay.
+
+For live measurements, connect
+the bridge in the **MEXA analyser** tab with **Save received MEXA logs on
+this PC** enabled, then select **Capture NO/O2 automatically from the MEXA
+network link**. With live capture off, average the analyser's uncorrected dry
+NO and O2 manually over the saved measurement window.
+
+#### 6. Record a window
+
+For **Minimise NO**, click **Start window**, then **Finish window** once the
+required flow and, for live capture, analyser samples cover the minimum duration.
+
+For **Map NO + pressure**, set **LabVIEW UDP host** to `127.0.0.1` and
+**LabVIEW UDP port** to `61557`, then click **Start Listener** if needed.
+Click **Arm LabVIEW trigger** and use LabVIEW's existing recording controls
+to send `log` and `stop`. Meet the source profile's minimum pressure duration.
+Keep the same condition steady after `stop` while the app collects the selected
+NO delay tail and any additional samples needed for minimum averaging coverage.
+
+#### 7. Review and save the result
+
+For mapping, wait for the automatic TDMS search and processing to finish,
+then review the attached pressure metrics. If matching fails or is ambiguous,
+use **Choose TDMS file…** to select the intended recording; both waveform
+selections and their common timing are validated. A mapping test needs a valid
+two-transducer pressure result before
+it can be completed.
+
+Live capture fills and locks the NO/O2 means; manual mode
+lets you enter those means and an optional NO standard error. Add notes,
+confirm **Uncorrected dry averages from this saved window**, then click
+**Save result**. Pressure processing does not save the result automatically.
+No flows change on save.
+
+#### 8. Continue the campaign
+
+Suggest the next test. Use the **History** tab to inspect results, repeat
+a completed point, or export CSV. Repeating a point creates a separate test.
+
+#### Response-time calibration
 
 The **NO response time** tab can store two settled live conditions and run one
 explicitly confirmed A-to-B transition. It measures the combined burner, flow,
@@ -341,12 +480,16 @@ campaign's averaging duration, and cancellation does not return the rig to A or
 zero it. See [NO response-time calibration](docs/BAYESIAN_OPTIMISER_MANUAL.md#5-no-response-time-calibration)
 for the procedure, detector criteria, timing definitions and saved provenance.
 
+#### Required controller assignments
+
 The optimiser requires one NH3 line, one H2 line and one air line in stage 1,
 plus stage-2 air. Stage-2 fuel lines are required when a fixed or proposed fuel
 split is below 100%. A pilot controller may remain assigned at zero or be unassigned.
 All other assigned gas lines must read off during measurement.
 
 ### Measurement basis and limits
+
+#### NO reporting basis
 
 The objective is oxygen-corrected dry **NO**, not total NOx or mass per energy:
 
@@ -366,6 +509,8 @@ emissions claims. Do not enter an already oxygen-corrected reading. Readings at
 or above 20.9% O2 cannot be corrected; readings close to air concentration amplify
 measurement errors. NO input is limited to the published 0–5000 ppm range.
 
+#### Flow acceptance
+
 Fresh flow and setpoint readings must track targets within the larger of 3%
 or 0.05 SLPM. When power is fixed, measured thermal input must be within 3% of
 the campaign setting; when it is searched, the measured value must remain inside
@@ -375,6 +520,8 @@ flame. The operator confirms that the pilot is off. Missing telemetry, a gap in
 polling, a run/configuration change or a non-tracking flow discards an active
 window. At least three fresh passes and the configured duration are required.
 One capture cannot exceed an hour.
+
+#### Live analyser acceptance
 
 Live MEXA capture also requires at least three new analyser samples, spanning
 the configured minimum duration inside the flow window. A disconnect, source
@@ -392,12 +539,16 @@ ranges, sequence IDs and the receiver audit-log path are saved. Sensor samples
 may be autocorrelated, so the standard deviation is not converted into an
 assumed standard error; the model still fits observation noise.
 
+#### Discarded and invalid tests
+
 **Discard window** and **Mark test invalid** do not stop or zero the burner.
 Use the existing flow and emergency controls for the physical process. Invalid
 tests retain their reason but have no numerical emissions result; they are
 excluded from fitting rather than treated as zero emissions.
 
 ### Model and records
+
+#### How suggestions are chosen
 
 The initial design selects spread-out points from an N-dimensional scrambled
 Sobol candidate pool. In **Minimise NO**, subsequent suggestions fit a Matérn-5/2
@@ -416,11 +567,15 @@ per-test NO standard error. O2 uncertainty and
 systematic calibration bias are not propagated. Suggestions respect the declared
 search region and current flow ceilings; no flame-safety boundary is learned.
 
+#### Read the operating-space maps
+
 After the initial completed design, use **Operating-space maps** to select two
 axes and click **Refresh maps**. Other variables stay at the selected completed
 test's measured condition, or their bounds midpoint. **Show uncertainty (latent
 SD)** switches between predicted means and uncertainty. Blank cells exceed
 bounds or flow ceilings. These maps do not classify flame stability.
+
+#### Interpret pressure metrics
 
 Pressure RMS and peak excursion use each mean-subtracted waveform. Peak excursion
 is the largest absolute deviation from its mean. Dominant spectral amplitude is
@@ -431,6 +586,8 @@ PSD value. The dominant frequency, RMS, peak excursion and variation in windowed
 RMS remain in the record for diagnosis; they do not drive the new mapping
 acquisition. The spectral frequency band does not filter the RMS or peak
 calculation.
+
+#### Saved campaigns and exports
 
 The `.fcbo.json` campaign is the authoritative record. This version writes
 campaign schema 4 and loads schema 1–3 campaigns, including existing
@@ -460,6 +617,8 @@ separate audit files; keep them alongside the authoritative campaign JSON when
 sample-level reconstruction is needed. A continuous flow-file path is present
 only when the app's flow logger was active during that window.
 
+#### Resume an experiment
+
 **Open** resumes a saved campaign, including a pending test, without loading
 target fields or applying flows. An unfinished capture is not resumed after
 closing the app. Typed measurement text is not durable until **Save result**; it
@@ -471,127 +630,41 @@ The model runs in a background worker so fitting does not block the Qt control
 interface. Campaigns are limited to 500 tests. The implementation uses
 scikit-learn and SciPy; run `install.bat` when upgrading another installation.
 
-### Sequencing in operation
-
-The following 90-second excerpt shows a recorded sequence being replayed while
-the controller interface and burner response are monitored. The demonstration
-is shown at 2x speed.
-
-https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
-
-## Quick start
-
-### Install and run on Windows
-
-1. Extract the complete application ZIP, then double-click `install.bat`. Run it again after an upgrade to install new dependencies.
-2. Double-click `run.bat` to start the application.
-
-The installer puts the virtual environment in
-`%USERPROFILE%\.flow-controller-v3\venv`. This keeps PySide6's deeply nested
-files out of OneDrive and avoids common Windows path-length failures.
-
-Setup installs Python.NET in that environment, verifies the bundled camera
-DLLs, removes their Windows downloaded-file blocks, and checks that the camera
-library loads. No edits to `run.bat` are needed. Camera setup requires .NET
-Framework 4.8 or newer; setup reports a missing framework or failed library
-check before declaring installation complete. The GitHub download includes the
-64-bit Canon SDK, so Canon support needs no separate SDK download or import.
-See [Camera setup](docs/CAMERA.md).
-
-To run from PowerShell instead:
-
-```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" run.py
-```
-
-`python -m flow_controller` is equivalent.
-
-### Requirements
-
-- Windows 10 or 11
-- 64-bit Python 3.11 or newer
-- A USB-to-serial adapter that matches the rig's electrical interface. RS-232
-  and RS-485 are not interchangeable.
-- Alicat controllers with unique single-letter addresses
-
-### Manual installation
-
-The pinned `requirements.txt` installs the application plus Excel-export
-support:
-
-```powershell
-python -m venv "$env:USERPROFILE\.flow-controller-v3\venv"
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements.txt
-```
-
-For development or a minimal install, use the package metadata:
-
-```powershell
-python -m pip install -e .
-```
-
-Add `.[xlsx]` for Excel export.
-
-LabVIEW TDMS import requires optional `npTDMS` support. Install it into the
-environment that runs the flow app:
-
-```powershell
-& "$env:USERPROFILE\.flow-controller-v3\venv\Scripts\python.exe" -m pip install -r requirements-pressure.txt
-```
-
-For a package installation, use `python -m pip install -e ".[pressure]"` with
-that environment's Python. NO-only campaigns do not require this dependency.
-
-## First connection
-
-The normal setup order is:
-
-1. Open **Connection & Assignment**.
-2. Select the COM port and baud rate.
-3. Click **Scan A-Z** to probe Alicat addresses `A` through `Z`.
-4. Assign a gas and zone to each controller you intend to use.
-5. Select those controllers and click **Connect Selected**.
-6. Click **Start Live Monitor** and confirm that the readings are plausible.
-7. Open **Operation & Monitoring** to enter setpoints, start logging, or run a
-   saved sequence.
-
-The application defaults to **57,600 baud**. It does not reconfigure the
-instruments: every device on the selected bus must already use the chosen baud
-rate. Alicat's common factory default is 19,200, so verify the device settings
-before assuming a scan failure is a wiring problem.
-
-During discovery the application reads each controller's supported-gas table.
-The assignment list therefore reflects what that device actually reports,
-rather than a hard-coded gas list.
 
 ## Logging, graphs, and LabVIEW
 
 ### Acquisition CSV
 
-The acquisition logger writes one row after each completed serial polling pass:
+#### Flow and MEXA rows
+
+The acquisition logger adds one row after each serial polling pass:
 
 - timestamp;
 - flow, setpoint, pressure, temperature, internal setpoint error, and first
   valve drive for each connected unit; and
 - live Stage 1, Stage 2, and global equivalence ratios.
 
-New logs also include `mexa_` columns: NO, O2, acquisition/receipt timestamps,
+New logs include `mexa_` columns: NO, O2, acquisition/receipt timestamps,
 sample age, source/sequence ID, state, validity, simulation and reporting basis.
-These columns exist even if the MEXA is connected after logging starts. A fresh
-analyser value can be held across multiple flow rows; `mexa_new_sample=False`
+The columns are present even when MEXA connects after logging starts. A fresh
+analyser value may span several flow rows; `mexa_new_sample=False`
 identifies a repeat, not an independent measurement. Stale, invalid or
 future-dated measurements have blank values in the original NO/O2 columns.
-Fresh invalid NO/O2 readings remain visible with an INVALID label and are retained
-in `mexa_reported_no_ppm` / `mexa_reported_o2_percent`, with the reason in
-`mexa_quality`. They are not valid measurements or optimiser inputs.
+Fresh invalid NO/O2 readings show an INVALID label. Their values remain in
+`mexa_reported_no_ppm` / `mexa_reported_o2_percent` and the reason in
+`mexa_quality`; they are not valid measurements or optimiser inputs.
+
+#### MEXA log capture
+
 Enable **Save received MEXA
-logs on this PC** for a separate CSV/JSONL record, including readings between
+logs on this PC** to record a separate CSV/JSONL, including readings between
 flow polls. This is required for live optimiser capture. The bridge's **Save
 CSV + raw logs on this PC** switch is independent and defaults off, so the
 analyser PC can stream without saving files. The normal flow logger works
-with either MEXA logging switch off. Retained graph-history export remains a
-flow-only export. See [MEXA setup](docs/MEXA_SETUP.md) for the two-PC workflow.
+with either MEXA logging switch off. Graph-history export remains flow-only.
+See [MEXA setup](docs/MEXA_SETUP.md) for the two-PC workflow.
+
+#### Analyser controls and channels
 
 The analyser PC's bridge also offers confirmed local **MEAS** and **STANDBY**
 requests. A mode request invalidates live capture and requires rechecking and
@@ -599,14 +672,16 @@ restarting the reader before optimisation. Calibration remains on the front
 panel. Network status is separate from analyser readiness: a TCP timeout
 requires a listener/firewall/network check, not a change to measurement limits.
 
-The stream and both apps also expose CO, CO2, HC, AFR, lambda, optional RPM
+The stream and both apps expose CO, CO2, HC, AFR, lambda, optional RPM
 and oil temperature, plus the reported PEF factor. MEXA logs and the normal
 flow CSV retain these channels, status/option flags and raw replies. Missing
-sensors stay blank. The analyser's automotive AFR/lambda do not replace the
+sensors stay blank. Automotive AFR/lambda do not replace the
 NH3/H2 flow-based phi calculation; the optimiser still uses only NO/O2.
 
+#### Network options
+
 The MEXA tab offers **Wormhole (temporary hosting on this PC)** and **Direct LAN**.
-Wormhole starts an internal loopback relay and a pinned Wormhole v0.2.1 helper;
+Wormhole starts a loopback relay and pinned Wormhole v0.2.1 helper;
 the receiver connects locally. Copy the temporary URL and publisher key into
 the analyser bridge's **Wormhole (outbound WSS)** fields. The older **Internet
 relay (outbound WSS)** label works unchanged. The Windows x64 helper is
@@ -621,6 +696,8 @@ logging, invalid-data rejection and live-capture safeguards are unchanged.
 See [Wormhole setup](docs/MEXA_QUICK_TUNNEL.md) for consent, key handling and
 outage behaviour, or [MEXA setup](docs/MEXA_SETUP.md) for Direct LAN.
 
+#### File behavior
+
 Column names include gas, zone, and unit. The header is fixed when logging
 starts, so assignments cannot change while the file is open. Failed readings
 are left blank rather than replaced with stale values. Writes are line-buffered,
@@ -630,16 +707,19 @@ The default log directory is `Documents\Flow Controller`.
 
 ### Burner photos with data logs
 
-In **Operation & Monitoring > Logging & Acquisition**, enable **Take a burner
-photo when recording starts** to request one photo whenever a new data log
-opens, including logs started by LabVIEW. This option is off by default and
-is remembered between launches.
+To take one photo whenever a new data log opens, including logs started by
+LabVIEW:
 
-First connect and select a camera in **Camera**, then choose its photo output
-folder. The system log associates the data-log path with the transferred photo
-path. Capture is asynchronous, so the photo is not an exact synchronization
-marker for the first data row. A disconnected or busy camera skips the photo;
-a failed capture or transfer timeout is reported while data logging continues.
+1. Connect and select a camera in **Camera**.
+2. Choose its photo output folder.
+3. In **Operation & Monitoring > Logging & Acquisition**, enable **Take a
+   burner photo when recording starts**.
+
+The option defaults off and is remembered between launches. The system
+log associates the data-log path with the transferred photo path. Capture is
+asynchronous, so the photo is not an exact synchronization marker for the first
+data row. A disconnected or busy camera skips the photo. A failed capture or
+transfer timeout is reported while data logging continues.
 See [Camera setup and controls](docs/CAMERA.md) for supported capture modes.
 
 ### Graph-history export
