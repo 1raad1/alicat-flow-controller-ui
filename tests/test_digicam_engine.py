@@ -821,7 +821,7 @@ class DccEngineTests(unittest.TestCase):
         self.assertEqual(camera.keep_alive_calls, 2)
         self.assertFalse(camera.KeepAliveRequested)
 
-    def test_busy_and_disabled_cameras_wait_until_keep_alive_is_allowed(self) -> None:
+    def test_busy_camera_waits_and_shutdown_prevention_is_enabled(self) -> None:
         busy = FakeKeepAliveCamera()
         busy.IsBusy = True
         disabled = FakeKeepAliveCamera(serial="SERIAL-2", port="USB-2")
@@ -842,7 +842,44 @@ class DccEngineTests(unittest.TestCase):
             self.engine.pump()
 
         self.assertEqual(busy.keep_alive_calls, 2)
-        self.assertEqual(disabled.keep_alive_calls, 0)
+        self.assertEqual(disabled.keep_alive_calls, 3)
+        self.assertTrue(disabled.PreventShutDown)
+
+    def test_shutdown_prevention_is_restored_after_driver_reset(self) -> None:
+        camera = FakeKeepAliveCamera()
+        self.use_camera(camera)
+        self.engine.open()
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            camera.PreventShutDown = False
+            clock.return_value = 15.0
+            self.engine.pump()
+        self.assertTrue(camera.PreventShutDown)
+        self.assertEqual(camera.keep_alive_calls, 2)
+
+    def test_shutdown_prevention_failure_is_reported_and_retried(self) -> None:
+        class RefusingCamera(FakeKeepAliveCamera):
+            @property
+            def PreventShutDown(self):
+                return False
+
+            @PreventShutDown.setter
+            def PreventShutDown(self, value):
+                pass
+
+        camera = RefusingCamera()
+        self.use_camera(camera)
+        self.engine.open()
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            events = self.engine.poll_events()
+            self.assertIn("did not enable shutdown prevention", events[0]["message"])
+            clock.return_value = 5.0
+            self.engine.pump()
+            self.assertEqual(self.engine.poll_events(), [])
+        self.assertEqual(camera.keep_alive_calls, 0)
 
     def test_keep_alive_failures_are_deduplicated_and_clear_after_success(self) -> None:
         camera = FakeKeepAliveCamera()
