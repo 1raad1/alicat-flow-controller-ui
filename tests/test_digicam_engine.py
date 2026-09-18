@@ -145,6 +145,21 @@ class FakeKeepAliveCamera(FakeCamera):
         self.KeepAliveRequested = False
 
 
+class FakeCameraInterfaceProxy:
+    """Python.NET-style interface proxy hiding implementation-only members."""
+
+    def __init__(self, implementation) -> None:
+        object.__setattr__(self, "__implementation__", implementation)
+
+    def __getattr__(self, name):
+        if name in {"KeepAlive", "KeepAliveRequested"}:
+            raise AttributeError(name)
+        return getattr(self.__implementation__, name)
+
+    def __setattr__(self, name, value) -> None:
+        setattr(self.__implementation__, name, value)
+
+
 class FakeCanonSdkCamera:
     def __init__(self, destination_events, *, secondary="Unknown", save_to=1) -> None:
         self.ImageQuality = SimpleNamespace(SecondaryImageFormat=secondary)
@@ -802,6 +817,40 @@ class DccEngineTests(unittest.TestCase):
         self.assertEqual(unsupported.calls, [])
         self.assertFalse(any(name.startswith("capture") or name == "frame"
                              for name, _args in first.calls + second.calls))
+
+    def test_keep_alive_unwraps_interface_proxy_to_reach_implementation_members(self) -> None:
+        camera = FakeKeepAliveCamera()
+        camera.PreventShutDown = False
+        proxy = FakeCameraInterfaceProxy(camera)
+        self.use_camera(proxy)
+        self.engine.open()
+
+        with patch("flow_controller.infrastructure.digicam_engine.time.monotonic") as clock:
+            clock.return_value = 0.0
+            self.engine.pump()
+            self.assertEqual(camera.keep_alive_calls, 1)
+            self.assertTrue(camera.PreventShutDown)
+
+            clock.return_value = 14.999
+            self.engine.pump()
+            self.assertEqual(camera.keep_alive_calls, 1)
+
+            clock.return_value = 15.0
+            self.engine.pump()
+            self.assertEqual(camera.keep_alive_calls, 2)
+
+            camera.KeepAliveRequested = True
+            clock.return_value = 16.0
+            self.engine.pump()
+            self.assertEqual(camera.keep_alive_calls, 3)
+            self.assertFalse(camera.KeepAliveRequested)
+
+            camera.IsConnected = False
+            clock.return_value = 60.0
+            self.engine.pump()
+
+        self.assertEqual(camera.keep_alive_calls, 3)
+        self.assertEqual(self.engine._keep_alive_state, {})
 
     def test_keep_alive_request_wakes_early_but_attempts_at_most_once_per_second(self) -> None:
         camera = FakeKeepAliveCamera()
