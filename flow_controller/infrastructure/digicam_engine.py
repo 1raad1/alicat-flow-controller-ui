@@ -1000,6 +1000,10 @@ class DccEngine:
         now = time.monotonic()
         active = set()
         for device in self._devices():
+            # ConnectedDevices contains ICameraDevice proxies in Python.NET.
+            # Canon's KeepAlive/KeepAliveRequested are implementation members,
+            # so looking them up on the interface silently skips every pulse.
+            device = _value(device, "__implementation__", default=device)
             keep_alive = _value(device, "KeepAlive")
             if not callable(keep_alive) or not bool(_value(device, "IsConnected", default=False)):
                 continue
