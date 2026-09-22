@@ -59,6 +59,7 @@ class QtUiTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         preferences = patch.dict(os.environ, {
+            'FLOW_CONTROLLER_CONNECTION_PREFS': str(Path(directory.name) / 'connection.json'),
             'FLOW_CONTROLLER_UNIT_PREFS': str(Path(directory.name) / 'units.json'),
             'FLOW_CONTROLLER_COMBUSTION_PREFS': str(Path(directory.name) / 'combustion.json'),
         })

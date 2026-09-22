@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from ..core import connection_prefs
 from ..core.session import SCAN_UNITS
 from ..domain import roles, rql
 from . import qt_theme as theme
@@ -614,12 +615,18 @@ class ConnectionTab(QWidget):
         super().__init__(parent)
         self.session = session
         self._rows = {}
+        self._rows_port = ''
+        self._rows_baud = None
         self._controllers = {}
         self._custom_gases = []
         self._live_rows = {}
         self._scan_active = False
         self._connected = False
         self._conn_seeded = True      # the log still holds its placeholder
+        self._connection_prefs = connection_prefs.load()
+        self._remembered_port = self._connection_prefs.get('last_port', '')
+        self._remembered_baud = self._connection_prefs.get('last_baud')
+        self._suppress_preference_writes = False
 
         self._restart_timer = QTimer(self)
         self._restart_timer.setSingleShot(True)
@@ -641,12 +648,9 @@ class ConnectionTab(QWidget):
         The session remembers the last result for exactly this; the assignment
         on top of it is the session's too, so both survive the rebuild.
 
-        An excluded row comes back excluded but on the gas and zone the scan
-        gave it, not the ones it was last showing: the session's selection is
-        the assignment, and a unit that was ticked out of the assignment is not
-        in it.  The row is inert either way -- nothing excluded is configured,
-        commanded or logged -- so the only cost is re-picking a zone for a unit
-        on the way back in.
+        The session decides which rows remain included. Saved preferences
+        recover the gas and zone of excluded rows, which are absent from the
+        session's selection.
         """
         result = self.session.last_scan
         if result is None:
@@ -654,7 +658,11 @@ class ConnectionTab(QWidget):
         # Taken before the rows are built: building them pushes their own
         # defaults into the session, which is the thing being recovered here.
         selection = dict(self.session.selection)
-        self._on_scan_finished(result)
+        self._suppress_preference_writes = True
+        try:
+            self._on_scan_finished(result, restore_preferences=False)
+        finally:
+            self._suppress_preference_writes = False
         # The rows are back but the chatter that produced them is not, and a
         # log still saying 'No scan yet' underneath eight recovered rows reads
         # like a bug.  Say where they came from, and that they are only as
@@ -663,13 +671,19 @@ class ConnectionTab(QWidget):
         self.scan_log.setPlainText(
             f"Recovered {found} controller{'' if found == 1 else 's'} from the "
             "last scan.\nRe-scan if anything on the bus has changed since.")
-        if not selection:
-            return
         for unit, row in self._rows.items():
             entry = selection.get(unit)
             if entry is None:
-                row.apply_selection(row.gas(), row.zone(), included=False)
+                remembered = self._remembered_units(self._rows_port).get(unit)
+                if remembered is None:
+                    row.apply_selection(row.gas(), row.zone(), included=False)
+                else:
+                    self._ensure_row_gas(row, remembered['gas'])
+                    row.apply_selection(
+                        remembered['gas'], remembered['zone'],
+                        included=False)
             else:
+                self._ensure_row_gas(row, entry[0])
                 row.apply_selection(entry[0], entry[1])
         self._push_selection()
 
@@ -731,7 +745,10 @@ class ConnectionTab(QWidget):
         self.baud_combo = QComboBox()
         self.baud_combo.addItems(
             ['2400', '9600', '19200', '38400', '57600', '115200'])
-        self.baud_combo.setCurrentText(str(self.session.baudrate))
+        initial_baud = self._remembered_baud or self.session.baudrate
+        if self.baud_combo.findText(str(initial_baud)) < 0:
+            initial_baud = self.session.baudrate
+        self.baud_combo.setCurrentText(str(initial_baud))
         baud_row.addWidget(self.baud_combo, 1)
         card.add_layout(baud_row)
 
@@ -937,6 +954,11 @@ class ConnectionTab(QWidget):
         session.poll_rate.connect(self._on_poll_rate)
         session.samples_updated.connect(self._on_samples)
 
+        self.port_combo.currentTextChanged.connect(
+            self._on_connection_choice_changed)
+        self.baud_combo.currentTextChanged.connect(
+            self._on_connection_choice_changed)
+
     # ================================================================== #
     #  Narration                                                         #
     # ================================================================== #
@@ -957,11 +979,14 @@ class ConnectionTab(QWidget):
         QMessageBox.critical(self, title, detail)
 
     def _on_ports(self, ports):
-        current = self.port_combo.currentText().strip() or self.session.port
+        current = self.port_combo.currentText().strip()
+        candidates = (self._remembered_port, current, self.session.port)
+        preferred = next((candidate for candidate in candidates
+                          if candidate and candidate in ports), '')
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         self.port_combo.addItems(ports)
-        index = self.port_combo.findText(current) if current else -1
+        index = self.port_combo.findText(preferred) if preferred else -1
         self.port_combo.setCurrentIndex(index if index >= 0 else (0 if ports else -1))
         self.port_combo.blockSignals(False)
 
@@ -977,11 +1002,37 @@ class ConnectionTab(QWidget):
         except ValueError:
             return self.session.baudrate
 
+    def _on_connection_choice_changed(self, _text):
+        """Remember a user/programmatic combo choice, never an automatic fallback."""
+        self._remember_connection_choice()
+
+    def _remember_connection_choice(self):
+        if self._suppress_preference_writes:
+            return
+        port = self._port()
+        baud = self._baudrate()
+        if port:
+            self._remembered_port = port
+            self._connection_prefs['last_port'] = port
+            record = self._connection_prefs.setdefault(
+                'connections', {}).setdefault(port, {})
+            record['baud'] = baud
+        self._remembered_baud = baud
+        self._connection_prefs['last_baud'] = baud
+        connection_prefs.save(self._connection_prefs)
+
+    def _remembered_units(self, port=None):
+        port = (port or self._port()).strip()
+        record = self._connection_prefs.get('connections', {}).get(port, {})
+        units = record.get('units', {})
+        return units if isinstance(units, dict) else {}
+
     def _on_scan_clicked(self):
         if self._scan_active:
             self.session.cancel_scan()
             self.scan_status.setText('Cancelling…')
             return
+        self._remember_connection_choice()
         self.session.start_scan(self._port(), self._baudrate())
 
     def _on_scan_started(self):
@@ -1004,7 +1055,7 @@ class ConnectionTab(QWidget):
     def _on_scan_controller(self, controller):
         self._controllers[controller.unit] = controller
 
-    def _on_scan_finished(self, result):
+    def _on_scan_finished(self, result, *, restore_preferences=True):
         self._scan_active = False
         self.scan_btn.setText('Scan A–Z')
         self.scan_bar.setVisible(False)
@@ -1018,13 +1069,18 @@ class ConnectionTab(QWidget):
         self.scan_status.setText(
             f"{found} controller{'' if found == 1 else 's'} found"
             + (f" — {result.error}" if result.error else ''))
-        self._populate_rows(result.controllers)
+        self._populate_rows(
+            result.controllers,
+            restore_preferences=restore_preferences,
+            preference_port=result.port,
+            preference_baud=result.baudrate)
         self._sync_buttons()
 
     # ================================================================== #
     #  Step 3 — assignment                                               #
     # ================================================================== #
-    def _populate_rows(self, controllers):
+    def _populate_rows(self, controllers, *, restore_preferences=True,
+                       preference_port=None, preference_baud=None):
         for row in self._rows.values():
             self.rows_layout.removeWidget(row)
             # Out of the layout is not out of the window: until the event loop
@@ -1033,6 +1089,8 @@ class ConnectionTab(QWidget):
             row.setParent(None)
             row.deleteLater()
         self._rows.clear()
+        self._rows_port = (preference_port or self._port()).strip()
+        self._rows_baud = preference_baud or self._baudrate()
 
         # Gases the devices themselves report but the base list does not know
         # about are offered to every row: if one unit is running Argon, the
@@ -1044,6 +1102,15 @@ class ConnectionTab(QWidget):
                     and gas not in self._custom_gases):
                 self._custom_gases.append(gas)
 
+        remembered = (self._remembered_units(preference_port)
+                      if restore_preferences else {})
+        for entry in remembered.values():
+            gas = entry.get('gas')
+            if (gas and gas not in roles.BASE_GAS_TYPES
+                    and gas not in (roles.UNSELECTED_GAS, ADD_GAS)
+                    and gas not in self._custom_gases):
+                self._custom_gases.append(gas)
+
         self.rows_placeholder.setVisible(not controllers)
         for controller in controllers:
             row = AssignRow(controller, self._gas_options())
@@ -1052,6 +1119,10 @@ class ConnectionTab(QWidget):
             row.gas_requested.connect(self._open_gas_dialog)
             self.rows_layout.addWidget(row)
             self._rows[controller.unit] = row
+            entry = remembered.get(controller.unit)
+            if entry is not None:
+                row.apply_selection(
+                    entry['gas'], entry['zone'], included=entry['included'])
         self._push_selection()
 
     def _gas_options(self):
@@ -1066,7 +1137,37 @@ class ConnectionTab(QWidget):
         selection = {unit: row.selection()
                      for unit, row in self._rows.items() if row.included}
         self.session.set_selection(selection)
+        self._remember_rows()
         self._refresh_autocalc()
+
+    def _ensure_row_gas(self, row, gas):
+        if row.gas_combo.findText(gas) >= 0:
+            return
+        if (gas not in (roles.UNSELECTED_GAS, ADD_GAS)
+                and gas not in self._custom_gases):
+            self._custom_gases.append(gas)
+        if gas not in (roles.UNSELECTED_GAS, ADD_GAS):
+            row.set_gas_options(self._gas_options())
+
+    def _remember_rows(self):
+        """Merge detected rows into this port's record, retaining absent units."""
+        if self._suppress_preference_writes or not self._rows:
+            return
+        # Rows describe the bus that produced the scan.  If the operator picks
+        # another port before scanning it, edits to the still-visible rows must
+        # not become that other port's defaults.
+        port = self._rows_port
+        if not port:
+            return
+        record = self._connection_prefs.setdefault(
+            'connections', {}).setdefault(port, {})
+        record['baud'] = self._rows_baud
+        units = record.setdefault('units', {})
+        for unit, row in self._rows.items():
+            gas, zone = row.selection()
+            units[unit] = {
+                'gas': gas, 'zone': zone, 'included': row.included}
+        connection_prefs.save(self._connection_prefs)
 
     def _on_row_zone_changed(self, unit, zone):
         """A zone edited after connecting, without a reconnect.
@@ -1083,6 +1184,7 @@ class ConnectionTab(QWidget):
             if row is not None and current is not None:
                 row.revert_zone(current[1])
             return
+        self._remember_rows()
         self._refresh_autocalc()
         self._rebuild_live()
 
@@ -1128,6 +1230,7 @@ class ConnectionTab(QWidget):
     #  Step 4 — connect and monitor                                      #
     # ================================================================== #
     def _on_connect(self):
+        self._remember_connection_choice()
         self._push_selection()
         result = self.session.connect_all(self._port(), self._baudrate())
         if result != 'needs_confirmation':
