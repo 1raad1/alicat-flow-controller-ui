@@ -6,4 +6,5 @@ build/
 dist/
 Logs/*.csv
 Logs/*.xlsx
+connection_prefs.json
 
