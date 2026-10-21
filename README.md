@@ -1,13 +1,51 @@
-# Alicat Flow Controller
+<h1 align="center">Alicat Flow Controller</h1>
 
-Control Alicat mass flow controllers from a Windows desktop. Set flows,
-monitor live readings, replay sequences, and record experiment data over a
-shared serial bus.
+<p align="center">
+  Windows desktop control, live monitoring, sequence replay and data logging
+  for Alicat mass flow controllers, built for an ammonia/hydrogen
+  rich-quench-lean (RQL) burner rig.
+</p>
 
-The application supports general multi-channel control and an
-ammonia/hydrogen rich-quench-lean (RQL) burner rig. Use **Standard** mode for
-ordinary setpoints. Use **Staged (RQL)** mode for stage-aware assignments, flow
-calculations, and combustion estimates.
+<p align="center">
+  <img alt="Platform: Windows 10/11" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Qt for Python (PySide6)" src="https://img.shields.io/badge/UI-PySide6%20%2F%20Qt-41CD52?logo=qt&logoColor=white">
+  <img alt="Version 3.0.0" src="https://img.shields.io/badge/version-3.0.0-informational">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#first-connection">First connection</a> ·
+  <a href="#sequences">Sequences</a> ·
+  <a href="#bayesian-optimiser">Bayesian optimiser</a> ·
+  <a href="#troubleshooting">Troubleshooting</a>
+</p>
+
+https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
+
+<p align="center"><sub>
+  A recorded sequence replayed on the rig while the controller interface and
+  burner response are monitored. 90-second excerpt, shown at 2x speed.
+</sub></p>
+
+## Highlights
+
+- **One serial bus, many controllers.** Scan addresses `A`–`Z`, read each
+  device's own gas table, assign gas and zone, and poll flow, setpoint,
+  pressure, temperature and valve drive live.
+- **Standard and Staged (RQL) modes.** Ordinary multi-channel setpoints, or
+  stage-aware control with live equivalence ratio, firing rate and inlet
+  velocity, plus a target-flow calculator.
+- **Safety-first command path.** Zero commands outrank every pending setpoint,
+  per-controller **MAX FLOW** limits are checked twice, and optional ramps
+  apply to every source of setpoints.
+- **Record, edit and replay sequences.** Capture setpoints as keyframes, edit
+  them on a timeline, and replay them against any controller with the same role.
+- **Bayesian optimiser.** Search for low oxygen-corrected NO, or map NO and
+  combustion pressure dynamics, from live MEXA analyser data and LabVIEW TDMS
+  recordings. Runs locally with no API key.
+- **Logging and instruments.** CSV/Excel export, live graphs, a LabVIEW UDP
+  start/stop trigger, and Canon DSLR live view and capture.
 
 > [!WARNING]
 > This is a supervisory control interface, not a safety system. Physical
@@ -15,8 +53,6 @@ calculations, and combustion estimates.
 > Windows, Python, or the USB serial connection. Closing the application does
 > not make a controller forget its last setpoint; use **ZERO ALL** before
 > shutdown when the process requires it.
-
-The desktop interface is built with PySide6 and Qt.
 
 ## Recent updates
 
@@ -333,15 +369,7 @@ During replay:
   its opening value. Controllers with ramping **OFF** return in a step.
 
 Zero commands, stopping monitoring, and application shutdown cancel replay.
-
-### Sequencing in operation
-
-The following 90-second excerpt shows a recorded sequence being replayed while
-the controller interface and burner response are monitored. The demonstration
-is shown at 2x speed.
-
-https://github.com/user-attachments/assets/5711b1a9-1fce-4921-918c-9869ef5d3f1e
-
+The demo video at the top of this page shows a replay running on the rig.
 
 ## Bayesian optimiser
 
