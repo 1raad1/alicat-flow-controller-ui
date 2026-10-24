@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from flow_controller.core.mexa_controller import MexaController
 from mexa_bridge.app import BridgeWindow
 from mexa_bridge.bridge import Bridge
-from mexa_bridge.records import AuditLog, ReceivedSample, make_packet, utc_now
+from mexa_bridge.records import AuditLog, make_packet
 from mexa_bridge.protocol import simulated_cycle
 from flow_controller.ui.qt_mexa import MexaTab
 import uuid

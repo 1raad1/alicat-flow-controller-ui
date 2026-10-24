@@ -337,7 +337,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_new_connection_has_new_challenge(self):
-        server = self.server()
+        self.server()
         with socket.create_connection(("127.0.0.1", self.port), timeout=2) as sock:
             first = Lines(sock).read()["challenge"]
             send_line(sock, {"proof": "wrong"})

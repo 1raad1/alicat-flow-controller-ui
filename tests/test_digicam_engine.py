@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from enum import Enum
-import struct
 import tempfile
 import threading
 from types import SimpleNamespace

@@ -38,3 +38,17 @@ include = ["flow_controller*", "mexa_bridge*"]
 [tool.setuptools.package-data]
 "flow_controller.ui" = ["assets/*.svg"]
 "flow_controller" = ["camera_runtime/**/*", "camera_runtime/*"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+# Pyflakes plus pycodestyle errors. Style rules are left to review.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Colour tokens are injected with globals().update() at import time.
+"flow_controller/ui/qt_theme.py" = ["F821"]
+# Adds the repo root to sys.path before importing the package.
+"scripts/package_windows.py" = ["E402"]

@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import time
-import uuid
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 

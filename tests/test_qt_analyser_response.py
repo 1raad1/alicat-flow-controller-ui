@@ -16,7 +16,6 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from flow_controller.core.optimisation import Experiment
 from flow_controller.core.optimiser_controller import OptimiserController
 from flow_controller.core.session import FlowSession, MODE_STAGED
 from flow_controller.domain.bayesian import SearchConfig

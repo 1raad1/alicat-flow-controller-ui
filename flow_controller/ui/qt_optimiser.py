@@ -1252,8 +1252,12 @@ class OptimiserPane(Card):
         if measured:
             lines = []
             for item in measured:
-                metric = lambda key, current=item: (_transducer_metric(current, key))
-                shown = lambda key: "—" if metric(key) is None else f"{metric(key):.5g}"
+                def metric(key, current=item):
+                    return _transducer_metric(current, key)
+
+                def shown(key, metric=metric):
+                    return "—" if metric(key) is None else f"{metric(key):.5g}"
+
                 lines.append(
                     f"{item['label']}: RMS {shown('rms_pa')} Pa · peak excursion {shown('peak_abs_pa')} Pa\n"
                     f"Dominant frequency {shown('dominant_frequency_hz')} Hz · spectral amplitude "

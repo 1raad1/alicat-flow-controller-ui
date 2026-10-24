@@ -7,6 +7,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/1raad1/alicat-flow-controller-ui/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/1raad1/alicat-flow-controller-ui/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Platform: Windows 10/11" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white">
   <img alt="Qt for Python (PySide6)" src="https://img.shields.io/badge/UI-PySide6%20%2F%20Qt-41CD52?logo=qt&logoColor=white">
@@ -932,6 +933,15 @@ It covers protocol parsing, discovery, assignments, safety selection, ramps,
 sequences, preferences, graphing, combustion/RQL arithmetic, camera workflows,
 runtime packaging, and Qt behavior. Pytest runs both the unittest classes and
 the camera-driver patch tests written as standalone functions.
+
+GitHub Actions runs the same suite headless (`QT_QPA_PLATFORM=offscreen`) on
+Windows with Python 3.11 and 3.12, plus `ruff check .`, on every push to `main`
+and every pull request. Run the lint step locally with:
+
+```powershell
+pip install ruff==0.17.2
+ruff check .
+```
 
 Tests do not replace hardware acceptance. Before an experiment, verify scanning,
 device gas tables, assignments, readback, individual and batch setpoints,

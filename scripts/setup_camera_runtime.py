@@ -96,9 +96,9 @@ def check_library_load(runtime: Path) -> None:
     windows_base = (Path(os.environ.get('WINDIR', r'C:\Windows')) /
                     'Microsoft.NET/Framework64/v4.0.30319/WPF/WindowsBase.dll')
     clr.AddReference(str(windows_base))
-    from CameraControl.Devices import CameraDeviceManager
-    from CameraControl.Devices.Classes import CapabilityEnum
-    from System.Windows.Threading import Dispatcher
+    from CameraControl.Devices import CameraDeviceManager  # noqa: F401
+    from CameraControl.Devices.Classes import CapabilityEnum  # noqa: F401
+    from System.Windows.Threading import Dispatcher  # noqa: F401
 
 
 def main(argv: list[str] | None = None) -> int:
