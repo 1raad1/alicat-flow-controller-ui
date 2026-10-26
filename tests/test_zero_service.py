@@ -1,4 +1,3 @@
-import asyncio
 import os
 import unittest
 from queue import Queue

@@ -1,6 +1,5 @@
 """Complete reported-channel acquisition and export, without instrument I/O."""
 
-from copy import deepcopy
 import csv
 from datetime import datetime, timedelta, timezone
 import json

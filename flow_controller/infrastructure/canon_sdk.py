@@ -509,7 +509,8 @@ def _probe(directory: Path) -> None:
         if result not in (0, 1):
             raise OSError(f"CoInitializeEx failed with HRESULT 0x{result & 0xFFFFFFFF:08x}")
         initialized_com = True
-        edsimage = ctypes.WinDLL(str(directory / "EdsImage.dll"), use_last_error=True)
+        # Loaded for its side effect before EDSDK.dll; the handle is not used.
+        edsimage = ctypes.WinDLL(str(directory / "EdsImage.dll"), use_last_error=True)  # noqa: F841
         edsdk = ctypes.WinDLL(str(directory / "EDSDK.dll"), use_last_error=True)
         required_exports = (
             "EdsInitializeSDK",

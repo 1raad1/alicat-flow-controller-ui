@@ -17,10 +17,9 @@ import sys
 import time
 from collections import deque
 
-import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QGridLayout, QGroupBox, QLabel,
     QMainWindow, QTabWidget, QVBoxLayout, QWidget,
 )
 

@@ -13,7 +13,7 @@ import numpy as np
 
 from flow_controller.domain.bayesian import SearchConfig, corrected_no, suggest
 from flow_controller.core.optimisation import (
-    Experiment, MeasurementWindow, observed_condition, validate_window,
+    Experiment, MeasurementWindow, validate_window,
 )
 
 

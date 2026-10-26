@@ -16,7 +16,7 @@ def main():
         source = sys.argv[1]
     else:
         from PySide6.QtWidgets import QApplication, QFileDialog
-        app = QApplication.instance() or QApplication([])
+        _app = QApplication.instance() or QApplication([])
         source, _ = QFileDialog.getOpenFileName(
             None, 'Select Canon Windows SDK ZIP or 64-bit EDSDK.dll',
             str(Path.home()), 'Canon SDK (*.zip EDSDK.dll);;All files (*)')

@@ -15,7 +15,7 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )

@@ -31,7 +31,6 @@ from .gas_properties import (
     AIR_O2_FRACTION,
     DENSITY_KG_PER_M3,
     LHV_MJ_PER_KG,
-    LHV_MJ_PER_M3,
 )
 
 #: The fuels the rig burns, in the order they are displayed.
