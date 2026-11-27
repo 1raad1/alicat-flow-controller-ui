@@ -404,12 +404,19 @@ the algorithms, equations, file format and code map, see the
 
 Expand **Bayesian optimiser** and choose **New experiment**. Select
 **Minimise NO** or **Map NO + pressure**. For mapping, set the NO mapping
-weight. The two pressure maps use the peak in-band Welch spectral amplitude.
+weight. New mapping campaigns model each transducer's pressure RMS and choose
+tests using the larger of the two; **Both transducers equally** keeps the
+earlier behaviour of two peak in-band Welch spectral-amplitude maps.
 
 Enter the nominal NH3/H2 thermal input, stage-1 fuel split, and bounds for H2 volume
 percentage, stage-1 phi and overall phi. Optionally select thermal input or
 stage-1 fuel split to add them as fourth and fifth search variables, then enter
 their bounds. Unselected values remain fixed. Bounds are intentionally blank.
+
+To set limits on bulk velocity instead of thermal input, select **Search Stage 1
+inlet bulk velocity** and confirm the Stage 1 inlet area. Thermal input is then
+calculated from the blend, stage-1 phi, fuel split and velocity, and is shown as
+its own operating-space map.
 
 This version supports stage-1 phi >= 1 and overall phi < 1, with both fuels
 present. Every assigned pilot fuel line must be off during measurements.

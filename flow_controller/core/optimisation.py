@@ -14,7 +14,8 @@ import uuid
 
 import numpy as np
 
-from ..domain.bayesian import SearchConfig, corrected_no, finite
+from ..domain.bayesian import SearchConfig, corrected_no, dual_pressure_metric, finite
+from ..domain.rql import stage1_bulk_velocity
 from ..domain.pressure import validate_pressure_summary, pressure_signature
 from ..domain.tdms_capture import validate_tdms_source
 from ..domain.combustion import CombustionCalculator
@@ -23,8 +24,8 @@ from ..domain.roles import ROLES
 from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
-SCHEMA = 4
-SUPPORTED_SCHEMAS = (1, 2, 3, SCHEMA)
+SCHEMA = 5  # 5: throughput, inlet_area_mm2 and pressure_acquisition in the config
+SUPPORTED_SCHEMAS = (1, 2, 3, 4, SCHEMA)
 MAX_TRIALS = 500
 MAX_EXPERIMENT_BYTES = 50_000_000
 FLOW_REL_TOL = .03
@@ -72,9 +73,13 @@ class Experiment:
                 "config": config.to_dict(), "trials": [],
                 "analyser_response": {"conditions": {"A": None, "B": None},
                                       "runs": [], "selected_run_id": None},
-                "objective": ("map corrected dry NO and two pressure spectral amplitudes"
-                              if config.objective_mode == "map_no_pressure" else
-                              "dry NO ppm corrected to fixed O2; not total NOx"),
+                "objective": (
+                    "dry NO ppm corrected to fixed O2; not total NOx"
+                    if config.objective_mode != "map_no_pressure" else
+                    f"map corrected dry NO and pressure {config.pressure_metric} per transducer; "
+                    "search on the larger transducer"
+                    if config.pressure_acquisition == "larger_transducer" else
+                    "map corrected dry NO and two pressure spectral amplitudes"),
                 "pilot": "off during measurements"}
         atomic_save(path, data)
         return cls(path, data)
@@ -418,7 +423,13 @@ class Experiment:
                       "pressure_raw_file", "pressure_summary_json", "mapping_score",
                       "suggested_pressure_pa", "suggested_pressure_sd_pa",
                       "suggested_pressure_1_pa", "suggested_pressure_1_sd_pa",
-                      "suggested_pressure_2_pa", "suggested_pressure_2_sd_pa"]
+                      "suggested_pressure_2_pa", "suggested_pressure_2_sd_pa",
+                      "throughput", "inlet_area_mm2", "bulk_velocity_m_s",
+                      "observed_bulk_velocity_m_s", "pressure_acquisition",
+                      "pressure_1_rms_pa", "pressure_2_rms_pa", "pressure_larger_pa",
+                      "suggested_pressure_larger_pa", "suggested_pressure_larger_sd_pa"]
+            velocity_mode = self.config.throughput == "bulk_velocity"
+            dual_metric = dual_pressure_metric(self.config)
             writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for t in self.trials:
@@ -435,6 +446,9 @@ class Experiment:
                 observed = window.get("observed_point", [None] * 3)
                 request = self.config.request(t["point"])
                 note = csv_text(result.get("notes", t.get("reason", "")))
+                larger = [value for value in (pressure_1_metrics.get(dual_metric),
+                                              pressure_2_metrics.get(dual_metric))
+                          if value is not None]
                 writer.writerow({
                     "test": t["number"], "status": t["status"],
                     "h2_fraction": request.h2_fraction,
@@ -529,6 +543,19 @@ class Experiment:
                     "suggested_pressure_1_sd_pa": t.get("pressure_1_latent_sd_pa"),
                     "suggested_pressure_2_pa": t.get("predicted_pressure_2_pa"),
                     "suggested_pressure_2_sd_pa": t.get("pressure_2_latent_sd_pa"),
+                    "throughput": self.config.throughput,
+                    "inlet_area_mm2": self.config.inlet_area_mm2,
+                    "bulk_velocity_m_s": (
+                        self.config.values(t["point"])["bulk_velocity"] if velocity_mode else None),
+                    "observed_bulk_velocity_m_s": (
+                        stage1_bulk_velocity(window["mean_flows"], self.config.inlet_area_mm2)
+                        if velocity_mode and window.get("mean_flows") else None),
+                    "pressure_acquisition": self.config.pressure_acquisition,
+                    "pressure_1_rms_pa": pressure_1_metrics.get("rms_pa"),
+                    "pressure_2_rms_pa": pressure_2_metrics.get("rms_pa"),
+                    "pressure_larger_pa": max(larger) if len(larger) == 2 else None,
+                    "suggested_pressure_larger_pa": t.get("predicted_pressure_larger_pa"),
+                    "suggested_pressure_larger_sd_pa": t.get("pressure_larger_latent_sd_pa"),
                 })
 
 
@@ -893,7 +920,9 @@ def validate_window(window, config, requested_point=None):
     for value, (lower, upper) in zip(window["observed_point"], config.bounds[:3]):
         if not lower - 1e-10 <= finite(value, "Measured coordinate") <= upper + 1e-10:
             raise ValueError("Measured operating point is outside the campaign bounds.")
-    if (not config.optimise_power
+    # With a searched bulk velocity the thermal input differs at every point;
+    # the measured velocity is checked against its own bounds further down.
+    if (config.throughput == "power" and not config.optimise_power
             and abs(finite(window["power_kw"], "Measured power") / config.power_kw - 1) > .03):
         raise ValueError("Measured thermal input differs from the experiment by more than 3%.")
     if (type(window["samples"]) is not int or window["samples"] < 3

@@ -49,6 +49,44 @@ class AutoCalcRequest:
             raise AutoCalcError("Total power must be > 0 kW.")
 
 
+#: Roles whose flows enter through the Stage 1 inlet while the pilot is off.
+STAGE1_INLET_ROLES = ('nh3_rich', 'h2_rich', 'rich_air')
+
+
+def stage1_bulk_velocity(flows, area_mm2):
+    """Cold-flow bulk velocity at the Stage 1 inlet, m/s, from role flows.
+
+    Stage 1 fuel plus Stage 1 air, in SLPM, over the declared inlet area.
+    Both are at standard conditions, the same convention as the live velocity
+    tile: this is not a hot-gas velocity and knows nothing about preheat.
+    """
+    total = sum(float(flows.get(role, 0.0) or 0.0) for role in STAGE1_INLET_ROLES)
+    return total / 60000.0 / (float(area_mm2) * 1e-6)       # (m^3/s) / m^2
+
+
+def power_for_stage1_velocity(velocity_m_s, area_mm2, h2_fraction, phi_stage1,
+                              split_rich=1.0, calculator=None):
+    """Thermal input, kW, that gives ``velocity_m_s`` at the Stage 1 inlet.
+
+    The Stage 1 inlet carries the Stage 1 fuel and the air that sets
+    ``phi_stage1``.  Per litre of Stage 1 fuel that air is the stoichiometric
+    requirement of the blend divided by ``phi_stage1``, so the fuel is the
+    inlet flow over ``1 + air-per-fuel``.  Stage 1 fuel over ``split_rich`` is
+    the total fuel, and the heating value turns that into a firing rate.  The
+    result goes through :func:`auto_calc` unchanged, which makes bulk velocity
+    and thermal input two descriptions of the same operating point rather than
+    two calculations that could drift apart.
+    """
+    calc = calculator or CombustionCalculator()
+    nh3_frac = 1.0 - h2_fraction
+    stage1_total = velocity_m_s * area_mm2 * 1e-6 * 60000.0          # SLPM
+    air_per_fuel = calc.stoich_air(nh3_frac, h2_fraction) / phi_stage1
+    fuel_stage1 = stage1_total / (1.0 + air_per_fuel)                # SLPM
+    fuel_total = fuel_stage1 / split_rich
+    return calc.power_kw({'NH3': fuel_total * nh3_frac,
+                          'H2': fuel_total * h2_fraction})
+
+
 def auto_calc(request, config=FULL_RQL, calculator=None):
     """Volumetric targets in SLPM, keyed by role.
 
