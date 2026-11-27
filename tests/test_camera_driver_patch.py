@@ -22,6 +22,11 @@ def _copy_camera_patch_inputs(destination: Path) -> None:
     )
     if not PINNED_SOURCE.is_dir():
         pytest.skip("pinned digiCamControl source cache is not available")
+    missing = [str(relative) for relative in inputs
+               if not (PINNED_SOURCE / relative).is_file()]
+    if missing:
+        pytest.skip("pinned digiCamControl source cache is incomplete: "
+                    + ", ".join(missing))
     for relative in inputs:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
