@@ -61,6 +61,9 @@ MAX_TIMEOUTS = 10
 CONNECT_OPEN_RETRY_WINDOW_S = 6.0
 CONNECT_OPEN_RETRY_S = 0.5
 
+#: Bounds how long an accepted zero may wait for the old monitor task to release the port.
+DEFERRED_ZERO_TIMEOUT_S = 5.0
+
 
 def _is_port_open_denied(error):
     """Recognize pyserial open denials without retrying failed device writes."""
@@ -283,6 +286,11 @@ class FlowSession(QObject):
         self._watchdog_locked_units = set()
         self._zero_action_active = False
         self._active_zero_request = None
+        self._deferred_zero_request = None
+        self._deferred_zero_timer = QTimer(self)
+        self._deferred_zero_timer.setSingleShot(True)
+        self._deferred_zero_timer.setInterval(int(DEFERRED_ZERO_TIMEOUT_S * 1000))
+        self._deferred_zero_timer.timeout.connect(self._deferred_zero_timed_out)
         self._emergency_stop_active = False
         self._estop_armed = False
 
@@ -1082,6 +1090,12 @@ class FlowSession(QObject):
             self._log(
                 f"Monitor serial task ended with an error: {type(exc).__name__}: {exc}")
 
+        if self._deferred_zero_request is not None:
+            self._deferred_zero_timer.stop()
+            request = self._deferred_zero_request
+            self._deferred_zero_request = None
+            self._start_direct_zero(request)
+            return
         if self._emergency_stop_active:
             return
         if self._zero_action_active and self._active_zero_request is not None:
@@ -1178,6 +1192,10 @@ class FlowSession(QObject):
         if not self._restart_pending or not self.controllers_connected:
             self._reconnect_active = False
             self._set_estop_armed(self.controllers_connected)
+            return
+        if self._emergency_stop_active:
+            # A plan abort can request zero while the monitor is closing.
+            # Finish that verified zero before opening a replacement monitor.
             return
         reason = self._restart_reason
         self._restart_pending = False
@@ -1931,7 +1949,7 @@ class FlowSession(QObject):
             return False
         if self._zero_action_active:
             return False
-        if self.is_connecting or self._restart_pending:
+        if self.is_connecting:
             self.failed.emit(
                 "Zero Flow", "Wait for the current connection operation to finish.")
             return False
@@ -1973,27 +1991,44 @@ class FlowSession(QObject):
             return True
 
         if self._monitor_future is not None and not self._monitor_future.done():
-            self._zero_action_active = False
-            self._active_zero_request = None
-            self._zero_locked_units.difference_update(units)
-            self._set_estop_armed(True)
-            self.failed.emit(
-                "Zero Flow", "Wait for the live monitor connection to finish closing.")
-            return False
+            # The old serial owner must close its handles before temporary
+            # ones open. Keep the locks and accepted zero until its callback.
+            self._deferred_zero_request = request
+            self._emergency_stop_active = True
+            self._deferred_zero_timer.start()
+            return True
 
+        self._start_direct_zero(request)
+        return True
+
+    def _deferred_zero_timed_out(self):
+        """Report a deferred zero as not sent if the old monitor never closed."""
+        if self._deferred_zero_request is None:
+            return
+        request = self._deferred_zero_request
+        self._deferred_zero_request = None
+        self._log(
+            f"ERROR: The live monitor did not release the serial port within "
+            f"{DEFERRED_ZERO_TIMEOUT_S:g} s; the zero was NOT sent to Unit(s) "
+            f"{', '.join(request.units)}.")
+        reason = (f"live monitor did not close within {DEFERRED_ZERO_TIMEOUT_S:g} s; "
+                  "zero was not sent")
+        self._finish_zero_request(request, {}, {unit: reason for unit in request.units})
+
+    def _start_direct_zero(self, request):
         # Monitoring is intentionally stopped: use transient handles on the
         # same serial owner, keeping the logical connection intact.
         self._emergency_stop_active = True
+        self._discard_queued_setpoints(set(request.units))
         port = self._monitor_port or self.port
         baudrate = self._monitor_baudrate or self.baudrate
         try:
             self._submit(
-                self._zero_controllers_async(port, baudrate, units),
+                self._zero_controllers_async(port, baudrate, request.units),
                 lambda future, req=request: self._finish_direct_zero(req, future))
         except Exception as exc:
             self._finish_zero_request(
                 request, {}, {"serial worker": f"{type(exc).__name__}: {exc}"})
-        return True
 
     async def _service_zero_requests(self, controllers, *, pending=None):
         """Service priority zero commands on the monitor's serial owner."""
@@ -2012,16 +2047,7 @@ class FlowSession(QObject):
             # Drop stale normal commands for the targeted units, and *only*
             # those: a unit outside the safety scope must keep the setpoint
             # the operator asked for.
-            retained = []
-            while not self.setpoint_queue.empty():
-                try:
-                    item = self.setpoint_queue.get_nowait()
-                except Exception:
-                    break
-                if item[0] not in targets:
-                    retained.append(item)
-            for item in retained:
-                self.setpoint_queue.put(item)
+            self._discard_queued_setpoints(targets)
 
             confirmed = {}
             errors = {}
@@ -2049,6 +2075,19 @@ class FlowSession(QObject):
                     errors[unit] = last_error or "zero command was not confirmed"
             self._post(self._finish_zero_request, request, confirmed, errors)
         return serviced
+
+    def _discard_queued_setpoints(self, targets):
+        """Discard pre-zero commands while preserving unrelated units."""
+        retained = []
+        while not self.setpoint_queue.empty():
+            try:
+                item = self.setpoint_queue.get_nowait()
+            except Exception:
+                break
+            if item[0] not in targets:
+                retained.append(item)
+        for item in retained:
+            self.setpoint_queue.put(item)
 
     async def _zero_controllers_async(self, port, baudrate, units):
         """Write zero and confirm the reported setpoint, one handle per unit."""
@@ -2082,6 +2121,8 @@ class FlowSession(QObject):
         except Exception as exc:
             confirmed, errors = {}, {"serial task": f"{type(exc).__name__}: {exc}"}
         self._finish_zero_request(request, confirmed, errors)
+        if self._restart_pending:
+            self._begin_serial_restart()
 
     def _finish_zero_request(self, request, confirmed, errors):
         """Report zero verification while preserving controller connections."""
@@ -2139,9 +2180,10 @@ class FlowSession(QObject):
         if seconds is not None:
             # A rate over a short journey can ask for less than one step; the
             # move still has to happen, so it becomes a single one.
-            interval = RAMP_STEP_S
+            duration = max(RAMP_STEP_S, float(seconds))
             steps = min(MAX_RAMP_STEPS,
-                        max(1, int(round(float(seconds) / interval))))
+                        max(1, math.ceil(duration / RAMP_STEP_S)))
+            interval = duration / steps
         if steps < 1 or interval < 0.05:
             self.failed.emit("Ramp", "Steps ≥ 1 and interval ≥ 0.05 s.")
             return False
@@ -2621,6 +2663,8 @@ class FlowSession(QObject):
             # that paces a typed setpoint, so a line that the operator has
             # slowed down stays slow however the setpoint arrives.
             rate_lookup=lambda track: self.effective_ramp_rate(
+                bound.get(track.key)),
+            ramp_disabled_lookup=lambda track: self.ramp_disabled_for(
                 bound.get(track.key)))
         self._player.prime()
         self._replay_started_at = time.monotonic()
@@ -2838,8 +2882,25 @@ class FlowSession(QObject):
             return
         phi_values = self.phi_values(pass_samples)
         with self._csv_lock:
-            self._csv.write_row(pass_samples, phi_values, timestamp,
-                                mexa=self.mexa.csv_snapshot(timestamp))
+            if not self._csv.active:
+                return
+            written = self._csv.write_row(
+                pass_samples, phi_values, timestamp,
+                mexa=self.mexa.csv_snapshot(timestamp))
+            if written:
+                return
+            error = self._csv.last_error or "The CSV row could not be written."
+            path = self._csv.stop()
+        self._post(self._on_logging_failure, path, error)
+
+    def _on_logging_failure(self, path, error):
+        """Report a serial-thread log failure on the GUI thread."""
+        self._log(f"Logging stopped after a write failure: {path}: {error}")
+        if not self._csv.active:
+            self.logging_changed.emit(False, path)
+        self.failed.emit(
+            "Logging", f"Data logging stopped because a CSV row could not be "
+            f"saved:\n\n{path}\n{error}\n\nLive monitoring continues.")
 
     # ==================================================================== #
     #  LabVIEW UDP triggers                                                #
@@ -2931,6 +2992,7 @@ class FlowSession(QObject):
         self._ramps.cancel_all()
         self.stop_replay(reason="cancelled at shutdown")
         self._replay_timer.stop()
+        self._deferred_zero_timer.stop()
         if self._recorder.active:
             self.stop_recording()
         self.is_monitoring = False

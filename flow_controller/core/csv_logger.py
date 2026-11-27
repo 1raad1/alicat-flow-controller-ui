@@ -104,6 +104,7 @@ class CsvLogger:
         self.source = None
         self.mexa = False
         self._last_mexa = None
+        self.last_error = None
 
     @property
     def active(self):
@@ -132,6 +133,7 @@ class CsvLogger:
         self.source = source
         self.mexa = mexa
         self._last_mexa = None
+        self.last_error = None
         return self.path
 
     def write_row(self, samples, phi_values, timestamp=None, *, mexa=None):
@@ -157,12 +159,10 @@ class CsvLogger:
                     self._last_mexa = identity
                 row.extend(reading.get(key, '') for key in MEXA_COLUMNS)
             self._writer.writerow(row)
-            try:
-                self._file.flush()
-            except Exception:
-                pass
+            self._file.flush()
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return False
 
     def stop(self):

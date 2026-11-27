@@ -710,7 +710,7 @@ class SequencePlayer:
 
     def __init__(self, sequence, bound, emit, *, log=None,
                  rate_limited=frozenset(), min_ramp_s=MIN_RAMP_S, repeats=1,
-                 rate_lookup=None):
+                 rate_lookup=None, ramp_disabled_lookup=None):
         self._sequence = sequence
         self._bound = dict(bound)
         self._emit = emit
@@ -719,6 +719,9 @@ class SequencePlayer:
         #: Asked for each track's declared rate, so a replay is paced by the
         #: same figure on the controller's card that paces a typed setpoint.
         self._rate_lookup = rate_lookup
+        #: Asked at each tick so turning a controller's ramping off also
+        #: overrides a rate saved on the track, including during a return.
+        self._ramp_disabled_lookup = ramp_disabled_lookup
         self._min_ramp_s = max(0.1, float(min_ramp_s))
         self._last_sent = {}
         self._current = {}
@@ -880,17 +883,21 @@ class SequencePlayer:
     def rate_for(self, track):
         """Largest change per second allowed on ``track``, ``None`` if free.
 
-        Three cases, in the order they matter:
+        An explicitly disabled controller ramp overrides both a saved track
+        rate and the minimum rate for a protected line. Otherwise:
 
         * A line that must never step (``rate_limited``) always has a limit.
           Unset, it is the span spread over ``min_ramp_s``; set, it is the
-          operator's rate but never *faster* than that default.  The operator
-          can slow the pilot down; they cannot switch the protection off.
+          operator's rate but never *faster* than that default while ramping
+          is enabled.  The operator can slow the pilot down.
         * Any other line with a rate set gets exactly that rate, which is how
           a controller that was recorded stepping can be replayed as a ramp.
         * Everything else is unlimited, which is what the recording says
           happened: a setpoint was written and the controller went there.
         """
+        if (self._ramp_disabled_lookup is not None
+                and self._ramp_disabled_lookup(track)):
+            return None
         must_ramp = track.key in self._rate_limited
         default = (track.span or 1.0) / self._min_ramp_s if must_ramp else None
         rate = self.declared_rate(track)
