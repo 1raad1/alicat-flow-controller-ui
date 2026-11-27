@@ -118,6 +118,7 @@ class OptimiserController(QObject):
         session.mexa.interrupted.connect(self._mexa_interrupted)
         session.labview_command.connect(self._legacy_labview_command)
         session.labview_packet.connect(self._labview_packet)
+        session.logging_changed.connect(self._logging_changed)
         self._freshness_timer = QTimer(self)
         self._freshness_timer.setInterval(500)
         self._freshness_timer.timeout.connect(self._check_live_freshness)
@@ -792,6 +793,19 @@ class OptimiserController(QObject):
             self.session._udp_stop_logging()
         self._labview_log_owned = None
         self._say(reason)
+        self.changed.emit()
+
+    def _logging_changed(self, active, path):
+        """Drop the audit-log reference once that log no longer covers the window."""
+        capture = self.capture
+        if capture is None or capture.flow_audit_log is None:
+            return
+        if active and str(path) == capture.flow_audit_log:
+            return
+        stopped = capture.flow_audit_log
+        capture.flow_audit_log = None
+        self._say(f"Flow logging stopped during the measurement window, so the saved window "
+                  f"will not reference the partial log {stopped}. The window continues.")
         self.changed.emit()
 
     def _configuration_changed(self, *_args):
