@@ -437,6 +437,22 @@ at least one more completed test than the number of variables. Save a new
 `.fcbo.json` experiment. These settings are fixed for the campaign; use a new
 file to change them.
 
+Five fields set the campaign plan:
+
+- **Planned completed tests (blank = no plan)**: default ten per searched
+  variable, 30 for three. Leave blank for no plan; otherwise a whole number
+  from the initial-design size to 500 and at least the minimum below.
+- **Minimum completed tests before convergence**: default five per searched
+  variable, never below the initial-design size.
+- **Smallest NO improvement that matters (ppm)**: default 1; **Minimise NO**
+  only.
+- **Mapping convergence threshold (%)**: default 2; **Map NO + pressure** only.
+- **Consecutive suggestions meeting the criteria**: default 3; 3 to 5 is
+  recommended.
+
+The planned count can be raised later with **Extend plan**; the other settings
+are fixed.
+
 #### 3. Review target flows
 
 Click **Suggest next test**, then **Load target fields**. This fills the
@@ -504,6 +520,46 @@ No flows change on save.
 
 Suggest the next test. Use the **History** tab to inspect results, repeat
 a completed point, or export CSV. Repeating a point creates a separate test.
+
+Below **Suggest next test**, the plan line shows completed tests against the
+planned count and a convergence readout, then the reasons and any notes. For
+**Minimise NO**, the campaign reads **Converged** only when, over the last 3
+model suggestions (the consecutive count), all four checks pass:
+
+1. **Expected improvement.** Each suggestion's expected improvement is at most
+   the threshold. The threshold is the smallest NO improvement that matters
+   or the measurement noise, whichever is larger. The noise is the pooled
+   standard deviation of repeated tests once repeats give at least two degrees
+   of freedom (for example one test run three times); before that it is the
+   noise the model fitted.
+2. **No better region elsewhere.** At no candidate more than 15% of a
+   variable's range from the model's best point is the lower confidence bound
+   (model mean minus two standard deviations) more than the threshold below
+   the best estimate.
+3. **Stable best point.** The model's best point has moved by at most 5% of
+   each variable's range.
+4. **Minimum tests.** At least the minimum number of tests are completed.
+
+For **Map NO + pressure**, it reads **Converged** when each of the last 3
+suggestions would reduce average map uncertainty by at most the mapping
+threshold (2%) and the minimum number of tests are completed.
+
+Notes under the readout do not change it. They warn when the best point is
+within 2% of a search bound (the true minimum may lie outside), when the model
+treats a variable as having almost no effect, and when noise has not been
+measured (repeat one completed test 3 to 5 times). Once converged, a note
+reminds you to repeat the best test 2 to 3 times and to run a few tests away
+from it.
+
+**Converged** is a stopping guide based on what the model reported when each
+test was suggested. It is not proof of a global minimum or of a correct map,
+and the program never stops a campaign by itself. When the planned count is
+reached, **Suggest next test** pauses; enter a number and click **Extend plan**
+(**Set plan** for a campaign without one) to continue. Repeats are still
+allowed after the plan is reached. Extending changes no flows and is recorded
+in the experiment file. The
+[manual](docs/BAYESIAN_OPTIMISER_MANUAL.md#campaign-plan-and-convergence-readout)
+gives the formulae.
 
 #### Response-time calibration
 

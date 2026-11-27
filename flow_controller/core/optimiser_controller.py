@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from .analyser_response_controller import AnalyserResponseController
 from .optimisation import Experiment, MeasurementWindow, FLOW_ABS_TOL, FLOW_REL_TOL, atomic_save
 from ..domain.bayesian import finite, suggest
+from ..domain.convergence import DEFAULT_CONSECUTIVE, DEFAULT_GAIN_FRACTION, DEFAULT_MIN_IMPROVEMENT_PPM
 from ..domain.pressure import load_pressure_result, process_pressure_file
 from ..domain.tdms_capture import validate_tdms_source, folder_snapshot, find_tdms_capture, process_tdms_capture
 from ..domain.roles import ROLE_MAP
@@ -140,13 +141,27 @@ class OptimiserController(QObject):
         self.last_message = str(text)
         self.message.emit(self.last_message)
 
-    def create(self, path, config):
+    def create(self, path, config, *, planned_tests=None, min_tests=None,
+               min_improvement_ppm=DEFAULT_MIN_IMPROVEMENT_PPM,
+               gain_fraction=DEFAULT_GAIN_FRACTION, consecutive=DEFAULT_CONSECUTIVE):
         self._require_idle()
         self.disarm_labview()
-        self.experiment = Experiment.create(path, config)
+        self.experiment = Experiment.create(path, config, planned_tests=planned_tests,
+                                            min_tests=min_tests,
+                                            min_improvement_ppm=min_improvement_ppm,
+                                            gain_fraction=gain_fraction, consecutive=consecutive)
         self.draft.clear()
         self._say("Experiment saved. Bounds and reporting basis are fixed for this campaign.")
         self.changed.emit()
+
+    def extend_plan(self, additional):
+        experiment = self._require_experiment()
+        if self.busy:
+            raise ValueError("Wait for the background calculation to finish before changing the plan.")
+        total = experiment.extend_plan(additional)
+        self._say(f"Plan extended to {total} completed tests. No flows changed.")
+        self.changed.emit()
+        return total
 
     def load(self, path):
         self._require_idle()
@@ -177,6 +192,10 @@ class OptimiserController(QObject):
         experiment = self._require_experiment()
         if experiment.pending:
             raise ValueError("Complete or mark the current test invalid first.")
+        if experiment.plan_reached:
+            headline = experiment.convergence()["headline"]
+            raise ValueError(f"The planned {experiment.planned_tests} tests are complete "
+                             f"({headline.lower()}). Extend the plan to continue.")
         self.worker = SuggestionWorker(experiment.config, experiment.trials, self.limits(), self)
         self.worker.succeeded.connect(self._suggestion)
         self.worker.failed.connect(self._say)

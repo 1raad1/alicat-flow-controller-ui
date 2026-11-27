@@ -15,6 +15,9 @@ import uuid
 import numpy as np
 
 from ..domain.bayesian import SearchConfig, corrected_no, dual_pressure_metric, finite
+from ..domain.convergence import (DEFAULT_CONSECUTIVE, DEFAULT_GAIN_FRACTION,
+                                  DEFAULT_MIN_IMPROVEMENT_PPM, assess_convergence,
+                                  default_min_tests, validate_convergence_settings)
 from ..domain.rql import stage1_bulk_velocity
 from ..domain.pressure import validate_pressure_summary, pressure_signature
 from ..domain.tdms_capture import validate_tdms_source
@@ -24,7 +27,7 @@ from ..domain.roles import ROLES
 from mexa_bridge.records import CHANNEL_FIELDS, PROTOCOL, epoch, number
 
 
-SCHEMA = 5  # 5: throughput, inlet_area_mm2 and pressure_acquisition in the config
+SCHEMA = 5  # 5: throughput, inlet_area_mm2 and pressure_acquisition in the config; optional top-level campaign "plan" (absent = open-ended)
 SUPPORTED_SCHEMAS = (1, 2, 3, 4, SCHEMA)
 MAX_TRIALS = 500
 MAX_EXPERIMENT_BYTES = 50_000_000
@@ -35,10 +38,65 @@ MAX_RESPONSE_SAMPLES = 4000
 MAX_STORED_FLOW = 1_000_000.0
 RESPONSE_ROLES = frozenset(key for key, _label in ROLES)
 CONDITION_LOG_SCHEMA = 1
+MAX_PLAN_EXTENSIONS = 100
+MAX_EXTENSION_DETAIL = 2000
+PLAN_KEYS = frozenset({"planned_tests", "min_tests", "min_improvement_ppm", "gain_fraction",
+                       "consecutive", "extensions"})
+EXTENSION_KEYS = frozenset({"at", "from", "to", "completed", "state", "detail"})
 
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def default_plan(config):
+    return {"planned_tests": None, "min_tests": default_min_tests(config),
+            "min_improvement_ppm": DEFAULT_MIN_IMPROVEMENT_PPM,
+            "gain_fraction": DEFAULT_GAIN_FRACTION, "consecutive": DEFAULT_CONSECUTIVE,
+            "extensions": []}
+
+
+def validate_plan(plan, config):
+    """Check a campaign plan object; ``planned_tests`` None means open-ended."""
+    if not isinstance(plan, dict):
+        raise ValueError("Invalid campaign plan.")
+    unknown = set(plan) - PLAN_KEYS
+    if unknown:
+        raise ValueError(f"Unknown campaign plan field: {sorted(unknown)[0]}.")
+    if set(plan) != PLAN_KEYS:
+        raise ValueError("Incomplete campaign plan.")
+    planned = plan["planned_tests"]
+    if planned is not None and (type(planned) is not int
+                                or not config.initial_points <= planned <= MAX_TRIALS):
+        raise ValueError(
+            f"Planned completed tests must be a whole number from {config.initial_points} "
+            f"(the initial space-filling points) to {MAX_TRIALS}, or blank for no plan.")
+    if plan["min_tests"] is None:
+        raise ValueError("Incomplete campaign plan.")
+    settings = validate_convergence_settings(
+        config, min_improvement_ppm=plan["min_improvement_ppm"],
+        gain_fraction=plan["gain_fraction"], consecutive=plan["consecutive"],
+        min_tests=plan["min_tests"])
+    if planned is not None and planned < settings["min_tests"]:
+        raise ValueError(
+            f"Planned completed tests ({planned}) cannot be fewer than the minimum completed "
+            f"tests before convergence ({settings['min_tests']}).")
+    extensions = plan["extensions"]
+    if not isinstance(extensions, list) or len(extensions) > MAX_PLAN_EXTENSIONS:
+        raise ValueError("Invalid campaign plan extension list.")
+    for item in extensions:
+        if not isinstance(item, dict) or set(item) != EXTENSION_KEYS:
+            raise ValueError("Invalid campaign plan extension record.")
+        if type(item["to"]) is not int or not 1 <= item["to"] <= MAX_TRIALS:
+            raise ValueError("Invalid campaign plan extension target.")
+        if item["from"] is not None and type(item["from"]) is not int:
+            raise ValueError("Invalid campaign plan extension start.")
+        if type(item["completed"]) is not int or item["completed"] < 0:
+            raise ValueError("Invalid campaign plan extension completed count.")
+        if not all(isinstance(item[key], str) for key in ("at", "state", "detail")):
+            raise ValueError("Invalid campaign plan extension text.")
+        if len(item["detail"]) > MAX_EXTENSION_DETAIL:
+            raise ValueError("Campaign plan extension detail is too long.")
 
 
 def atomic_save(path, data):
@@ -65,10 +123,17 @@ class Experiment:
         self.config = SearchConfig(**data["config"])
 
     @classmethod
-    def create(cls, path, config):
+    def create(cls, path, config, *, planned_tests=None, min_tests=None,
+               min_improvement_ppm=DEFAULT_MIN_IMPROVEMENT_PPM,
+               gain_fraction=DEFAULT_GAIN_FRACTION, consecutive=DEFAULT_CONSECUTIVE):
         path = Path(path)
         if path.exists():
             raise ValueError("That experiment file already exists. Open it or choose a new name.")
+        settings = validate_convergence_settings(
+            config, min_improvement_ppm=min_improvement_ppm, gain_fraction=gain_fraction,
+            consecutive=consecutive, min_tests=min_tests)
+        plan = {"planned_tests": planned_tests, **settings, "extensions": []}
+        validate_plan(plan, config)
         data = {"schema": SCHEMA, "id": str(uuid.uuid4()), "created_at": now_iso(),
                 "config": config.to_dict(), "trials": [],
                 "analyser_response": {"conditions": {"A": None, "B": None},
@@ -80,7 +145,8 @@ class Experiment:
                     "search on the larger transducer"
                     if config.pressure_acquisition == "larger_transducer" else
                     "map corrected dry NO and two pressure spectral amplitudes"),
-                "pilot": "off during measurements"}
+                "pilot": "off during measurements",
+                "plan": plan}
         atomic_save(path, data)
         return cls(path, data)
 
@@ -97,6 +163,8 @@ class Experiment:
             if data.get("tdms_source") is not None:
                 validate_tdms_source(data["tdms_source"], require_folder=False)
             validate_analyser_response(data.get("analyser_response"))
+            if data.get("plan") is not None:
+                validate_plan(data["plan"], experiment.config)
             trials = data["trials"]
             if not isinstance(trials, list) or len(trials) > MAX_TRIALS:
                 raise ValueError("Invalid trial list.")
@@ -156,6 +224,54 @@ class Experiment:
     @property
     def pending(self):
         return next((t for t in self.trials if t["status"] == "pending"), None)
+
+    @property
+    def plan(self):
+        """The campaign plan; files without one are open-ended with default settings."""
+        plan = self.data.get("plan")
+        return default_plan(self.config) if plan is None else deepcopy(plan)
+
+    @property
+    def planned_tests(self):
+        return self.plan["planned_tests"]
+
+    @property
+    def completed_count(self):
+        return sum(trial["status"] == "completed" for trial in self.trials)
+
+    @property
+    def plan_reached(self):
+        planned = self.planned_tests
+        return planned is not None and self.completed_count >= planned
+
+    def convergence(self):
+        plan = self.plan
+        return assess_convergence(
+            self.config, self.trials, min_improvement_ppm=plan["min_improvement_ppm"],
+            gain_fraction=plan["gain_fraction"], consecutive=plan["consecutive"],
+            min_tests=plan["min_tests"])
+
+    def extend_plan(self, additional):
+        """Raise the planned completed-test count and record why; returns the new total."""
+        if type(additional) is not int or additional < 1:
+            raise ValueError("Tests to add must be a whole number of at least 1.")
+        plan = self.plan
+        completed = self.completed_count
+        base = max(plan["planned_tests"] or 0, completed)
+        new = base + additional
+        if new > MAX_TRIALS:
+            raise ValueError(f"The plan cannot exceed the {MAX_TRIALS}-test limit of one campaign "
+                             f"({completed} tests completed). Start a new campaign.")
+        assessment = self.convergence()
+        plan["extensions"].append({"at": now_iso(), "from": plan["planned_tests"], "to": new,
+                                   "completed": completed, "state": assessment["state"],
+                                   "detail": assessment["detail"][:MAX_EXTENSION_DETAIL]})
+        plan["planned_tests"] = new
+        validate_plan(plan, self.config)
+        data = deepcopy(self.data)
+        data["plan"] = plan
+        self._commit(data)
+        return new
 
     def _commit(self, data):
         data["schema"] = SCHEMA

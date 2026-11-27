@@ -9,13 +9,16 @@ from PySide6.QtCore import Qt, QThread, Signal, QRectF
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
 from ..core.combustion_prefs import SCOPE_STAGE1
+from ..core.optimisation import MAX_TRIALS, validate_plan
 from ..core.session import DEFAULT_LOG_DIR
 from ..domain.bayesian import SearchConfig, dual_pressure_metric, finite
+from ..domain.convergence import (DEFAULT_CONSECUTIVE, DEFAULT_GAIN_FRACTION, DEFAULT_MIN_IMPROVEMENT_PPM,
+                                  MIN_TESTS_PER_VARIABLE)
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from . import qt_theme as theme
 from .qt_widgets import Card
@@ -498,12 +501,26 @@ class ExperimentDialog(QDialog):
         existing_names = getattr(request, "variable_names", ())
         self._minimum_initial_points = 4 + sum(
             name in existing_names for name in ("bulk_velocity", "power_kw", "split_rich"))
+        # Ten planned and five minimum completed tests per searched variable; both
+        # follow the checkboxes until edited.
+        self._default_planned = 10 * (self._minimum_initial_points - 1)
+        self._default_min_tests = MIN_TESTS_PER_VARIABLE * (self._minimum_initial_points - 1)
+        self.planned_tests = None
+        self.min_tests = None
+        self.min_improvement_ppm = DEFAULT_MIN_IMPROVEMENT_PPM
+        self.gain_fraction = DEFAULT_GAIN_FRACTION
+        self.consecutive = DEFAULT_CONSECUTIVE
         for key, title, value in (
             ("power", "Nominal/fixed thermal input (kW)", getattr(request, "power_kw", 10)),
             ("split", "Nominal/fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
             ("reference", "Reporting reference O2 (dry vol%)", getattr(request, "reference_o2", 15)),
             ("initial", "Initial space-filling points",
              getattr(request, "initial_points", None) or self._minimum_initial_points),
+            ("planned", "Planned completed tests (blank = no plan)", self._default_planned),
+            ("min_tests", "Minimum completed tests before convergence", self._default_min_tests),
+            ("min_improvement", "Smallest NO improvement that matters (ppm)", DEFAULT_MIN_IMPROVEMENT_PPM),
+            ("gain", "Mapping convergence threshold (%)", 100 * DEFAULT_GAIN_FRACTION),
+            ("consecutive", "Consecutive suggestions meeting the criteria", DEFAULT_CONSECUTIVE),
             ("pool", "Candidate pool size", getattr(request, "candidate_pool_size", None) or 1024),
             ("window", "Minimum averaging window (s)", getattr(request, "window_seconds", 30)),
             ("mapping_weight", "NO mapping weight (0–1)",
@@ -537,6 +554,23 @@ class ExperimentDialog(QDialog):
         self._mapping_options()
         self.entries["mapping_weight"].setToolTip(
             "Fraction of mapping information assigned to NO; the remaining fraction is assigned to pressure.")
+        self.entries["planned"].setToolTip(
+            "Completed tests after which Suggest next test pauses until you extend the plan. "
+            "Defaults to ten per searched variable. Leave blank for an open-ended campaign. "
+            "Repeats remain available after the plan is reached.")
+        self.entries["min_tests"].setToolTip(
+            "Convergence is never reported before this many completed tests. "
+            "Defaults to five per searched variable.")
+        self.entries["min_improvement"].setToolTip(
+            "Minimise NO only. Expected improvements below this, or below the measured noise if "
+            "that is larger, are treated as not worth another test.")
+        self.entries["gain"].setToolTip(
+            "Map NO + pressure only. A suggestion meets the criterion when one more test would "
+            "reduce average map uncertainty by at most this percentage.")
+        self.entries["consecutive"].setToolTip(
+            "Number of consecutive model suggestions that must all meet the criteria before the "
+            "campaign is reported as converged. 3 to 5 is recommended. A stopping guide, not proof "
+            "of a global minimum or of a correct map.")
         layout.addLayout(form)
         self.reference_status = note(
             "O₂ reference is copied once or entered manually, then fixed for the campaign.")
@@ -584,6 +618,7 @@ class ExperimentDialog(QDialog):
             self.optional[key] = (check, pair, scale)
         for check, _pair, _scale in self.optional.values():
             check.toggled.connect(self._update_initial_points)
+            check.toggled.connect(self._update_planned_tests)
         area_title = "Stage 1 inlet area (mm²)"
         grid.addWidget(QLabel(area_title), 7, 0)
         area = self._stored_area if self._stored_area is not None else inlet_area_mm2
@@ -641,6 +676,8 @@ class ExperimentDialog(QDialog):
             "information competes with NO when the next test is chosen."
             if mapping else "Pressure mapping is not selected.")
         self.entries["mapping_weight"].setEnabled(mapping)
+        self.entries["gain"].setEnabled(mapping)
+        self.entries["min_improvement"].setEnabled(not mapping)
 
     def _throughput_options(self, *_args):
         """Bulk velocity and thermal input describe the same thing; search one."""
@@ -658,6 +695,16 @@ class ExperimentDialog(QDialog):
         if entry.text().strip() == str(self._minimum_initial_points):
             entry.setText(str(minimum))
         self._minimum_initial_points = minimum
+
+    def _update_planned_tests(self):
+        variables = 3 + sum(check.isChecked() for check, _pair, _scale in self.optional.values())
+        for key, attribute, default in (("planned", "_default_planned", 10 * variables),
+                                        ("min_tests", "_default_min_tests",
+                                         MIN_TESTS_PER_VARIABLE * variables)):
+            entry = self.entries[key]
+            if entry.text().strip() == str(getattr(self, attribute)):
+                entry.setText(str(default))
+            setattr(self, attribute, default)
 
     def accept(self):
         try:
@@ -689,9 +736,29 @@ class ExperimentDialog(QDialog):
                 inlet_area_mm2=(finite(self.entries["inlet_area"].text(), "Stage 1 inlet area")
                                 if selected["bulk_velocity"] else self._stored_area),
                 pressure_acquisition=self.pressure_acquisition.currentData())
+
+            def whole(key, name):
+                value = finite(self.entries[key].text(), name)
+                if not value.is_integer():
+                    raise ValueError(f"{name} must be a whole number.")
+                return int(value)
+
+            planned = (whole("planned", "Planned completed tests")
+                       if self.entries["planned"].text().strip() else None)
+            min_tests = whole("min_tests", "Minimum completed tests before convergence")
+            min_improvement = finite(self.entries["min_improvement"].text(),
+                                     "Smallest NO improvement that matters")
+            gain = finite(self.entries["gain"].text(), "Mapping convergence threshold") / 100
+            consecutive = whole("consecutive", "Consecutive suggestions meeting the criteria")
+            validate_plan({"planned_tests": planned, "min_tests": min_tests,
+                           "min_improvement_ppm": min_improvement, "gain_fraction": gain,
+                           "consecutive": consecutive, "extensions": []}, self.config)
         except ValueError as exc:
             self.error.setText(str(exc))
             return
+        self.planned_tests, self.min_tests = planned, min_tests
+        self.min_improvement_ppm, self.gain_fraction = min_improvement, gain
+        self.consecutive = consecutive
         super().accept()
 
     def _record_reference_o2(self):
@@ -776,6 +843,20 @@ class OptimiserPane(Card):
         self.load_button = self._button("Load target fields", self.controller.prepare_targets, line)
         self.load_button.setToolTip("Populate the existing controller fields. Does not send commands.")
         layout.addLayout(line)
+        self.plan_status = note("")
+        self.plan_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.plan_status)
+        row = QHBoxLayout()
+        self.extend_count = QSpinBox()
+        self.extend_count.setRange(1, MAX_TRIALS)
+        self.extend_count.setValue(5)
+        self.extend_count.setAccessibleName("Tests to add to the plan")
+        self.extend_count.setToolTip("Completed tests to add to the plan. Does not change any flow.")
+        row.addWidget(self.extend_count)
+        self.extend_button = self._button(
+            "Extend plan", lambda: self.controller.extend_plan(self.extend_count.value()), row)
+        row.addStretch(1)
+        layout.addLayout(row)
         layout.addWidget(note("Review all fields, then apply through the existing controls. "
                               "Switch off the pilot using your established procedure."))
         self.pilot = QCheckBox("Pilot is off throughout this measurement")
@@ -1199,7 +1280,10 @@ class OptimiserPane(Card):
         if path:
             if not path.lower().endswith(SUFFIX):
                 path += SUFFIX
-            self.controller.create(path, dialog.config)
+            self.controller.create(path, dialog.config, planned_tests=dialog.planned_tests,
+                                   min_tests=dialog.min_tests,
+                                   min_improvement_ppm=dialog.min_improvement_ppm,
+                                   gain_fraction=dialog.gain_fraction, consecutive=dialog.consecutive)
 
     def _open(self):
         if not self._switch_ok():
@@ -1311,7 +1395,31 @@ class OptimiserPane(Card):
         self.settled.setEnabled(not capturing and not window and not armed)
         self.new_button.setEnabled(not busy and not capturing)
         self.open_button.setEnabled(not busy and not capturing)
-        self.ask_button.setEnabled(bool(experiment and not pending and not busy))
+        plan_reached = bool(experiment and experiment.plan_reached)
+        self.ask_button.setEnabled(bool(experiment and not pending and not busy and not plan_reached))
+        self.ask_button.setToolTip(
+            "The planned number of completed tests is reached. Extend the plan to suggest more "
+            "tests; repeats remain available from History." if plan_reached else "")
+        if experiment is None:
+            self.plan_status.setText("")
+        else:
+            planned = experiment.planned_tests
+            completed = experiment.completed_count
+            assessment = experiment.convergence()
+            text = (f"Plan: {completed} of {planned} tests completed" if planned is not None else
+                    f"No planned test count: {completed} tests completed")
+            text += f" · {assessment['headline']}."
+            if plan_reached:
+                text += " Extend the plan to suggest more tests."
+            lines = [text]
+            if assessment["detail"]:
+                lines.append(assessment["detail"])
+            lines.extend(f"Note: {warning}" for warning in assessment["warnings"])
+            self.plan_status.setText("\n".join(lines))
+            self.extend_button.setText("Set plan" if planned is None else "Extend plan")
+        extend_enabled = bool(experiment and not c.busy)
+        self.extend_count.setEnabled(extend_enabled)
+        self.extend_button.setEnabled(extend_enabled)
         self.load_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
         self.start_button.setEnabled(bool(pending and not busy and not capturing and not window
                                           and not armed and not mapping))

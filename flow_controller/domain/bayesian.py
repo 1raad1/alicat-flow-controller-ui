@@ -46,6 +46,12 @@ VARIABLE_LABELS = {
 }
 # Public compatibility name used by older callers and documentation.
 PARAMETERS = tuple(VARIABLE_LABELS[key] for key in BASE_VARIABLES)
+# Matérn length-scale bounds in normalised 0..1 coordinates (all GP models).
+LENGTH_SCALE_BOUNDS = (.03, 3.0)
+# Convergence diagnostics stored with each Minimise NO model suggestion; they
+# never change which point is suggested.
+LCB_MULTIPLIER = 2.0
+ELSEWHERE_RADIUS = 0.15
 
 
 def finite(value, name):
@@ -365,7 +371,7 @@ def _fit_mapping_models(config, completed, seed):
         if scale == 0:
             scale = max(abs(centre), 1.0)
         kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-            [.3] * config.dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+            [.3] * config.dimensions, LENGTH_SCALE_BOUNDS, nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
         gp = GaussianProcessRegressor(kernel=kernel, alpha=(sem / scale) ** 2 + 1e-8,
                                      n_restarts_optimizer=1, random_state=seed)
         with threadpool_limits(limits=1), warnings.catch_warnings():
@@ -604,14 +610,30 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     centre, scale = float(y.mean()), max(float(y.std()), 1.0)
     errors = np.array([t["result"].get("corrected_sem") or 0 for t in completed]) / scale
     kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-        [.3] * dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+        [.3] * dimensions, LENGTH_SCALE_BOUNDS, nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
     gp = GaussianProcessRegressor(kernel=kernel, alpha=errors ** 2 + 1e-8,
                                  n_restarts_optimizer=1, random_state=seed)
     with threadpool_limits(limits=1), warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
         gp.fit(x, (y - centre) / scale)
         acquisition, mean, std = noisy_expected_improvement(gp, np.unique(x, axis=0), pool, rng)
+        # Convergence diagnostics only: computed after the acquisition, with no
+        # further use of rng, so they cannot change the suggested point.
+        unique_x = np.unique(x, axis=0)
+        _, observed_mean = _latent_posterior(gp, np.empty((0, dimensions)), unique_x)[:2]
     index = int(np.argmax(acquisition))
+    best_index = int(np.argmin(observed_mean))
+    best_location = unique_x[best_index]
+    elsewhere = np.max(np.abs(pool - best_location[None, :]), axis=1) > ELSEWHERE_RADIUS
+    lower_bound = (mean - LCB_MULTIPLIER * std) * scale + centre
+    provenance.update({
+        "best_model_no": float(observed_mean[best_index] * scale + centre),
+        "best_model_point": (lower + best_location * span).tolist(),
+        "lowest_lcb_elsewhere": float(lower_bound[elsewhere].min()) if elsewhere.any() else None,
+        "lcb_multiplier": LCB_MULTIPLIER,
+        "elsewhere_radius": ELSEWHERE_RADIUS,
+        "noise_sd_ppm": float(math.sqrt(float(gp.kernel_.k2.noise_level)) * scale),
+    })
     provenance.update({
         "algorithm_version": "fcbo-matern52-nei-v1",
         "fitted_kernel": str(gp.kernel_),
