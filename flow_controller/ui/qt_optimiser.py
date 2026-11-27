@@ -9,12 +9,16 @@ from PySide6.QtCore import Qt, QThread, Signal, QRectF
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
+from ..core.combustion_prefs import SCOPE_STAGE1
+from ..core.optimisation import MAX_TRIALS, validate_plan
 from ..core.session import DEFAULT_LOG_DIR
-from ..domain.bayesian import SearchConfig, finite
+from ..domain.bayesian import SearchConfig, dual_pressure_metric, finite
+from ..domain.convergence import (DEFAULT_CONSECUTIVE, DEFAULT_GAIN_FRACTION, DEFAULT_MIN_IMPROVEMENT_PPM,
+                                  MIN_TESTS_PER_VARIABLE)
 from ..domain.gas_properties import O2_CORRECTION_AIR_PERCENT
 from . import qt_theme as theme
 from .qt_widgets import Card
@@ -27,6 +31,7 @@ PRESSURE_UNITS = {"rms_pa": "Pa", "peak_abs_pa": "Pa", "dominant_amplitude_pa": 
 MAP_VARIABLES = {"h2_fraction": ("H2 in fuel", "%", 100),
                  "phi_stage1": ("Stage-1 phi", "", 1),
                  "phi_overall": ("Overall phi", "", 1),
+                 "bulk_velocity": ("Stage-1 inlet bulk velocity", "m/s", 1),
                  "power_kw": ("Thermal input", "kW", 1),
                  "split_rich": ("Stage-1 fuel split", "%", 100)}
 # Workers outlive a pane that is destroyed during an appearance refresh. Qt
@@ -417,6 +422,13 @@ class MappingWorker(_ApplicationWorker):
             grid = np.full(len(self.points), np.nan)
             grid[feasible] = values
             result[name] = grid
+        if self.config.throughput == "bulk_velocity":
+            # Thermal input is an exact function of the searched variables, so
+            # it is calculated at each cell rather than fitted from the tests.
+            power = np.full(len(self.points), np.nan)
+            power[feasible] = [self.config.values(point)["power_kw"]
+                               for point in self.points[feasible]]
+            result["power_kw_mean"] = power
         return result, self.context
 
 
@@ -431,6 +443,9 @@ def point_text(config, point):
     request = config.request(point)
     parts = [f"H2 {request.h2_fraction * 100:.4g}%",
              f"φ1 {request.phi_stage1:.5g}", f"φ overall {request.phi_global:.5g}"]
+    if config.throughput == "bulk_velocity":
+        parts.append(f"inlet velocity {config.values(point)['bulk_velocity']:.4g} m/s")
+        parts.append(f"power {request.power_kw:.4g} kW (derived)")
     if config.optimise_power:
         parts.append(f"power {request.power_kw:.5g} kW")
     if config.optimise_split:
@@ -439,9 +454,11 @@ def point_text(config, point):
 
 
 class ExperimentDialog(QDialog):
-    def __init__(self, request=None, parent=None, *, mexa=None, dual_pressure=None):
+    def __init__(self, request=None, parent=None, *, mexa=None, dual_pressure=None,
+                 inlet_area_mm2=None):
         super().__init__(parent)
         self._mexa = mexa
+        self._stored_area = getattr(request, "inlet_area_mm2", None)
         self._dual_pressure = request is None if dual_pressure is None else bool(dual_pressure)
         self.setWindowTitle("New Bayesian experiment")
         self.resize(theme.scale(600), theme.scale(650))
@@ -473,15 +490,37 @@ class ExperimentDialog(QDialog):
         self.pressure_metric.setCurrentIndex(max(0, self.pressure_metric.findData(
             getattr(request, "pressure_metric", "rms_pa"))))
         form.addRow("Pressure response to map", self.pressure_metric)
+        self.pressure_acquisition = QComboBox()
+        self.pressure_acquisition.setAccessibleName("Pressure used to choose the next test")
+        self.pressure_acquisition.addItem("Larger of the two transducers", "larger_transducer")
+        self.pressure_acquisition.addItem(
+            "Both transducers equally (dominant spectral amplitude)", "mean_of_transducers")
+        self.pressure_acquisition.setCurrentIndex(max(0, self.pressure_acquisition.findData(
+            getattr(request, "pressure_acquisition", "larger_transducer"))))
+        form.addRow("Pressure used to choose tests", self.pressure_acquisition)
         existing_names = getattr(request, "variable_names", ())
         self._minimum_initial_points = 4 + sum(
-            name in existing_names for name in ("power_kw", "split_rich"))
+            name in existing_names for name in ("bulk_velocity", "power_kw", "split_rich"))
+        # Ten planned and five minimum completed tests per searched variable; both
+        # follow the checkboxes until edited.
+        self._default_planned = 10 * (self._minimum_initial_points - 1)
+        self._default_min_tests = MIN_TESTS_PER_VARIABLE * (self._minimum_initial_points - 1)
+        self.planned_tests = None
+        self.min_tests = None
+        self.min_improvement_ppm = DEFAULT_MIN_IMPROVEMENT_PPM
+        self.gain_fraction = DEFAULT_GAIN_FRACTION
+        self.consecutive = DEFAULT_CONSECUTIVE
         for key, title, value in (
             ("power", "Nominal/fixed thermal input (kW)", getattr(request, "power_kw", 10)),
             ("split", "Nominal/fixed stage-1 fuel split (%)", 100 * getattr(request, "split_rich", 1)),
             ("reference", "Reporting reference O2 (dry vol%)", getattr(request, "reference_o2", 15)),
             ("initial", "Initial space-filling points",
              getattr(request, "initial_points", None) or self._minimum_initial_points),
+            ("planned", "Planned completed tests (blank = no plan)", self._default_planned),
+            ("min_tests", "Minimum completed tests before convergence", self._default_min_tests),
+            ("min_improvement", "Smallest NO improvement that matters (ppm)", DEFAULT_MIN_IMPROVEMENT_PPM),
+            ("gain", "Mapping convergence threshold (%)", 100 * DEFAULT_GAIN_FRACTION),
+            ("consecutive", "Consecutive suggestions meeting the criteria", DEFAULT_CONSECUTIVE),
             ("pool", "Candidate pool size", getattr(request, "candidate_pool_size", None) or 1024),
             ("window", "Minimum averaging window (s)", getattr(request, "window_seconds", 30)),
             ("mapping_weight", "NO mapping weight (0–1)",
@@ -511,9 +550,27 @@ class ExperimentDialog(QDialog):
             else:
                 form.addRow(title, entry)
         self.objective_mode.currentIndexChanged.connect(self._mapping_options)
+        self.pressure_acquisition.currentIndexChanged.connect(self._mapping_options)
         self._mapping_options()
         self.entries["mapping_weight"].setToolTip(
             "Fraction of mapping information assigned to NO; the remaining fraction is assigned to pressure.")
+        self.entries["planned"].setToolTip(
+            "Completed tests after which Suggest next test pauses until you extend the plan. "
+            "Defaults to ten per searched variable. Leave blank for an open-ended campaign. "
+            "Repeats remain available after the plan is reached.")
+        self.entries["min_tests"].setToolTip(
+            "Convergence is never reported before this many completed tests. "
+            "Defaults to five per searched variable.")
+        self.entries["min_improvement"].setToolTip(
+            "Minimise NO only. Expected improvements below this, or below the measured noise if "
+            "that is larger, are treated as not worth another test.")
+        self.entries["gain"].setToolTip(
+            "Map NO + pressure only. A suggestion meets the criterion when one more test would "
+            "reduce average map uncertainty by at most this percentage.")
+        self.entries["consecutive"].setToolTip(
+            "Number of consecutive model suggestions that must all meet the criteria before the "
+            "campaign is reported as converged. 3 to 5 is recommended. A stopping guide, not proof "
+            "of a global minimum or of a correct map.")
         layout.addLayout(form)
         self.reference_status = note(
             "O₂ reference is copied once or entered manually, then fixed for the campaign.")
@@ -540,6 +597,7 @@ class ExperimentDialog(QDialog):
         self.optional = {}
         existing_bounds = dict(zip(existing_names, getattr(request, "bounds", ())))
         for row, (key, title, scale) in enumerate((
+                ("bulk_velocity", "Search Stage 1 inlet bulk velocity (m/s)", 1),
                 ("power_kw", "Optimise thermal input (kW)", 1),
                 ("split_rich", "Optimise stage-1 fuel split (%)", 100)), 4):
             enabled = key in existing_names
@@ -560,9 +618,27 @@ class ExperimentDialog(QDialog):
             self.optional[key] = (check, pair, scale)
         for check, _pair, _scale in self.optional.values():
             check.toggled.connect(self._update_initial_points)
+            check.toggled.connect(self._update_planned_tests)
+        area_title = "Stage 1 inlet area (mm²)"
+        grid.addWidget(QLabel(area_title), 7, 0)
+        area = self._stored_area if self._stored_area is not None else inlet_area_mm2
+        # repr keeps every digit, so a reopened campaign reproduces its area exactly.
+        area_entry = QLineEdit("" if area is None else repr(float(area)))
+        area_entry.setPlaceholderText("Required for bulk velocity")
+        area_entry.setAccessibleName(area_title)
+        area_entry.setToolTip(
+            "Cross-sectional area that Stage 1 fuel and Stage 1 air pass through. Prefilled from "
+            "the Stage 1 inlet geometry declared on the combustion card, then fixed for the campaign.")
+        grid.addWidget(area_entry, 7, 1, 1, 2)
+        self.entries["inlet_area"] = area_entry
+        self.optional["bulk_velocity"][0].toggled.connect(self._throughput_options)
+        self._throughput_options()
         layout.addLayout(grid)
         layout.addWidget(note(
-            "The first three variables are always searched. Select power or fuel split only when "
+            "The first three variables are always searched. Bulk velocity is the cold-flow "
+            "velocity of Stage 1 fuel plus Stage 1 air through the inlet area at standard "
+            "conditions; when it is searched, thermal input is calculated from it and is not "
+            "an independent setting. Select power or fuel split only when "
             "they can be measured reliably and every value inside the bounds is approved."))
         layout.addWidget(note(
             f"Objective: dry NO × ({O2_CORRECTION_AIR_PERCENT:g} − reference O2) / "
@@ -582,16 +658,36 @@ class ExperimentDialog(QDialog):
 
     def _mapping_options(self):
         mapping = self.objective_mode.currentData() == "map_no_pressure"
-        if mapping and self._dual_pressure:
+        equal_shares = (mapping and self._dual_pressure
+                        and self.pressure_acquisition.currentData() == "mean_of_transducers")
+        if equal_shares:
             self.pressure_metric.setCurrentIndex(
                 self.pressure_metric.findData("dominant_amplitude_pa"))
-        self.pressure_metric.setEnabled(mapping and not self._dual_pressure)
+        self.pressure_metric.setEnabled(mapping and not equal_shares)
         self.pressure_metric.setToolTip(
-            "New mapping campaigns use dominant spectral amplitude for both pressure transducers."
-            if mapping and self._dual_pressure else
-            "Select the pressure response used by this existing one-transducer campaign."
+            "Equal-share mapping uses dominant spectral amplitude for both pressure transducers."
+            if equal_shares else
+            "Response modelled for each pressure transducer. RMS is the mean-removed "
+            "broadband RMS of the whole recording."
+            if mapping else "Pressure mapping is not selected.")
+        self.pressure_acquisition.setEnabled(mapping)
+        self.pressure_acquisition.setToolTip(
+            "With two transducers, each gets its own map. This selects which pressure "
+            "information competes with NO when the next test is chosen."
             if mapping else "Pressure mapping is not selected.")
         self.entries["mapping_weight"].setEnabled(mapping)
+        self.entries["gain"].setEnabled(mapping)
+        self.entries["min_improvement"].setEnabled(not mapping)
+
+    def _throughput_options(self, *_args):
+        """Bulk velocity and thermal input describe the same thing; search one."""
+        velocity = self.optional["bulk_velocity"][0].isChecked()
+        power_check = self.optional["power_kw"][0]
+        if velocity:
+            power_check.setChecked(False)
+        power_check.setEnabled(not velocity)
+        self.entries["power"].setEnabled(not velocity)
+        self.entries["inlet_area"].setEnabled(velocity)
 
     def _update_initial_points(self):
         minimum = 4 + sum(check.isChecked() for check, _pair, _scale in self.optional.values())
@@ -599,6 +695,16 @@ class ExperimentDialog(QDialog):
         if entry.text().strip() == str(self._minimum_initial_points):
             entry.setText(str(minimum))
         self._minimum_initial_points = minimum
+
+    def _update_planned_tests(self):
+        variables = 3 + sum(check.isChecked() for check, _pair, _scale in self.optional.values())
+        for key, attribute, default in (("planned", "_default_planned", 10 * variables),
+                                        ("min_tests", "_default_min_tests",
+                                         MIN_TESTS_PER_VARIABLE * variables)):
+            entry = self.entries[key]
+            if entry.text().strip() == str(getattr(self, attribute)):
+                entry.setText(str(default))
+            setattr(self, attribute, default)
 
     def accept(self):
         try:
@@ -625,10 +731,34 @@ class ExperimentDialog(QDialog):
                 optimise_power=selected["power_kw"], optimise_split=selected["split_rich"],
                 candidate_pool_size=int(pool), objective_mode=self.objective_mode.currentData(),
                 pressure_metric=self.pressure_metric.currentData(),
-                mapping_no_weight=finite(self.entries["mapping_weight"].text(), "Mapping NO weight"))
+                mapping_no_weight=finite(self.entries["mapping_weight"].text(), "Mapping NO weight"),
+                throughput="bulk_velocity" if selected["bulk_velocity"] else "power",
+                inlet_area_mm2=(finite(self.entries["inlet_area"].text(), "Stage 1 inlet area")
+                                if selected["bulk_velocity"] else self._stored_area),
+                pressure_acquisition=self.pressure_acquisition.currentData())
+
+            def whole(key, name):
+                value = finite(self.entries[key].text(), name)
+                if not value.is_integer():
+                    raise ValueError(f"{name} must be a whole number.")
+                return int(value)
+
+            planned = (whole("planned", "Planned completed tests")
+                       if self.entries["planned"].text().strip() else None)
+            min_tests = whole("min_tests", "Minimum completed tests before convergence")
+            min_improvement = finite(self.entries["min_improvement"].text(),
+                                     "Smallest NO improvement that matters")
+            gain = finite(self.entries["gain"].text(), "Mapping convergence threshold") / 100
+            consecutive = whole("consecutive", "Consecutive suggestions meeting the criteria")
+            validate_plan({"planned_tests": planned, "min_tests": min_tests,
+                           "min_improvement_ppm": min_improvement, "gain_fraction": gain,
+                           "consecutive": consecutive, "extensions": []}, self.config)
         except ValueError as exc:
             self.error.setText(str(exc))
             return
+        self.planned_tests, self.min_tests = planned, min_tests
+        self.min_improvement_ppm, self.gain_fraction = min_improvement, gain
+        self.consecutive = consecutive
         super().accept()
 
     def _record_reference_o2(self):
@@ -713,6 +843,20 @@ class OptimiserPane(Card):
         self.load_button = self._button("Load target fields", self.controller.prepare_targets, line)
         self.load_button.setToolTip("Populate the existing controller fields. Does not send commands.")
         layout.addLayout(line)
+        self.plan_status = note("")
+        self.plan_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.plan_status)
+        row = QHBoxLayout()
+        self.extend_count = QSpinBox()
+        self.extend_count.setRange(1, MAX_TRIALS)
+        self.extend_count.setValue(5)
+        self.extend_count.setAccessibleName("Tests to add to the plan")
+        self.extend_count.setToolTip("Completed tests to add to the plan. Does not change any flow.")
+        row.addWidget(self.extend_count)
+        self.extend_button = self._button(
+            "Extend plan", lambda: self.controller.extend_plan(self.extend_count.value()), row)
+        row.addStretch(1)
+        layout.addLayout(row)
         layout.addWidget(note("Review all fields, then apply through the existing controls. "
                               "Switch off the pilot using your established procedure."))
         self.pilot = QCheckBox("Pilot is off throughout this measurement")
@@ -851,7 +995,9 @@ class OptimiserPane(Card):
         row.addWidget(self.map_uncertainty)
         layout.addLayout(row)
         self.map_plots, self.map_images, self.map_colours = [], [], []
-        for title, unit in (("Corrected dry NO", "ppm"), ("Pressure", "Pa"), ("Pressure", "Pa")):
+        # NO, up to two transducers, the larger of the two, and derived thermal input.
+        for title, unit in (("Corrected dry NO", "ppm"), ("Pressure", "Pa"), ("Pressure", "Pa"),
+                            ("Pressure", "Pa"), ("Thermal input", "kW")):
             plot = pg.PlotWidget(background=theme.BG)
             plot.setFixedHeight(theme.scale(240))
             plot.setTitle(title)
@@ -941,12 +1087,12 @@ class OptimiserPane(Card):
         feasible = np.asarray(feasible, dtype=bool)
         if not feasible.any():
             raise ValueError("This fixed slice has no points inside the bounds and current flow ceilings.")
+        transducers = deepcopy(_dual_transducers(getattr(self.controller, "tdms_source", None)))
         context = {"signature": self._current_map_signature(), "x": x, "y": y,
                    "x_name": x_name, "y_name": y_name,
                    "feasible": feasible,
-                   "metric": config.pressure_metric,
-                   "transducers": deepcopy(_dual_transducers(
-                       getattr(self.controller, "tdms_source", None))),
+                   "metric": dual_pressure_metric(config) if transducers else config.pressure_metric,
+                   "transducers": transducers,
                    "slice_label": self.map_slice_label.text()}
         self.map_worker = MappingWorker(config, experiment.trials, points, context)
         self.map_worker.succeeded.connect(self._maps_ready)
@@ -989,13 +1135,23 @@ class OptimiserPane(Card):
         x, y = context["x"] * xs, context["y"] * ys
         dx, dy = x[1] - x[0], y[1] - y[0]
         transducers = context.get("transducers")
-        descriptors = ([('no', "Corrected dry NO", "ppm")]
-                       + ([(item["id"], item["label"], "Pa RMS") for item in transducers]
-                          if transducers else
-                          [("pressure", PRESSURE_LABELS[context["metric"]],
-                            PRESSURE_UNITS[context["metric"]])]))
-        for index, (key, label, unit) in enumerate(descriptors):
-            values = np.asarray(result[f"{key}_{suffix}"]).reshape(20, 20)
+        metric_label = PRESSURE_LABELS[context["metric"]]
+        metric_unit = PRESSURE_UNITS[context["metric"]]
+        # (result key, title, unit, fitted model?) in display order.
+        descriptors = [("no", "Corrected dry NO", "ppm", True)]
+        if transducers:
+            descriptors += [(item["id"], f"{item['label']} · {metric_label}", metric_unit, True)
+                            for item in transducers]
+            if "pressure_larger_mean" in result:
+                descriptors.append(("pressure_larger",
+                                    f"Larger of the two transducers · {metric_label}",
+                                    metric_unit, True))
+        else:
+            descriptors.append(("pressure", metric_label, metric_unit, True))
+        if "power_kw_mean" in result:
+            descriptors.append(("power_kw", "Thermal input", "kW", False))
+        for index, (key, label, unit, modelled) in enumerate(descriptors):
+            values = np.asarray(result[f"{key}_{suffix if modelled else 'mean'}"]).reshape(20, 20)
             image, plot = self.map_images[index], self.map_plots[index]
             image.setImage(values, autoLevels=False)
             image.setRect(QRectF(x[0] - dx / 2, y[0] - dy / 2,
@@ -1006,17 +1162,24 @@ class OptimiserPane(Card):
             plot.setLabel("bottom", xl, units=xu or None)
             plot.setLabel("left", yl, units=yu or None)
             title = f"{label} ({unit})"
-            plot.setTitle(title + (" — latent SD" if uncertainty else " — predicted mean"))
+            plot.setTitle(title + (" — calculated from the flow equations" if not modelled else
+                                   " — latent SD" if uncertainty else " — predicted mean"))
             plot.setRange(xRange=(x[0], x[-1]), yRange=(y[0], y[-1]), padding=0)
         for index, plot in enumerate(self.map_plots):
             plot.setVisible(index < len(descriptors))
+            if index >= len(descriptors):
+                self.map_images[index].clear()
 
     def _update_map_controls(self):
         experiment = self.controller.experiment
         mapping = bool(experiment and experiment.config.objective_mode == "map_no_pressure")
         dual = bool(_dual_transducers(getattr(self.controller, "tdms_source", None)))
+        shown = 3 if dual else 2
+        if experiment:
+            shown += dual and experiment.config.pressure_acquisition == "larger_transducer"
+            shown += experiment.config.throughput == "bulk_velocity"
         for index, plot in enumerate(self.map_plots):
-            plot.setVisible(index < (3 if dual else 2))
+            plot.setVisible(index < shown)
         count = sum(t["status"] == "completed" for t in experiment.trials) if experiment else 0
         self.map_refresh_button.setEnabled(bool(mapping and count >= experiment.config.initial_points
                                                and self.map_worker is None and not self.controller.busy))
@@ -1107,7 +1270,8 @@ class OptimiserPane(Card):
         if not self._switch_ok():
             return
         dialog = ExperimentDialog(self.controller.session.autocalc_request, self,
-                                  mexa=self.controller.session.mexa, dual_pressure=True)
+                                  mexa=self.controller.session.mexa, dual_pressure=True,
+                                  inlet_area_mm2=self.controller.session.combustion_area(SCOPE_STAGE1))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -1116,7 +1280,10 @@ class OptimiserPane(Card):
         if path:
             if not path.lower().endswith(SUFFIX):
                 path += SUFFIX
-            self.controller.create(path, dialog.config)
+            self.controller.create(path, dialog.config, planned_tests=dialog.planned_tests,
+                                   min_tests=dialog.min_tests,
+                                   min_improvement_ppm=dialog.min_improvement_ppm,
+                                   gain_fraction=dialog.gain_fraction, consecutive=dialog.consecutive)
 
     def _open(self):
         if not self._switch_ok():
@@ -1228,7 +1395,31 @@ class OptimiserPane(Card):
         self.settled.setEnabled(not capturing and not window and not armed)
         self.new_button.setEnabled(not busy and not capturing)
         self.open_button.setEnabled(not busy and not capturing)
-        self.ask_button.setEnabled(bool(experiment and not pending and not busy))
+        plan_reached = bool(experiment and experiment.plan_reached)
+        self.ask_button.setEnabled(bool(experiment and not pending and not busy and not plan_reached))
+        self.ask_button.setToolTip(
+            "The planned number of completed tests is reached. Extend the plan to suggest more "
+            "tests; repeats remain available from History." if plan_reached else "")
+        if experiment is None:
+            self.plan_status.setText("")
+        else:
+            planned = experiment.planned_tests
+            completed = experiment.completed_count
+            assessment = experiment.convergence()
+            text = (f"Plan: {completed} of {planned} tests completed" if planned is not None else
+                    f"No planned test count: {completed} tests completed")
+            text += f" · {assessment['headline']}."
+            if plan_reached:
+                text += " Extend the plan to suggest more tests."
+            lines = [text]
+            if assessment["detail"]:
+                lines.append(assessment["detail"])
+            lines.extend(f"Note: {warning}" for warning in assessment["warnings"])
+            self.plan_status.setText("\n".join(lines))
+            self.extend_button.setText("Set plan" if planned is None else "Extend plan")
+        extend_enabled = bool(experiment and not c.busy)
+        self.extend_count.setEnabled(extend_enabled)
+        self.extend_button.setEnabled(extend_enabled)
         self.load_button.setEnabled(bool(pending and not busy and not capturing and not window and not armed))
         self.start_button.setEnabled(bool(pending and not busy and not capturing and not window
                                           and not armed and not mapping))
@@ -1324,9 +1515,15 @@ class OptimiserPane(Card):
                              f"{experiment.path.name}\n{experiment.config.dimensions} variables · "
                              f"{experiment.config.initial_points} initial points · "
                              f"NO @ {experiment.config.reference_o2:g}% O2"
+                             + (f" · inlet velocity over {experiment.config.inlet_area_mm2:g} mm²"
+                                if experiment.config.throughput == "bulk_velocity" else "")
                              + ((" · map NO + two pressure peak spectra"
-                                 if _dual_transducers(getattr(c, "tdms_source", None)) else
-                                 f" · map NO + {PRESSURE_LABELS[experiment.config.pressure_metric]}")
+                                 if _dual_transducers(getattr(c, "tdms_source", None))
+                                 and experiment.config.pressure_acquisition != "larger_transducer" else
+                                 f" · map NO + {PRESSURE_LABELS[experiment.config.pressure_metric]}"
+                                 + (" (search on the larger transducer)"
+                                    if experiment.config.pressure_acquisition == "larger_transducer"
+                                    else ""))
                                 if mapping else ""))
         if experiment:
             names = ", ".join(experiment.config.variable_names)
@@ -1377,12 +1574,17 @@ class OptimiserPane(Card):
         for t in experiment.trials if experiment else []:
             outcome = f"{t['result']['corrected_no']:.3f} ppm" if t["status"] == "completed" else t["status"]
             metric = experiment.config.pressure_metric
+            dual_metric = dual_pressure_metric(experiment.config)
             trial_transducers = _dual_transducers(t.get("pressure"))
             if trial_transducers:
                 for transducer in trial_transducers:
-                    value = _transducer_metric(transducer, "dominant_amplitude_pa")
+                    value = _transducer_metric(transducer, dual_metric)
                     if value is not None:
-                        outcome += f" · {transducer['label']} {value:.4g} Pa RMS"
+                        outcome += f" · {transducer['label']} {value:.4g} {PRESSURE_UNITS[dual_metric]}"
+                readings = [_transducer_metric(item, dual_metric) for item in trial_transducers]
+                if (experiment.config.pressure_acquisition == "larger_transducer"
+                        and None not in readings):
+                    outcome += f" · larger {max(readings):.4g} {PRESSURE_UNITS[dual_metric]}"
             elif metric in (t.get("pressure") or {}):
                 outcome += f" · {PRESSURE_LABELS[metric]} {t['pressure'][metric]:.4g} {PRESSURE_UNITS[metric]}"
             item = QListWidgetItem(f"#{t['number']}  {outcome}  ·  "
@@ -1400,15 +1602,17 @@ class OptimiserPane(Card):
         self.outcome_plot.setVisible(bool(mapping or any(t.get("pressure") for t in completed)))
         if experiment:
             metric = experiment.config.pressure_metric
+            dual_metric = dual_pressure_metric(experiment.config)
             dual_trials = [t for t in completed if _dual_transducers(t.get("pressure"))]
             if dual_trials:
-                self.outcome_plot.setLabel("left", "Dominant spectral amplitude", units="Pa RMS")
+                self.outcome_plot.setLabel("left", PRESSURE_LABELS[dual_metric],
+                                           units=PRESSURE_UNITS[dual_metric])
                 for index, sensor_id in enumerate(TdmsSourceDialog.TRANSDUCER_IDS):
                     paired = []
                     for trial in dual_trials:
                         item = next((entry for entry in _dual_transducers(trial["pressure"])
                                      if entry["id"] == sensor_id), None)
-                        value = _transducer_metric(item, "dominant_amplitude_pa")
+                        value = _transducer_metric(item, dual_metric)
                         if value is not None:
                             paired.append((trial, item, value))
                     if paired:

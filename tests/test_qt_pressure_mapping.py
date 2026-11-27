@@ -490,11 +490,12 @@ class QtPressureMappingTests(unittest.TestCase):
             result[f"{key}_sd"] = np.full(400, value + 10)
         pane._map_result = (result, context)
         pane._draw_maps()
-        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images], [1, 2, 3])
+        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images[:3]], [1, 2, 3])
+        self.assertTrue(all(image.image is None for image in pane.map_images[3:]))
         self.assertIn("Combustor", pane.map_plots[1].getPlotItem().titleLabel.text)
         self.assertIn("Plenum", pane.map_plots[2].getPlotItem().titleLabel.text)
         pane.map_uncertainty.setChecked(True)
-        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images], [11, 12, 13])
+        self.assertEqual([float(image.image[0, 0]) for image in pane.map_images[:3]], [11, 12, 13])
 
     def test_source_settings_and_legacy_tail_controls(self):
         pane = self.pane()

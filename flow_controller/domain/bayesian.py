@@ -4,6 +4,10 @@ No Qt, persistence, serial I/O or actuation. NO optimisation integrates over
 uncertain latent baseline values (Monte Carlo noisy expected improvement).
 Joint NO/pressure mapping instead reduces integrated latent response variance.
 Parameter bounds and flow ceilings are known constraints, not learned safety.
+
+Throughput is either a thermal input (fixed, or searched) or a searched Stage 1
+inlet bulk velocity, in which case thermal input is a derived result of the
+blend, stage-1 phi, fuel split and velocity rather than an independent input.
 """
 
 from __future__ import annotations
@@ -17,21 +21,37 @@ import warnings
 import numpy as np
 
 from .gas_properties import O2_CORRECTION_AIR_PERCENT
-from .rql import AutoCalcRequest, auto_calc
+from .rql import (AutoCalcRequest, auto_calc, power_for_stage1_velocity,
+                  stage1_bulk_velocity)
 
 
 AIR_O2 = O2_CORRECTION_AIR_PERCENT  # compatibility name: reporting convention
 BASE_VARIABLES = ("h2_fraction", "phi_stage1", "phi_overall")
-OPTIONAL_VARIABLES = ("power_kw", "split_rich")
+OPTIONAL_VARIABLES = ("bulk_velocity", "power_kw", "split_rich")
+THROUGHPUTS = ("power", "bulk_velocity")
+PRESSURE_METRICS = ("rms_pa", "peak_abs_pa", "dominant_amplitude_pa")
+# How two transducers enter the mapping acquisition. "mean_of_transducers" is
+# the established behaviour (dominant spectral amplitude, equal shares);
+# "larger_transducer" models each transducer's chosen metric and searches on
+# the larger of the two.
+PRESSURE_ACQUISITIONS = ("mean_of_transducers", "larger_transducer")
+MAX_INLET_AREA_MM2 = 3_141_592.6536  # a 2 m bore; anything larger is a units mistake
 VARIABLE_LABELS = {
     "h2_fraction": "H2 fraction",
     "phi_stage1": "stage-1 phi",
     "phi_overall": "overall phi",
+    "bulk_velocity": "stage-1 inlet bulk velocity",
     "power_kw": "thermal input",
     "split_rich": "stage-1 fuel split",
 }
 # Public compatibility name used by older callers and documentation.
 PARAMETERS = tuple(VARIABLE_LABELS[key] for key in BASE_VARIABLES)
+# Matérn length-scale bounds in normalised 0..1 coordinates (all GP models).
+LENGTH_SCALE_BOUNDS = (.03, 3.0)
+# Convergence diagnostics stored with each Minimise NO model suggestion; they
+# never change which point is suggested.
+LCB_MULTIPLIER = 2.0
+ELSEWHERE_RADIUS = 0.15
 
 
 def finite(value, name):
@@ -60,12 +80,29 @@ class SearchConfig:
     objective_mode: str = "minimise_no"
     pressure_metric: str = "rms_pa"
     mapping_no_weight: float = 0.5
+    throughput: str = "power"
+    inlet_area_mm2: float | None = None
+    pressure_acquisition: str = "mean_of_transducers"
 
     def __post_init__(self):
         if self.objective_mode not in ("minimise_no", "map_no_pressure"):
             raise ValueError("Objective mode must be minimise_no or map_no_pressure.")
-        if self.pressure_metric not in ("rms_pa", "peak_abs_pa", "dominant_amplitude_pa"):
+        if self.pressure_metric not in PRESSURE_METRICS:
             raise ValueError("Pressure metric must be rms_pa, peak_abs_pa or dominant_amplitude_pa.")
+        if self.throughput not in THROUGHPUTS:
+            raise ValueError("Throughput must be power or bulk_velocity.")
+        if self.pressure_acquisition not in PRESSURE_ACQUISITIONS:
+            raise ValueError(
+                "Pressure acquisition must be mean_of_transducers or larger_transducer.")
+        velocity = self.throughput == "bulk_velocity"
+        if self.inlet_area_mm2 is not None or velocity:
+            if self.inlet_area_mm2 is None:
+                raise ValueError("Bulk-velocity limits require the Stage 1 inlet area.")
+            area = finite(self.inlet_area_mm2, "Stage 1 inlet area")
+            if not 0 < area <= MAX_INLET_AREA_MM2:
+                raise ValueError("Stage 1 inlet area must be greater than 0 and at most "
+                                 f"{MAX_INLET_AREA_MM2:g} mm2.")
+            object.__setattr__(self, "inlet_area_mm2", area)
         weight = finite(self.mapping_no_weight, "Mapping NO weight")
         if not 0 < weight < 1:
             raise ValueError("Mapping NO weight must be strictly between 0 and 1 so both responses count.")
@@ -83,7 +120,10 @@ class SearchConfig:
         for name in ("optimise_power", "optimise_split"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false.")
-        dimensions = 3 + self.optimise_power + self.optimise_split
+        if velocity and self.optimise_power:
+            raise ValueError("Thermal input follows from bulk velocity, blend, stage-1 phi and "
+                             "fuel split; it cannot also be searched.")
+        dimensions = 3 + velocity + self.optimise_power + self.optimise_split
         if self.initial_points is None:
             object.__setattr__(self, "initial_points", dimensions + 1)
         if (isinstance(self.initial_points, bool)
@@ -125,7 +165,8 @@ class SearchConfig:
     @property
     def variable_names(self):
         names = list(BASE_VARIABLES)
-        enabled = {"power_kw": self.optimise_power, "split_rich": self.optimise_split}
+        enabled = {"bulk_velocity": self.throughput == "bulk_velocity",
+                   "power_kw": self.optimise_power, "split_rich": self.optimise_split}
         names.extend(name for name in OPTIONAL_VARIABLES if enabled[name])
         return tuple(names)
 
@@ -141,8 +182,14 @@ class SearchConfig:
         for name, (lo, hi) in zip(self.variable_names, self.bounds):
             if not lo <= values[name] <= hi:
                 raise ValueError(f"{VARIABLE_LABELS[name]} is outside this experiment's bounds.")
-        values.setdefault("power_kw", self.power_kw)
         values.setdefault("split_rich", self.split_rich)
+        if self.throughput == "bulk_velocity":
+            # Thermal input is a result here, not an input: see rql.py.
+            values["power_kw"] = power_for_stage1_velocity(
+                values["bulk_velocity"], self.inlet_area_mm2, values["h2_fraction"],
+                values["phi_stage1"], values["split_rich"])
+        else:
+            values.setdefault("power_kw", self.power_kw)
         return values
 
     def request(self, point):
@@ -155,6 +202,9 @@ class SearchConfig:
         point = list(window["observed_point"])
         if len(point) != 3:
             raise ValueError("Measured operating point must have three combustion coordinates.")
+        if self.throughput == "bulk_velocity":
+            point.append(finite(stage1_bulk_velocity(window["mean_flows"], self.inlet_area_mm2),
+                                "Measured stage-1 inlet bulk velocity"))
         if self.optimise_power:
             point.append(finite(window["power_kw"], "Measured thermal input"))
         if self.optimise_split:
@@ -229,9 +279,26 @@ def noisy_expected_improvement(gp, baseline, candidates, rng, draws=128):
     return np.maximum(ei.mean(axis=0), 0), mu_c, np.sqrt(var_c)
 
 
+def dual_pressure_metric(config):
+    """Metric read from each transducer of a two-transducer summary."""
+    return (config.pressure_metric if config.pressure_acquisition == "larger_transducer"
+            else "dominant_amplitude_pa")
+
+
+def mapping_response_names(config, dual):
+    """Stable keys for the fitted mapping models, in model order."""
+    if not dual:
+        return ("no", "pressure")
+    if config.pressure_acquisition == "larger_transducer":
+        return ("no", "pressure_1", "pressure_2", "pressure_larger")
+    return ("no", "pressure_1", "pressure_2")
+
+
 def _pressure_values(config, completed):
+    """Pressure response per completed trial: N values, or N x 2 for two transducers."""
     values = []
     dual = None
+    metric = dual_pressure_metric(config)
     for trial in completed:
         pressure = trial.get("pressure")
         current_dual = isinstance(pressure, dict) and "transducers" in pressure
@@ -247,9 +314,9 @@ def _pressure_values(config, completed):
             row = []
             for item in entries:
                 metrics = item.get("metrics")
-                if not isinstance(metrics, dict) or "dominant_amplitude_pa" not in metrics:
-                    raise ValueError("Dual pressure mapping requires dominant_amplitude_pa for each transducer.")
-                value = finite(metrics["dominant_amplitude_pa"], "Pressure dominant_amplitude_pa")
+                if not isinstance(metrics, dict) or metric not in metrics:
+                    raise ValueError(f"Dual pressure mapping requires {metric} for each transducer.")
+                value = finite(metrics[metric], f"Pressure {metric}")
                 if value < 0:
                     raise ValueError("Pressure amplitude must be nonnegative.")
                 row.append(value)
@@ -269,6 +336,10 @@ def _fit_mapping_models(config, completed, seed):
 
     NO's supplied SEM contributes known observation variance. Pressure summaries
     have no inferred SEM: pressure observation noise is fitted from the data.
+
+    Returns the NO model first, then one pressure model per transducer. With
+    two transducers and larger_transducer acquisition, a final model is fitted
+    to the larger of the two readings at each trial.
     """
     from sklearn.exceptions import ConvergenceWarning
     from sklearn.gaussian_process import GaussianProcessRegressor
@@ -289,6 +360,8 @@ def _fit_mapping_models(config, completed, seed):
     responses = [(no, errors)]
     if pressure.ndim == 2:
         responses.extend((pressure[:, index], np.zeros(len(completed))) for index in range(2))
+        if config.pressure_acquisition == "larger_transducer":
+            responses.append((pressure.max(axis=1), np.zeros(len(completed))))
     else:
         responses.append((pressure, np.zeros(len(completed))))
     for response, sem in responses:
@@ -298,7 +371,7 @@ def _fit_mapping_models(config, completed, seed):
         if scale == 0:
             scale = max(abs(centre), 1.0)
         kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-            [.3] * config.dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+            [.3] * config.dimensions, LENGTH_SCALE_BOUNDS, nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
         gp = GaussianProcessRegressor(kernel=kernel, alpha=(sem / scale) ** 2 + 1e-8,
                                      n_restarts_optimizer=1, random_state=seed)
         with threadpool_limits(limits=1), warnings.catch_warnings():
@@ -349,17 +422,14 @@ def predict_mapping(config, trials, points):
     for point in points:
         config.targets(point)
     pressure_values = _pressure_values(config, completed)
-    dual = pressure_values.ndim == 2
-    result = ({"no_mean": [], "no_sd": [], "pressure_1_mean": [], "pressure_1_sd": [],
-               "pressure_2_mean": [], "pressure_2_sd": []} if dual else
-              {"no_mean": [], "no_sd": [], "pressure_mean": [], "pressure_sd": []})
+    names = mapping_response_names(config, pressure_values.ndim == 2)
+    result = {f"{name}_{suffix}": [] for name in names for suffix in ("mean", "sd")}
     if not points:
         return result
     bounds = np.asarray(config.bounds)
     x = (np.asarray(points, dtype=float) - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
     with threadpool_limits(limits=1):
         models = _fit_mapping_models(config, completed, seed=0)
-        names = ("no", "pressure_1", "pressure_2") if dual else ("no", "pressure")
         for name, (gp, centre, scale) in zip(names, models):
             _, mean, _, _, variance = _latent_posterior(gp, np.empty((0, config.dimensions)), x)
             result[name + "_mean"] = (mean * scale + centre).tolist()
@@ -392,10 +462,11 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     sobol_count = len(pool)
     mapping = config.objective_mode == "map_no_pressure"
     completed = [t for t in trials if t["status"] == "completed"]
-    dual_mapping = False
+    dual_mapping = larger_mapping = False
     if mapping:
         pressure_values = _pressure_values(config, completed)
         dual_mapping = pressure_values.ndim == 2
+        larger_mapping = dual_mapping and config.pressure_acquisition == "larger_transducer"
         # Keep quadrature locations independent of response values and of the
         # exclusion of previous trial locations from the suggestion pool.
         reference = np.asarray([candidate for candidate in pool
@@ -427,11 +498,14 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         "corrected_sem": trial["result"].get("corrected_sem"),
     } for trial in completed]
     if mapping:
-        effective_pressure_metric = "dominant_amplitude_pa" if dual_mapping else config.pressure_metric
+        effective_pressure_metric = (dual_pressure_metric(config) if dual_mapping
+                                     else config.pressure_metric)
         for payload, trial in zip(training_payload, completed):
             payload.update(pressure=trial["pressure"], pressure_metric=effective_pressure_metric)
     hash_payload = ({"pressure_metric": effective_pressure_metric, "trials": training_payload}
                     if mapping else training_payload)
+    if larger_mapping:
+        hash_payload["pressure_acquisition"] = config.pressure_acquisition
     provenance = {
         "algorithm_version": "fcbo-sobol-maximin-v1",
         "seed": int(seed),
@@ -450,6 +524,8 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         provenance.update(objective_mode=config.objective_mode,
                           pressure_metric=effective_pressure_metric,
                           mapping_no_weight=config.mapping_no_weight)
+        if larger_mapping:
+            provenance["pressure_acquisition"] = config.pressure_acquisition
     if len(completed) < config.initial_points:
         if len(tried):
             scores = np.linalg.norm(pool[:, None, :] - tried[None, :, :], axis=2).min(axis=1)
@@ -466,7 +542,12 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
             pressure_results = [integrated_variance_reduction(model[0], reference, pool)
                                 for model in models[1:]]
         weight = config.mapping_no_weight
-        pressure_score = sum(item[0] for item in pressure_results) / len(pressure_results)
+        if larger_mapping:
+            # Only the larger-of-two model competes with NO for the next test;
+            # the per-transducer models are fitted for the maps and the record.
+            pressure_score = pressure_results[2][0]
+        else:
+            pressure_score = sum(item[0] for item in pressure_results) / len(pressure_results)
         score = weight * no_score + (1 - weight) * pressure_score
         index = int(np.argmax(score))
         _, no_centre, no_scale = models[0]
@@ -493,7 +574,7 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
         else:
             response["method"] = "Bayesian NO/two-pressure integrated variance reduction"
             predictions = []
-            for number, (model, values) in enumerate(zip(models[1:], pressure_results), 1):
+            for number, (model, values) in enumerate(zip(models[1:3], pressure_results[:2]), 1):
                 mean, sd = values[1], values[2]
                 _, centre, scale = model
                 predicted = float(mean[index] * scale + centre)
@@ -508,6 +589,19 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
             response["pressure_latent_sd_pa"] = predictions[worst][1]
             response["pressure_model"] = response[f"pressure_{worst + 1}_model"]
             response["algorithm_version"] = "fcbo-matern52-no-dual-pressure-ivr-v1"
+            if larger_mapping:
+                mean, sd = pressure_results[2][1:]
+                _, centre, scale = models[3]
+                response.update(
+                    method="Bayesian NO/larger-pressure integrated variance reduction",
+                    algorithm_version="fcbo-matern52-no-larger-pressure-ivr-v1",
+                    predicted_pressure_larger_pa=float(mean[index] * scale + centre),
+                    pressure_larger_latent_sd_pa=float(sd[index] * scale),
+                    pressure_larger_model=_mapping_model_metadata(models[3], "Pa"),
+                    mapping_pressure_larger_score=float(pressure_results[2][0][index]))
+                response["predicted_pressure_pa"] = response["predicted_pressure_larger_pa"]
+                response["pressure_latent_sd_pa"] = response["pressure_larger_latent_sd_pa"]
+                response["pressure_model"] = response["pressure_larger_model"]
         return response
 
     x = np.array([config.observed_vector(t["window"]) for t in completed])
@@ -516,14 +610,30 @@ def suggest(config, trials, limits=None, seed=0, pool_size=None):
     centre, scale = float(y.mean()), max(float(y.std()), 1.0)
     errors = np.array([t["result"].get("corrected_sem") or 0 for t in completed]) / scale
     kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(
-        [.3] * dimensions, (.03, 3.0), nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
+        [.3] * dimensions, LENGTH_SCALE_BOUNDS, nu=2.5) + WhiteKernel(.01, (1e-6, 1.0))
     gp = GaussianProcessRegressor(kernel=kernel, alpha=errors ** 2 + 1e-8,
                                  n_restarts_optimizer=1, random_state=seed)
     with threadpool_limits(limits=1), warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
         gp.fit(x, (y - centre) / scale)
         acquisition, mean, std = noisy_expected_improvement(gp, np.unique(x, axis=0), pool, rng)
+        # Convergence diagnostics only: computed after the acquisition, with no
+        # further use of rng, so they cannot change the suggested point.
+        unique_x = np.unique(x, axis=0)
+        _, observed_mean = _latent_posterior(gp, np.empty((0, dimensions)), unique_x)[:2]
     index = int(np.argmax(acquisition))
+    best_index = int(np.argmin(observed_mean))
+    best_location = unique_x[best_index]
+    elsewhere = np.max(np.abs(pool - best_location[None, :]), axis=1) > ELSEWHERE_RADIUS
+    lower_bound = (mean - LCB_MULTIPLIER * std) * scale + centre
+    provenance.update({
+        "best_model_no": float(observed_mean[best_index] * scale + centre),
+        "best_model_point": (lower + best_location * span).tolist(),
+        "lowest_lcb_elsewhere": float(lower_bound[elsewhere].min()) if elsewhere.any() else None,
+        "lcb_multiplier": LCB_MULTIPLIER,
+        "elsewhere_radius": ELSEWHERE_RADIUS,
+        "noise_sd_ppm": float(math.sqrt(float(gp.kernel_.k2.noise_level)) * scale),
+    })
     provenance.update({
         "algorithm_version": "fcbo-matern52-nei-v1",
         "fitted_kernel": str(gp.kernel_),
